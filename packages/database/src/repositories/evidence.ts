@@ -30,7 +30,7 @@ export async function upsertEvidence(
       observedAt: input.observedAt,
       capturedAt: input.capturedAt,
       confidence: input.confidence,
-      rawHash: input.rawHash,
+      ...(input.rawHash !== undefined ? { rawHash: input.rawHash } : {}),
       ...(input.normalizedHash !== undefined
         ? { normalizedHash: input.normalizedHash }
         : {}),

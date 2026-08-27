@@ -143,7 +143,7 @@ export const evidence = pgTable(
     observedAt: timestamptz("observed_at").notNull(),
     capturedAt: timestamptz("captured_at").notNull(),
     confidence: confidenceLevelEnum("confidence").notNull(),
-    rawHash: text("raw_hash").notNull(),
+    rawHash: text("raw_hash"),
     normalizedHash: text("normalized_hash"),
     metadata: jsonb("metadata"),
     createdAt: createdAt(),

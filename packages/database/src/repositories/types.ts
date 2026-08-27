@@ -15,7 +15,9 @@ export interface EvidenceRecordInput {
   observedAt: Date;
   capturedAt: Date;
   confidence: Confidence;
-  rawHash: string;
+  // Genuine raw-payload hash when the provider transports one; unset means the
+  // raw representation is unavailable (never fabricated from normalized data).
+  rawHash?: string;
   normalizedHash?: string;
   metadata?: Record<string, unknown>;
 }

@@ -8,11 +8,9 @@ import {
   Confidence,
   errored,
   SourceKind,
-  stableStringify,
   unavailable,
   type CapabilityResult,
   type Cursor,
-  type Evidence,
   type InstagramProvider,
   type NormalizedAccountRef,
   type NormalizedComment,
@@ -61,7 +59,6 @@ interface FixtureManifest {
 export interface FixtureProviderOptions {
   fixturesDir: string;
   clock?: () => Date;
-  evidenceSink?: (evidence: Evidence) => void;
 }
 
 function sha256(input: string): string {
@@ -73,17 +70,12 @@ export class FixtureProvider implements InstagramProvider {
 
   private readonly fixturesDir: string;
   private readonly clock: () => Date;
-  private readonly evidenceSink?: (evidence: Evidence) => void;
-  private readonly evidenceStore: Evidence[] = [];
   private manifestCache?: FixtureManifest;
   private fileCache = new Map<string, string>();
 
   constructor(options: FixtureProviderOptions) {
     this.fixturesDir = options.fixturesDir;
     this.clock = options.clock ?? (() => new Date());
-    if (options.evidenceSink !== undefined) {
-      this.evidenceSink = options.evidenceSink;
-    }
     this.sourceId = "fixture:v1";
   }
 
@@ -99,15 +91,12 @@ export class FixtureProvider implements InstagramProvider {
     };
   }
 
-  drainEvidence(): Evidence[] {
-    return this.evidenceStore.splice(0, this.evidenceStore.length);
-  }
-
   async resolveAccount(
     username: string,
   ): Promise<CapabilityResult<NormalizedAccountRef>> {
     const meta = this.meta();
     const profile = await this.loadProfile();
+    const manifest = await this.loadManifest();
     if (profile instanceof ErrorResult) return profile.asResult(meta);
 
     const raw = profile.value;
@@ -133,6 +122,8 @@ export class FixtureProvider implements InstagramProvider {
       ...meta,
       observedAt: raw.captured_at,
       confidence: Confidence.HIGH,
+      rawPayloadHash: sha256(profile.rawText),
+      rawReference: this.manifestRef(manifest.files.profile),
     });
   }
 
@@ -141,6 +132,7 @@ export class FixtureProvider implements InstagramProvider {
   ): Promise<CapabilityResult<NormalizedProfile>> {
     const meta = this.meta(account);
     const loaded = await this.loadProfile();
+    const manifest = await this.loadManifest();
     if (loaded instanceof ErrorResult) return loaded.asResult(meta);
 
     const raw = loaded.value;
@@ -153,20 +145,12 @@ export class FixtureProvider implements InstagramProvider {
     }
 
     const normalized = normalizeProfile(raw);
-    const evidenceId = this.recordEvidence({
-      observationKind: "profile",
-      observationId: `profile:${raw.profile.username}@${raw.captured_at}`,
-      sourceReference: this.manifestRef("profile"),
-      observedAt: raw.captured_at,
-      confidence: Confidence.HIGH,
-      rawPayload: loaded.rawText,
-      normalizedPayload: stableStringify(normalized),
-    });
-    normalized.meta.evidenceId = evidenceId;
     return available(normalized, {
       ...meta,
       observedAt: raw.captured_at,
       confidence: Confidence.HIGH,
+      rawPayloadHash: sha256(loaded.rawText),
+      rawReference: this.manifestRef(manifest.files.profile),
     });
   }
 
@@ -184,37 +168,16 @@ export class FixtureProvider implements InstagramProvider {
       ? { width: raw.canvas.width, height: raw.canvas.height }
       : undefined;
 
-    const stories = raw.stories.map((s) => {
-      const normalized = normalizeStory(s, canvas, raw.captured_at);
-      const evidenceId = this.recordEvidence({
-        observationKind: "story",
-        observationId: `story:${s.id}`,
-        sourceReference: this.manifestRef("stories"),
-        observedAt: raw.captured_at,
-        confidence: Confidence.HIGH,
-        rawPayload: stableStringify(s),
-        normalizedPayload: stableStringify(normalized),
-      });
-      normalized.meta.evidenceId = evidenceId;
-      for (const mention of normalized.mentions) {
-        const mentionEvidenceId = this.recordEvidence({
-          observationKind: "story_mention",
-          observationId: `story_mention:${s.id}:${mention.account.username}`,
-          sourceReference: this.manifestRef("stories"),
-          observedAt: raw.captured_at,
-          confidence: mention.meta.confidence,
-          rawPayload: stableStringify(s.mentions ?? []),
-          normalizedPayload: stableStringify(mention),
-        });
-        mention.meta.evidenceId = mentionEvidenceId;
-      }
-      return normalized;
-    });
+    const stories = raw.stories.map((s) =>
+      normalizeStory(s, canvas, raw.captured_at),
+    );
 
     return available(stories, {
       ...meta,
       observedAt: raw.captured_at,
       confidence: Confidence.HIGH,
+      rawPayloadHash: sha256(rawText),
+      rawReference: this.manifestRef(manifest.files.stories),
     });
   }
 
@@ -253,24 +216,14 @@ export class FixtureProvider implements InstagramProvider {
     if (!parsed.success) return this.schemaError(meta, parsed.error.message);
 
     const raw: RawPostsPageV1 = parsed.data;
-    const posts = normalizePosts(raw).map((post) => {
-      const evidenceId = this.recordEvidence({
-        observationKind: "post",
-        observationId: `post:${post.postId}`,
-        sourceReference: this.manifestRef(files[index]!),
-        observedAt: raw.captured_at,
-        confidence: Confidence.HIGH,
-        rawPayload: rawText,
-        normalizedPayload: stableStringify(post),
-      });
-      post.meta.evidenceId = evidenceId;
-      return post;
-    });
+    const posts = normalizePosts(raw);
 
     return available(posts, {
       ...meta,
       observedAt: raw.captured_at,
       confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
+      rawPayloadHash: sha256(rawText),
+      rawReference: this.manifestRef(files[index]!),
     });
   }
 
@@ -293,24 +246,14 @@ export class FixtureProvider implements InstagramProvider {
     if (!parsed.success) return this.schemaError(meta, parsed.error.message);
 
     const raw: RawCommentsPageV1 = parsed.data;
-    const comments = normalizeComments(raw).map((comment) => {
-      const evidenceId = this.recordEvidence({
-        observationKind: "comment",
-        observationId: `comment:${comment.commentId}`,
-        sourceReference: this.manifestRef(file),
-        observedAt: raw.captured_at,
-        confidence: Confidence.HIGH,
-        rawPayload: rawText,
-        normalizedPayload: stableStringify(comment),
-      });
-      comment.meta.evidenceId = evidenceId;
-      return comment;
-    });
+    const comments = normalizeComments(raw);
 
     return available(comments, {
       ...meta,
       observedAt: raw.captured_at,
       confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
+      rawPayloadHash: sha256(rawText),
+      rawReference: this.manifestRef(file),
     });
   }
 
@@ -348,20 +291,12 @@ export class FixtureProvider implements InstagramProvider {
 
     const page = pages[pageIndex]!;
     const normalized = normalizeFollowPage(page.raw);
-    const evidenceId = this.recordEvidence({
-      observationKind: `${direction}_page`,
-      observationId: `${direction}:page:${pageIndex}@${page.raw.captured_at}`,
-      sourceReference: this.manifestRef(page.file),
-      observedAt: page.raw.captured_at,
-      confidence: normalized.meta.confidence,
-      rawPayload: page.rawText,
-      normalizedPayload: stableStringify(normalized),
-    });
-    normalized.meta.evidenceId = evidenceId;
 
     return available(normalized, {
       ...meta,
       observedAt: page.raw.captured_at,
+      rawPayloadHash: sha256(page.rawText),
+      rawReference: this.manifestRef(page.file),
       confidence: normalized.meta.confidence,
       ...(normalized.complete
         ? {}
@@ -396,34 +331,6 @@ export class FixtureProvider implements InstagramProvider {
       message: `Fixture payload failed v1 schema validation: ${detail.slice(0, 300)}`,
       retryable: false,
     });
-  }
-
-  private recordEvidence(input: {
-    observationKind: string;
-    observationId: string;
-    sourceReference: string;
-    observedAt: string;
-    confidence: Confidence;
-    rawPayload: string;
-    normalizedPayload: string;
-  }): string {
-    const rawHash = sha256(input.rawPayload);
-    const normalizedHash = sha256(input.normalizedPayload);
-    const evidenceId = `ev_${rawHash.slice(0, 12)}_${normalizedHash.slice(0, 12)}`;
-    const evidence: Evidence = {
-      observationKind: input.observationKind,
-      observationId: input.observationId,
-      sourceType: SourceKind.FIXTURE,
-      sourceReference: input.sourceReference,
-      observedAt: input.observedAt,
-      capturedAt: this.clock().toISOString(),
-      confidence: input.confidence,
-      rawHash,
-      normalizedHash,
-    };
-    this.evidenceStore.push(evidence);
-    this.evidenceSink?.(evidence);
-    return evidenceId;
   }
 
   private async loadManifest(): Promise<FixtureManifest> {

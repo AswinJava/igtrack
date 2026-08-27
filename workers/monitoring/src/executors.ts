@@ -75,21 +75,36 @@ function evidenceFrom(
   source: SourceInput,
   kind: string,
   observationId: string,
-  template: { observedAt: string; confidence: Confidence; ref?: string },
+  template: {
+    observedAt: string;
+    confidence: Confidence;
+    ref?: string;
+    rawPayloadHash?: string;
+    rawReference?: string;
+  },
   payload: unknown,
   metadata?: Record<string, unknown>,
 ): EvidenceRecordInput {
-  const hash = sha256(stableStringify(payload));
+  const normalizedHash = sha256(stableStringify(payload));
   return {
     observationKind: kind,
     source,
-    ...(template.ref !== undefined ? { sourceReference: template.ref } : {}),
+    ...(template.rawReference !== undefined
+      ? { sourceReference: template.rawReference }
+      : template.ref !== undefined
+        ? { sourceReference: template.ref }
+        : {}),
     schemaVersion: "v1",
     observedAt: new Date(template.observedAt),
     capturedAt: new Date(),
     confidence: template.confidence,
-    rawHash: hash,
-    normalizedHash: hash,
+    // raw_hash carries the provider's genuine raw-payload hash. When the
+    // provider cannot transport the raw representation it stays unset — a
+    // normalized hash must never masquerade as a raw one.
+    ...(template.rawPayloadHash !== undefined
+      ? { rawHash: template.rawPayloadHash }
+      : {}),
+    normalizedHash,
     metadata: { synthetic: source.kind === SourceKind.FIXTURE, ...(metadata ?? {}) },
   };
 }
@@ -187,7 +202,17 @@ export async function runProfileScan(
     source,
     "profile_snapshot",
     observationId,
-    { observedAt, confidence: result.confidence, ref: account.username },
+    {
+      observedAt,
+      confidence: result.confidence,
+      ref: account.username,
+      ...(result.rawPayloadHash !== undefined
+        ? { rawPayloadHash: result.rawPayloadHash }
+        : {}),
+      ...(result.rawReference !== undefined
+        ? { rawReference: result.rawReference }
+        : {}),
+    },
     result.data,
     { capabilityStatus: result.status },
   );

@@ -48,7 +48,7 @@ describe("FixtureProvider", () => {
     expect(result.error?.retryable).toBe(false);
   });
 
-  it("normalizes the profile as OBSERVED/HIGH with evidence", async () => {
+  it("normalizes the profile as OBSERVED/HIGH with genuine raw provenance", async () => {
     const result = await provider.getProfile(target);
     expect(result.status).toBe(CapabilityStatus.AVAILABLE);
     const profile = result.data;
@@ -60,13 +60,10 @@ describe("FixtureProvider", () => {
     expect(profile.isVerified).toBe(false);
     expect(profile.meta.category).toBe(ObservationCategory.OBSERVED);
     expect(profile.meta.confidence).toBe(Confidence.HIGH);
-    expect(profile.meta.evidenceId).toMatch(/^ev_[0-9a-f]{12}_[0-9a-f]{12}$/);
 
-    const evidence = provider.drainEvidence();
-    expect(evidence.some((e) => e.observationKind === "profile")).toBe(true);
-    const profileEvidence = evidence.find((e) => e.observationKind === "profile");
-    expect(profileEvidence?.rawHash).toMatch(/^[0-9a-f]{64}$/);
-    expect(profileEvidence?.capturedAt).toBe(FIXED_NOW.toISOString());
+    // Raw provenance is the genuine fixture-file hash, not a normalized hash.
+    expect(result.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.rawReference).toBe("fixture:v1/profile.json");
   });
 
   it("normalizes stories and classifies every mention variant", async () => {
@@ -97,13 +94,15 @@ describe("FixtureProvider", () => {
     );
     expect(s3?.mentions[1]?.meta.confidence).toBe(Confidence.LOW);
 
-    for (const story of stories) {
+            for (const story of stories) {
       expect(story.meta.category).toBe(ObservationCategory.OBSERVED);
-      expect(story.meta.evidenceId).toBeDefined();
       for (const mention of story.mentions) {
-        expect(mention.meta.evidenceId).toBeDefined();
+        expect(mention.meta.category).toBe(ObservationCategory.OBSERVED);
       }
     }
+    // Stories transport the raw fixture file hash + reference.
+    expect(result.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.rawReference).toBe("fixture:v1/stories.json");
   });
 
   it("paginates followers across fixture pages via cursors", async () => {
@@ -170,18 +169,16 @@ describe("FixtureProvider", () => {
     expect(comments.confidence).toBe(Confidence.UNKNOWN);
   });
 
-  it("emits evidence to a sink when provided", async () => {
-    const collected: string[] = [];
-    const sinked = new FixtureProvider({
-      fixturesDir,
-      clock: () => FIXED_NOW,
-      evidenceSink: (e) => collected.push(e.observationKind),
-    });
-    const resolved = await sinked.resolveAccount("aurora.wilde");
-    if (isUsable(resolved)) {
-      await sinked.getStories(resolved.data);
-    }
-    expect(collected).toContain("story");
-    expect(collected).toContain("story_mention");
+  it("transports genuine raw provenance for comments and follow pages", async () => {
+    const posts = await provider.getPublicPosts(target);
+    const post1 = posts.data?.[0] as NormalizedPost;
+    const comments = await provider.getPublicComments(post1);
+    expect(comments.status).toBe(CapabilityStatus.AVAILABLE);
+    expect(comments.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(comments.rawReference).toBe("fixture:v1/comments/post-1.json");
+
+    const followers = await provider.getFollowers(target);
+    expect(followers.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(followers.rawReference).toBe("fixture:v1/followers/page-1.json");
   });
 });

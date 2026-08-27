@@ -281,10 +281,13 @@ describe.runIf(dbAvailable)("worker follower scan reliability", () => {
     expect(rows[0]?.completeness).toBe("PARTIAL");
 
     const ev = await handle.db
-      .select({ metadata: evidenceTable.metadata })
+      .select({ metadata: evidenceTable.metadata, rawHash: evidenceTable.rawHash })
       .from(evidenceTable)
       .where(sql`${evidenceTable.id} = ${rows[0]?.evidenceId}`);
     expect((ev[0]?.metadata as { completion?: string })?.completion).toBe("PARTIAL");
+    // The stub provider transports no raw payload: raw_hash stays honestly
+    // unset instead of being faked from normalized data.
+    expect(ev[0]?.rawHash).toBeNull();
   });
 
   it("persists COMPLETE when the provider completes the pagination contract", async () => {

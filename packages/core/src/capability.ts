@@ -53,11 +53,22 @@ export interface CapabilityResult<T> {
   confidence: Confidence;
   note?: string;
   error?: CapabilityError;
+  // Genuine hash of the RAW source payload the provider consumed, when the
+  // provider can transport it. Never derived from normalized data.
+  rawPayloadHash?: string;
+  // Reference to the raw payload's location (fixture file, API URL, ...).
+  rawReference?: string;
 }
 
 export function available<T>(
   data: T,
-  meta: { observedAt: string; source: SourceRef; confidence: Confidence },
+  meta: {
+    observedAt: string;
+    source: SourceRef;
+    confidence: Confidence;
+    rawPayloadHash?: string;
+    rawReference?: string;
+  },
 ): CapabilityResult<T> {
   return { status: CapabilityStatus.AVAILABLE, data, ...meta };
 }
@@ -69,6 +80,8 @@ export function partial<T>(
     source: SourceRef;
     confidence: Confidence;
     note: string;
+    rawPayloadHash?: string;
+    rawReference?: string;
   },
 ): CapabilityResult<T> {
   return { status: CapabilityStatus.PARTIAL, data, ...meta };
