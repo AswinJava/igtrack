@@ -23,6 +23,11 @@ const createBody = z.object({
   tags: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
 });
 
+const NO_STORE = { "Cache-Control": "no-store" } as const;
+
+// POST /api/targets — create a monitoring target for the authenticated user.
+// Creating does NOT assume Instagram availability: observation is queued and
+// executed through the provider capability pipeline.
 export async function POST(req: NextRequest) {
   try {
     const session = await requireApiSession();
@@ -39,8 +44,7 @@ export async function POST(req: NextRequest) {
 
     let jobsQueued = false;
     if (created) {
-      // Initial observation loop: profile scan first, follower scan after.
-      // Idempotency keys make re-runs of this flow safe.
+      // Initial observation loop. Idempotency keys make re-runs safe.
       await enqueueJob(db, {
         kind: "PROFILE_SCAN",
         targetId: target.id,
@@ -61,25 +65,28 @@ export async function POST(req: NextRequest) {
       {
         target: {
           id: target.id,
-          username: body.username,
-          status: target.status,
           localName: target.localName,
+          status: target.status,
           tags: target.tags,
           createdAt: target.createdAt,
         },
         deduplicated: !created,
         jobsQueued,
       },
-      { status: created ? 201 : 200, headers: { "Cache-Control": "no-store" } },
+      { status: created ? 201 : 200, headers: NO_STORE },
     );
   } catch (err) {
     return respondError(err);
   }
 }
 
-export function GET() {
-  return NextResponse.json(
-    { error: { code: "VALIDATION_ERROR", message: "Use POST to create targets" } },
-    { status: 405 },
-  );
+// GET /api/targets — list only targets owned by the authenticated user.
+export async function GET() {
+  try {
+    const session = await requireApiSession();
+    const targets = await listTargetsForUser(getDatabase(), session.userId);
+    return NextResponse.json({ targets }, { headers: NO_STORE });
+  } catch (err) {
+    return respondError(err);
+  }
 }

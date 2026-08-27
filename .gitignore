@@ -40,3 +40,8 @@ Thumbs.db
 .opencode/tmp/
 .opencode/log/
 .playwright-cli/
+
+# local temp / debug artifacts
+cleanup.ps1
+*.out.txt
+.muse/

@@ -107,6 +107,34 @@ importers:
         specifier: ^24.10.1
         version: 24.13.3
 
+  workers/monitoring:
+    dependencies:
+      '@igtrack/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@igtrack/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@igtrack/ingestion':
+        specifier: workspace:*
+        version: link:../../packages/ingestion
+      drizzle-orm:
+        specifier: ^0.45.2
+        version: 0.45.2(postgres@3.4.9)
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.1
+        version: 24.13.3
+      tsx:
+        specifier: ^4.23.12
+        version: 4.23.12
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
 packages:
 
   '@alloc/quick-lru@5.2.0':
