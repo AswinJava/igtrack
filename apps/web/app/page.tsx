@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getDashboardData } from "@/lib/data";
+import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatRelative, formatDateTime } from "@/lib/format";
@@ -7,6 +8,7 @@ import { formatRelative, formatDateTime } from "@/lib/format";
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
+  await requirePageUser();
   const data = await getDashboardData();
 
   const hasData = data.trackedCount > 0;

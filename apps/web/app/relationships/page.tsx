@@ -1,10 +1,12 @@
 import { getTargets, getRelationships } from "@/lib/data";
+import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
 export const dynamic = "force-dynamic";
 
 export default async function RelationshipsPage() {
+  await requirePageUser();
   const targets = await getTargets();
   const primary = targets[0];
   const relationships = primary ? await getRelationships(primary.id) : [];

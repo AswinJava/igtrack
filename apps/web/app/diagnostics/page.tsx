@@ -1,4 +1,5 @@
 import { getDiagnostics } from "@/lib/data";
+import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatDateTime, formatRelative } from "@/lib/format";
@@ -6,6 +7,7 @@ import { formatDateTime, formatRelative } from "@/lib/format";
 export const dynamic = "force-dynamic";
 
 export default async function DiagnosticsPage() {
+  await requirePageUser();
   const data = await getDiagnostics();
 
   return (

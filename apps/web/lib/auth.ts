@@ -1,86 +1,104 @@
 import { cookies } from "next/headers";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { redirect } from "next/navigation";
+import { AppError, AppErrorCode } from "@igtrack/core";
+import {
+  issueSession,
+  resolveSession,
+  revokeSession,
+  SESSION_TTL_MS,
+  findUserByEmail,
+  verifyPassword,
+} from "@igtrack/database";
 import { getDatabase } from "./db.js";
-import { users } from "@igtrack/database";
-import { eq } from "drizzle-orm";
 
 const COOKIE_NAME = "igtrack_session";
-const COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 
 export interface AuthSession {
   userId: string;
   email: string;
 }
 
-function getSecret(): string {
-  return (
-    process.env.IGTRACK_SESSION_SECRET ??
-    process.env.AUTH_SECRET ??
-    "dev-insecure-secret-do-not-use-in-production"
-  );
-}
-
-function sign(value: string, secret: string): string {
-  const sig = createHmac("sha256", secret).update(value).digest("hex");
-  return `${value}.${sig}`;
-}
-
-function verify(signed: string, secret: string): string | null {
-  const idx = signed.lastIndexOf(".");
-  if (idx === -1) return null;
-  const value = signed.slice(0, idx);
-  const sig = signed.slice(idx + 1);
-  const expected = createHmac("sha256", secret).update(value).digest("hex");
-  if (sig.length !== expected.length) return null;
-  if (!timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
-  return value;
+// Dev login exists to make local development frictionless. It must never be
+// reachable in a production deployment: production is decided by NODE_ENV, and
+// it can additionally be force-disabled with IGTRACK_ALLOW_DEV_LOGIN=false.
+export function isDevLoginEnabled(): boolean {
+  if (process.env.NODE_ENV === "production") return false;
+  return process.env.IGTRACK_ALLOW_DEV_LOGIN !== "false";
 }
 
 export async function getSession(): Promise<AuthSession | null> {
   const store = await cookies();
-  const raw = store.get(COOKIE_NAME)?.value;
-  if (!raw) return null;
-  const payload = verify(raw, getSecret());
-  if (!payload) return null;
+  const token = store.get(COOKIE_NAME)?.value;
+  if (!token) return null;
   try {
-    const data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as AuthSession;
-    if (typeof data.userId !== "string" || typeof data.email !== "string") return null;
-    return data;
+    const resolved = await resolveSession(getDatabase(), token);
+    if (!resolved) return null;
+    return { userId: resolved.userId, email: resolved.email };
   } catch {
+    // Database failure during auth is not an authentication success.
     return null;
   }
 }
 
-export async function requireSession(): Promise<AuthSession> {
+// For route handlers: throws a typed error the API layer maps to UNAUTHORIZED.
+export async function requireApiSession(): Promise<AuthSession> {
   const session = await getSession();
-  if (!session) throw new Error("UNAUTHENTICATED");
+  if (!session) {
+    throw new AppError(AppErrorCode.UNAUTHORIZED, "Authentication required");
+  }
   return session;
 }
 
-export async function createSession(userId: string, email: string): Promise<void> {
-  const payload = Buffer.from(JSON.stringify({ userId, email })).toString("base64url");
-  const signed = sign(payload, getSecret());
+// For server components: redirects to login instead of erroring.
+export async function requirePageUser(): Promise<AuthSession> {
+  const session = await getSession();
+  if (!session) redirect("/login");
+  return session;
+}
+
+export async function startSessionForUser(userId: string): Promise<void> {
+  const { token } = await issueSession(getDatabase(), userId, SESSION_TTL_MS);
   const store = await cookies();
-  store.set(COOKIE_NAME, signed, {
+  store.set(COOKIE_NAME, token, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-    maxAge: COOKIE_MAX_AGE,
+    maxAge: Math.floor(SESSION_TTL_MS / 1000),
   });
 }
 
-export async function destroySession(): Promise<void> {
+export async function endCurrentSession(): Promise<void> {
   const store = await cookies();
+  const token = store.get(COOKIE_NAME)?.value;
+  if (token) {
+    try {
+      await revokeSession(getDatabase(), token);
+    } catch {
+      // Cookie deletion below still ends the client-side session.
+    }
+  }
   store.delete(COOKIE_NAME);
 }
 
-export async function getDevUser(): Promise<{ id: string; email: string } | null> {
-  try {
-    const db = getDatabase();
-    const rows = await db.select({ id: users.id, email: users.email }).from(users).where(eq(users.email, "dev@igtrack.local")).limit(1);
-    return rows[0] ?? null;
-  } catch {
-    return null;
-  }
+export interface VerifiedUser {
+  id: string;
+  email: string;
+}
+
+// Returns null for unknown users, wrong passwords, and accounts without
+// credentials, one response shape, no account-existence oracle.
+export async function verifyCredentials(email: string, password: string): Promise<VerifiedUser | null> {
+  const user = await findUserByEmail(getDatabase(), email);
+  if (user === null || user.passwordHash === null) return null;
+  const ok = await verifyPassword(password, user.passwordHash);
+  if (!ok) return null;
+  return { id: user.id, email: user.email };
+}
+
+// Existence probe for the local dev seed account only. Always paired with
+// isDevLoginEnabled() at the call site.
+export async function getDevUser(): Promise<VerifiedUser | null> {
+  const user = await findUserByEmail(getDatabase(), "dev@igtrack.local");
+  return user === null ? null : { id: user.id, email: user.email };
 }

@@ -1,7 +1,9 @@
+import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-export default function SettingsPage() {
+export default async function SettingsPage() {
+  await requirePageUser();
   return (
     <div className="mx-auto max-w-4xl px-6 py-6">
       <h1 className="text-xl font-semibold tracking-tight">Settings</h1>

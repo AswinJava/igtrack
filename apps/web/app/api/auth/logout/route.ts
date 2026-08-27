@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
-import { destroySession } from "@/lib/auth";
+import { endCurrentSession } from "@/lib/auth";
 
-export async function POST() {
-  await destroySession();
-  return NextResponse.redirect(new URL("/login", process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000"), 303);
+function redirectToLogin(): NextResponse {
+  const base =
+    process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
+  return NextResponse.redirect(new URL("/login", base), 303);
 }
 
-export async function GET() {
-  return POST();
+// POST only — logging out must never be triggerable by a pre-fetched link.
+export async function POST() {
+  await endCurrentSession();
+  return redirectToLogin();
 }

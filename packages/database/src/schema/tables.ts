@@ -47,8 +47,28 @@ export const users = pgTable("users", {
   id: uuid(),
   email: text("email").notNull().unique(),
   displayName: text("display_name"),
+  // scrypt$salt$hash; null means credential login is disabled for this account
+  passwordHash: text("password_hash"),
   createdAt: createdAt(),
 });
+
+export const sessions = pgTable(
+  "sessions",
+  {
+    id: text("id").primaryKey(), // sha256 of the opaque session token; raw token never stored
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    expiresAt: timestamptz("expires_at").notNull(),
+    lastSeenAt: timestamptz("last_seen_at").notNull().defaultNow(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("sessions_user_idx").on(table.userId),
+    index("sessions_expiry_idx").on(table.expiresAt),
+  ],
+);
+
 
 export const sources = pgTable("sources", {
   id: text("id").primaryKey(),

@@ -1,4 +1,5 @@
 import { getActivityFeed } from "@/lib/data";
+import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge, CategoryBadge, ConfidenceBadge } from "@/components/ui/badge";
 import { formatDateTime } from "@/lib/format";
@@ -6,6 +7,7 @@ import { formatDateTime } from "@/lib/format";
 export const dynamic = "force-dynamic";
 
 export default async function ActivityPage() {
+  await requirePageUser();
   const feed = await getActivityFeed(30);
 
   return (
@@ -32,11 +34,15 @@ export default async function ActivityPage() {
                       <Badge tone="muted" className="text-[11px]">
                         {item.type}
                       </Badge>
-                      <CategoryBadge category={item.category} />
-                      <ConfidenceBadge confidence={item.confidence} />
+                      {item.category !== null ? (
+                        <CategoryBadge category={item.category as "OBSERVED" | "DERIVED" | "INFERRED" | "UNAVAILABLE"} />
+                      ) : null}
+                      {item.confidence !== null ? (
+                        <ConfidenceBadge confidence={item.confidence as "HIGH" | "MEDIUM" | "LOW" | "UNKNOWN"} />
+                      ) : null}
                     </p>
                     <p className="mt-1 text-xs text-zinc-500">
-                      {item.username} · {formatDateTime(item.timestamp)}
+                      {item.targetUsername} · {formatDateTime(item.timestamp)}
                     </p>
                   </div>
                 </li>

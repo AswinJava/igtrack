@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { and, inArray, sql } from "drizzle-orm";
 import {
+  AppError,
+  AppErrorCode,
+  isLegalTargetTransition,
+  type TargetStatus,
+} from "@igtrack/core";
+import {
   evidence,
   followDeltas,
   followSnapshots,
@@ -14,7 +20,6 @@ import type { Database } from "../client/client.js";
 import type { DatabaseTx } from "../transactions.js";
 import { withTransaction } from "../transactions.js";
 import { upsertAccount } from "./accounts.js";
-import type { TargetStatus } from "./target-types.js";
 
 const createTargetSchema = z.object({
   userId: z.string().uuid(),
@@ -24,11 +29,33 @@ const createTargetSchema = z.object({
   tags: z.array(z.string().max(50)).max(20).optional(),
 });
 
+const updateTargetMetaSchema = z
+  .object({
+    localName: z.string().max(200).nullable().optional(),
+    notes: z.string().max(5000).nullable().optional(),
+    tags: z.array(z.string().min(1).max(50)).max(20).optional(),
+  })
+  .refine(
+    (v) =>
+      v.localName !== undefined ||
+      v.notes !== undefined ||
+      v.tags !== undefined,
+    { message: "no changes provided" },
+  );
+
 export interface CreateTargetInput {
   userId: string;
   username: string;
   localName?: string;
   notes?: string;
+  tags?: string[];
+}
+
+export interface UpdateTargetMetaInput {
+  userId: string;
+  targetId: string;
+  localName?: string | null;
+  notes?: string | null;
   tags?: string[];
 }
 
@@ -188,4 +215,92 @@ export async function deleteTargetWithObservations(
 
     await tx.delete(targets).where(sql`${targets.id} = ${targetId}`);
   });
+}
+
+export async function getOwnedTarget(
+  db: DatabaseTx | Database,
+  userId: string,
+  targetId: string,
+): Promise<TargetRecord | null> {
+  const rows = await db
+    .select()
+    .from(targets)
+    .where(
+      sql`${targets.id} = ${targetId} AND ${targets.userId} = ${userId}`,
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+export async function updateOwnedTargetMeta(
+  db: Database,
+  input: UpdateTargetMetaInput,
+): Promise<TargetRecord> {
+  const parsed = updateTargetMetaSchema.parse(input);
+  return withTransaction(db, async (tx) => {
+    const owned = await getOwnedTarget(tx, input.userId, input.targetId);
+    if (owned === null) {
+      throw new AppError(AppErrorCode.NOT_FOUND, "Target not found");
+    }
+    const rows = await tx
+      .update(targets)
+      .set({
+        ...(parsed.localName !== undefined ? { localName: parsed.localName } : {}),
+        ...(parsed.notes !== undefined ? { notes: parsed.notes } : {}),
+        ...(parsed.tags !== undefined ? { tags: parsed.tags } : {}),
+        updatedAt: new Date(),
+      })
+      .where(sql`${targets.id} = ${owned.id}`)
+      .returning();
+    const row = rows[0];
+    if (row === undefined) {
+      throw new AppError(AppErrorCode.DATABASE_ERROR, "Failed to update target");
+    }
+    return row;
+  });
+}
+
+export async function transitionTargetStatus(
+  db: Database,
+  userId: string,
+  targetId: string,
+  next: TargetStatus,
+): Promise<TargetRecord> {
+  return withTransaction(db, async (tx) => {
+    const owned = await getOwnedTarget(tx, userId, targetId);
+    if (owned === null) {
+      throw new AppError(AppErrorCode.NOT_FOUND, "Target not found");
+    }
+    if (!isLegalTargetTransition(owned.status, next)) {
+      throw new AppError(
+        AppErrorCode.CONFLICT,
+        `Illegal transition ${owned.status} → ${next}`,
+        { details: { from: owned.status, to: next } },
+      );
+    }
+    const rows = await tx
+      .update(targets)
+      .set({ status: next, updatedAt: new Date() })
+      .where(sql`${targets.id} = ${owned.id}`)
+      .returning();
+    const row = rows[0];
+    if (row === undefined) {
+      throw new AppError(AppErrorCode.DATABASE_ERROR, "Failed to transition target");
+    }
+    return row;
+  });
+}
+
+// Deletes through the retention boundary. ig_accounts is shared reference
+// state and intentionally survives deletion. Ownership is verified before the
+// atomic retention-cascade transaction runs.
+export async function deleteOwnedTarget(
+  db: Database,
+  userId: string,
+  targetId: string,
+): Promise<boolean> {
+  const owned = await getOwnedTarget(db, userId, targetId);
+  if (owned === null) return false;
+  await deleteTargetWithObservations(db, owned.id);
+  return true;
 }

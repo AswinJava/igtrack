@@ -1,7 +1,3 @@
-export const TargetStatus = {
-  ACTIVE: "ACTIVE",
-  PAUSED: "PAUSED",
-  STOPPED: "STOPPED",
-} as const;
+export { TargetStatus } from "@igtrack/core";
+export type { TargetStatus as TargetStatusType } from "@igtrack/core";
 
-export type TargetStatus = (typeof TargetStatus)[keyof typeof TargetStatus];

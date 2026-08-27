@@ -3,5 +3,7 @@ export * from "./capability.js";
 export * from "./models.js";
 export * from "./provider.js";
 export * from "./evidence.js";
+export * from "./errors.js";
+export * from "./lifecycle.js";
 export * from "./diff/follow-diff.js";
 export * from "./diff/profile-diff.js";

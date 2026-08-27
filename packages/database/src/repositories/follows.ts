@@ -15,7 +15,8 @@ import type { Database } from "../client/client.js";
 import { withTransaction } from "../transactions.js";
 import { upsertAccount } from "./accounts.js";
 import { ensureSource } from "./sources.js";
-import type { SourceInput } from "./types.js";
+import { upsertEvidence } from "./evidence.js";
+import type { SourceInput, EvidenceRecordInput } from "./types.js";
 
 export type FollowSnapshotRecord = typeof followSnapshots.$inferSelect;
 export type FollowDeltaRecord = typeof followDeltas.$inferSelect;
@@ -28,6 +29,10 @@ export interface RecordFollowSnapshotInput {
   page: NormalizedFollowPage;
   source: SourceInput;
   takenAt?: Date;
+  // When provided, an evidence row is created and linked to the snapshot at
+  // insert time — snapshots are append-only and can never be patched with
+  // provenance afterwards.
+  evidence?: EvidenceRecordInput;
 }
 
 export interface RecordFollowSnapshotResult {
@@ -44,16 +49,6 @@ export async function recordFollowSnapshot(
 
   return withTransaction(db, async (tx) => {
     await ensureSource(tx, input.source);
-
-    const accountIds: string[] = [];
-    for (const entry of input.page.entries) {
-      const account = await upsertAccount(tx, {
-        username: entry.username,
-        ...(entry.igId !== undefined ? { igId: entry.igId } : {}),
-        seenAt: takenAt,
-      });
-      accountIds.push(account.id);
-    }
 
     const existing = await tx
       .select()
@@ -76,7 +71,22 @@ export async function recordFollowSnapshot(
       };
     }
 
+    const accountIds: string[] = [];
+    for (const entry of input.page.entries) {
+      const account = await upsertAccount(tx, {
+        username: entry.username,
+        ...(entry.igId !== undefined ? { igId: entry.igId } : {}),
+        seenAt: takenAt,
+      });
+      accountIds.push(account.id);
+    }
+
     const snapshotId = randomUUID();
+    let evidenceId: string | undefined;
+    if (input.evidence !== undefined) {
+      evidenceId = await upsertEvidence(tx, snapshotId, input.evidence);
+    }
+
     const snapshotRows = await tx
       .insert(followSnapshots)
       .values({
@@ -90,6 +100,7 @@ export async function recordFollowSnapshot(
         ...(input.page.nextCursor !== undefined
           ? { cursorState: input.page.nextCursor }
           : {}),
+        ...(evidenceId !== undefined ? { evidenceId } : {}),
       })
       .returning();
     const snapshot = snapshotRows[0];

@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getTargetById, getEvidenceList } from "@/lib/data";
+import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge, ConfidenceBadge, CategoryBadge, CapabilityBadge } from "@/components/ui/badge";
 import { formatDate, formatDateTime, formatRelative } from "@/lib/format";
@@ -17,6 +18,7 @@ export default async function TargetDetailPage({
   params: Promise<{ id: string }>;
   searchParams: Promise<{ tab?: string }>;
 }) {
+  await requirePageUser();
   const { id } = await params;
   const { tab: rawTab } = await searchParams;
   const tab: Tab = (TABS as readonly string[]).includes(rawTab ?? "") ? (rawTab as Tab) : "overview";

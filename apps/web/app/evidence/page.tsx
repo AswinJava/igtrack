@@ -1,4 +1,5 @@
 import { getEvidenceList } from "@/lib/data";
+import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge, ConfidenceBadge } from "@/components/ui/badge";
 import { formatDateTime } from "@/lib/format";
@@ -6,6 +7,7 @@ import { formatDateTime } from "@/lib/format";
 export const dynamic = "force-dynamic";
 
 export default async function EvidencePage() {
+  await requirePageUser();
   const rows = await getEvidenceList(30);
 
   return (

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { getTargets } from "@/lib/data";
+import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty";
@@ -8,6 +9,7 @@ import { formatRelative } from "@/lib/format";
 export const dynamic = "force-dynamic";
 
 export default async function TargetsPage() {
+  await requirePageUser();
   const targets = await getTargets();
 
   return (
