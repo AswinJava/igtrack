@@ -1,0 +1,178 @@
+import { randomUUID } from "node:crypto";
+import { and, desc, sql } from "drizzle-orm";
+import type { NormalizedAccountRef, NormalizedStory } from "@igtrack/core";
+import { stories, storyMentions } from "../schema/index.js";
+import type { Database } from "../client/client.js";
+import { withTransaction } from "../transactions.js";
+import { upsertAccount } from "./accounts.js";
+import { ensureSource } from "./sources.js";
+import { ObservationKind, type EvidenceRecordInput } from "./types.js";
+import { upsertEvidence } from "./evidence.js";
+
+export type StoryRecord = typeof stories.$inferSelect;
+export type StoryMentionRecord = typeof storyMentions.$inferSelect;
+
+export interface RecordStoryInput {
+  owner: NormalizedAccountRef;
+  story: NormalizedStory;
+  sourceId: string;
+  evidence: EvidenceRecordInput;
+  mentionEvidence?: Record<string, EvidenceRecordInput>;
+}
+
+export interface RecordStoryResult {
+  story: StoryRecord;
+  mentions: StoryMentionRecord[];
+  deduplicated: boolean;
+}
+
+export async function recordStory(
+  db: Database,
+  input: RecordStoryInput,
+): Promise<RecordStoryResult> {
+  const { story } = input;
+
+  return withTransaction(db, async (tx) => {
+    await ensureSource(tx, input.evidence.source);
+
+    const owner = await upsertAccount(tx, {
+      username: input.owner.username,
+      ...(input.owner.igId !== undefined ? { igId: input.owner.igId } : {}),
+      ...(input.owner.displayName !== undefined
+        ? { displayName: input.owner.displayName }
+        : {}),
+      isPrivate: input.owner.isPrivate,
+      seenAt: new Date(story.meta.observedAt),
+    });
+
+    const existing = await tx
+      .select()
+      .from(stories)
+      .where(
+        and(
+          sql`${stories.igAccountId} = ${owner.id}`,
+          sql`${stories.storyId} = ${story.storyId}`,
+          sql`${stories.sourceId} = ${input.sourceId}`,
+        ),
+      )
+      .limit(1);
+    const existingRow = existing[0];
+    if (existingRow !== undefined) {
+      const existingMentions = await tx
+        .select()
+        .from(storyMentions)
+        .where(sql`${storyMentions.storyDbId} = ${existingRow.id}`);
+      return { story: existingRow, mentions: existingMentions, deduplicated: true };
+    }
+
+    const storyDbId = randomUUID();
+    const evidenceId = await upsertEvidence(tx, storyDbId, {
+      ...input.evidence,
+      observationKind: ObservationKind.STORY,
+    });
+
+    const storyRows = await tx
+      .insert(stories)
+      .values({
+        id: storyDbId,
+        igAccountId: owner.id,
+        storyId: story.storyId,
+        sourceId: input.sourceId,
+        observedAt: new Date(story.meta.observedAt),
+        takenAt: new Date(story.takenAt),
+        ...(story.expiresAt !== undefined
+          ? { expiresAt: new Date(story.expiresAt) }
+          : {}),
+        mediaType: story.mediaType,
+        ...(story.durationMs !== undefined ? { durationMs: story.durationMs } : {}),
+        ...(story.caption !== undefined ? { caption: story.caption } : {}),
+        hasLink: story.hasLink,
+        stickerKinds: story.stickerKinds,
+        ...(story.poll !== undefined ? { poll: story.poll } : {}),
+        ...(story.question !== undefined ? { question: story.question } : {}),
+        ...(story.location !== undefined ? { location: story.location } : {}),
+        ...(story.music !== undefined ? { music: story.music } : {}),
+        category: story.meta.category,
+        confidence: story.meta.confidence,
+        ...(evidenceId !== undefined ? { evidenceId } : {}),
+      })
+      .returning();
+    const storyRow = storyRows[0];
+    if (storyRow === undefined) {
+      throw new Error("igtrack: failed to insert story");
+    }
+
+    const mentions: StoryMentionRecord[] = [];
+    for (const mention of story.mentions) {
+      const mentioned = await upsertAccount(tx, {
+        username: mention.account.username,
+        ...(mention.account.igId !== undefined
+          ? { igId: mention.account.igId }
+          : {}),
+        isPrivate: mention.account.isPrivate,
+        seenAt: new Date(mention.meta.observedAt),
+      });
+
+      const mentionDbId = randomUUID();
+      const mentionInput = input.mentionEvidence?.[mention.account.username.toLowerCase()];
+      const mentionEvidenceId =
+        mentionInput !== undefined
+          ? await upsertEvidence(tx, mentionDbId, {
+              ...mentionInput,
+              observationKind: ObservationKind.STORY_MENTION,
+            })
+          : undefined;
+
+      const g = mention.geometry;
+      const mentionRows = await tx
+        .insert(storyMentions)
+        .values({
+          id: mentionDbId,
+          storyDbId: storyRow.id,
+          mentionedAccountId: mentioned.id,
+          ...(g?.x !== undefined ? { positionX: g.x } : {}),
+          ...(g?.y !== undefined ? { positionY: g.y } : {}),
+          ...(g?.width !== undefined ? { width: g.width } : {}),
+          ...(g?.height !== undefined ? { height: g.height } : {}),
+          ...(mention.rawVisibilityFlag !== undefined
+            ? { rawVisibilityFlag: mention.rawVisibilityFlag }
+            : {}),
+          visibilityClass: mention.visibilityClass,
+          observedAt: new Date(mention.meta.observedAt),
+          confidence: mention.meta.confidence,
+          ...(mentionEvidenceId !== undefined ? { evidenceId: mentionEvidenceId } : {}),
+        })
+        .onConflictDoNothing({
+          target: [storyMentions.storyDbId, storyMentions.mentionedAccountId],
+        })
+        .returning();
+      const mentionRow = mentionRows[0];
+      if (mentionRow !== undefined) mentions.push(mentionRow);
+    }
+
+    return { story: storyRow, mentions, deduplicated: false };
+  });
+}
+
+export async function listStories(
+  db: Database,
+  igAccountId: string,
+  options: { limit?: number } = {},
+): Promise<StoryRecord[]> {
+  return db
+    .select()
+    .from(stories)
+    .where(sql`${stories.igAccountId} = ${igAccountId}`)
+    .orderBy(desc(stories.takenAt))
+    .limit(options.limit ?? 50);
+}
+
+export async function listMentionsForStory(
+  db: Database,
+  storyDbId: string,
+): Promise<StoryMentionRecord[]> {
+  return db
+    .select()
+    .from(storyMentions)
+    .where(sql`${storyMentions.storyDbId} = ${storyDbId}`);
+}

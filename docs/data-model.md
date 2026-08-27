@@ -118,8 +118,13 @@ Principles:
 | LOW | partial observation or incomplete source |
 | UNKNOWN | cannot determine |
 
+## Phase 2 implementation notes
+
+- **Append-only enforcement:** Postgres `BEFORE UPDATE` trigger `igtrack_reject_update()` on `evidence`, `profile_snapshots`, `profile_changes`, `stories`, `story_mentions`, `follow_snapshots`, `follow_snapshot_members`, `follow_deltas`, `interactions`. The trigger rejects any UPDATE; DELETE remains permitted for lawful retention/target-cascade cleanup. The trigger lives in migration `0000_...sql`; it is outside drizzle's snapshot (drizzle cannot model triggers) and is re-checked by `schema.test.ts`.
+- **Evidence linkage:** `evidence.observation_id` stores the database row id of the observation; the observation row stores `evidence_id` FK. On re-ingestion the repository checks existence first (by natural unique — `(ig_account_id, story_id, source_id)` etc.) and returns `deduplicated` without inserting duplicate evidence/observation rows.
+- **Follow model:** normalized `ig_accounts` + `follow_snapshot_members` (PK `(snapshot_id, ig_account_id)`); diff computation stays in `packages/core/diff/follow-diff.ts` and is persisted as `follow_deltas`; the DB never reimplements the algorithm.
+- **Media:** `media_assets` holds metadata only (`content_hash` unique for dedup, `storage_key`, bytes, checksum); binaries are not stored in Postgres.
+
 ## Retention & deletion
 
-Deleting a target cascades: observations, snapshots, deltas, scores, media
-links (media blobs GC'd when unreferenced). Export endpoint produces a
-portable JSON bundle of everything stored for a target.
+Deleting a target (`deleteTargetWithObservations`) atomically removes: `profile_snapshots`, `profile_changes`, `stories` (cascade `story_mentions`), `interactions`, `follow_snapshots` (cascade members), `follow_deltas`, related `evidence`, and the `targets` row. `ig_accounts` rows are retained as a shared registry. `evidence` for `story_mentions` is collected before the cascade.

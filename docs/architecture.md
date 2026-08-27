@@ -102,16 +102,19 @@ Source tiers (see `platform-limitations.md`):
   or is authorized to manage (self-monitoring mode).
 - Additional providers plug in as separate packages after legal review.
 
-## 5. Job system (Phase 5)
+## 5. Job system
 
 Kinds: PROFILE_SCAN, STORY_SCAN, FOLLOWER_SCAN, FOLLOWING_SCAN,
 INTERACTION_SCAN, RELATIONSHIP_RECALCULATION, MEDIA_ARCHIVE, ALERT_PROCESSING.
 
-Postgres queue: `monitoring_jobs` with state machine
-(`queued → running → succeeded | failed | cancelled`), attempts +
-exponential backoff, `next_run_at`, checkpoint JSONB for resumable pagination,
-idempotency keys, per-target isolation (one broken source never crashes the
-runner), structured logs per run.
+Postgres queue (implemented Phase 2): `monitoring_jobs` with state machine
+(`queued → running → retry_wait → succeeded | failed | cancelled`), `FOR UPDATE
+SKIP LOCKED` claiming (`status IN ('queued','retry_wait') AND available_at <= now()`),
+attempts + exponential backoff (`available_at` = `now() + 30s * 2^(attempts-1)` capped 15m),
+idempotency keys, `job_checkpoints` (`target_id, kind → cursor/page/progress`) for
+resumable pagination, per-target isolation, structured logs per run. Repositories
+live in `packages/database/src/jobs/queue.ts`; business logic for diffs/scores
+remains in `packages/core`.
 
 ## 6. Source health
 
