@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   cancelJob,
@@ -10,6 +11,7 @@ import {
   getJob,
   JobStateError,
   loadCheckpoint,
+  monitoringJobs,
   queueDepth,
   saveCheckpoint,
   users,
@@ -36,6 +38,7 @@ describe("job backoff (pure)", () => {
 
 describe.runIf(available)("job queue", () => {
   let handle: DatabaseHandle;
+  let userId: string;
   let targetId: string;
 
   beforeAll(async () => {
@@ -44,8 +47,9 @@ describe.runIf(available)("job queue", () => {
       .insert(users)
       .values({ email: "jobs@igtrack.local" })
       .returning({ id: users.id });
+    userId = rows[0]!.id;
     const { target } = await createTarget(handle.db, {
-      userId: rows[0]!.id,
+      userId,
       username: "target_a",
     });
     targetId = target.id;
@@ -76,8 +80,17 @@ describe.runIf(available)("job queue", () => {
   });
 
   it("claims a queued job exactly once across concurrent workers", async () => {
-    for (let i = 0; i < 5; i++) {
-      await enqueueJob(handle.db, { kind: "STORY_SCAN", targetId });
+    // One job per target: same-target same-kind claims serialize by design (P9).
+    const targets: string[] = [targetId];
+    for (let i = 1; i < 5; i++) {
+      const { target } = await createTarget(handle.db, {
+        userId,
+        username: `concurrency_target_${i}`,
+      });
+      targets.push(target.id);
+    }
+    for (const tid of targets) {
+      await enqueueJob(handle.db, { kind: "STORY_SCAN", targetId: tid });
     }
     expect(await queueDepth(handle.db)).toBeGreaterThanOrEqual(6);
 
@@ -100,6 +113,7 @@ describe.runIf(available)("job queue", () => {
 
       const storyClaims = claimed.filter((c) => c!.kind === "STORY_SCAN");
       expect(storyClaims.length).toBe(5);
+      expect(new Set(storyClaims.map((c) => c!.targetId)).size).toBe(5);
       for (const job of storyClaims) {
         expect(job!.status).toBe("running");
         expect(job!.attempts).toBe(1);
@@ -215,5 +229,110 @@ describe.runIf(available)("job queue", () => {
     const updated = await loadCheckpoint(handle.db, targetId, "FOLLOWER_SCAN");
     expect(updated?.page).toBe(18);
     expect(updated?.cursor).toBe("page-18-cursor");
+  });
+
+  // Leftovers from earlier tests must not leak into lease/serialization tests.
+  async function drainClaimable(): Promise<void> {
+    const rows = await handle.db
+      .select({ id: monitoringJobs.id })
+      .from(monitoringJobs)
+      .where(sql`${monitoringJobs.status} IN ('queued', 'retry_wait')`);
+    for (const row of rows) {
+      await cancelJob(handle.db, row.id);
+    }
+  }
+
+  it("serializes same-target same-kind jobs at claim time (P9)", async () => {
+    await drainClaimable();
+    const first = await enqueueJob(handle.db, { kind: "STORY_SCAN", targetId });
+    const second = await enqueueJob(handle.db, { kind: "STORY_SCAN", targetId });
+
+    const firstClaim = await claimJob(handle.db, "worker-s1");
+    expect(firstClaim?.id).toBe(first.job.id);
+
+    const secondClaim = await claimJob(handle.db, "worker-s2");
+    expect(secondClaim).toBeNull();
+
+    await completeJob(handle.db, first.job.id, "worker-s1");
+    const nextClaim = await claimJob(handle.db, "worker-s2");
+    expect(nextClaim?.id).toBe(second.job.id);
+    await completeJob(handle.db, second.job.id, "worker-s2");
+  });
+
+  it("reclaims a stale running job and increments attempts (J1)", async () => {
+    await drainClaimable();
+    const { job } = await enqueueJob(handle.db, {
+      kind: "FOLLOWER_SCAN",
+      targetId,
+      maxAttempts: 3,
+    });
+    const first = await claimJob(handle.db, "worker-dead");
+    expect(first?.id).toBe(job.id);
+    expect(first?.attempts).toBe(1);
+
+    const reclaimed = await claimJob(handle.db, "worker-successor", { leaseMs: 0 });
+    expect(reclaimed?.id).toBe(job.id);
+    expect(reclaimed?.status).toBe("running");
+    expect(reclaimed?.lockedBy).toBe("worker-successor");
+    expect(reclaimed?.attempts).toBe(2);
+  });
+
+  it("does not reclaim an active worker's job within its lease (J1)", async () => {
+    await drainClaimable();
+    const { job } = await enqueueJob(handle.db, { kind: "FOLLOWER_SCAN", targetId });
+    await claimJob(handle.db, "worker-active");
+
+    const other = await claimJob(handle.db, "worker-other", { leaseMs: 60_000 });
+    expect(other).toBeNull();
+
+    const stored = await getJob(handle.db, job.id);
+    expect(stored?.status).toBe("running");
+    expect(stored?.attempts).toBe(1);
+    expect(stored?.lockedBy).toBe("worker-active");
+  });
+
+  it("reaps stale running jobs whose attempts are exhausted (J10)", async () => {
+    await drainClaimable();
+    const { job } = await enqueueJob(handle.db, {
+      kind: "FOLLOWER_SCAN",
+      targetId,
+      maxAttempts: 1,
+    });
+    await claimJob(handle.db, "worker-dead-final");
+
+    const reclaimed = await claimJob(handle.db, "worker-any", { leaseMs: 0 });
+    expect(reclaimed).toBeNull();
+
+    const stored = await getJob(handle.db, job.id);
+    expect(stored?.status).toBe("failed");
+    expect((stored?.error as { kind?: string }).kind).toBe("LEASE_EXPIRED");
+    expect(stored?.lockedBy).toBeNull();
+    expect(stored?.completedAt).not.toBeNull();
+  });
+
+  it("a stale worker can neither complete nor fail a reclaimed job (J5)", async () => {
+    await drainClaimable();
+    const { job } = await enqueueJob(handle.db, {
+      kind: "FOLLOWER_SCAN",
+      targetId,
+      maxAttempts: 3,
+    });
+    await claimJob(handle.db, "worker-stale");
+    const reclaimed = await claimJob(handle.db, "worker-successor", { leaseMs: 0 });
+    expect(reclaimed?.lockedBy).toBe("worker-successor");
+
+    await expect(
+      completeJob(handle.db, job.id, "worker-stale"),
+    ).rejects.toBeInstanceOf(JobStateError);
+    await expect(
+      failJob(handle.db, job.id, "worker-stale", {
+        message: "late failure from a dead worker",
+        retryable: true,
+      }),
+    ).rejects.toBeInstanceOf(JobStateError);
+
+    const stored = await getJob(handle.db, job.id);
+    expect(stored?.status).toBe("running");
+    expect(stored?.lockedBy).toBe("worker-successor");
   });
 });
