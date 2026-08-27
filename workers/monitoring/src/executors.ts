@@ -206,13 +206,17 @@ export async function runProfileScan(
 }
 
 // ---------------------------------------------------------------------------
-// FOLLOWER_SCAN — fixture-backed, checkpoint-resumable, append-only.
+// FOLLOWER_SCAN — checkpoint-resumable, append-only, idempotent.
 //
 // Paginates the provider by cursor, persisting a per-scan checkpoint after
-// each page so an interrupted run (worker crash) can resume from the next
-// cursor without re-fetching finished pages or duplicating DB writes
-// (recordFollowSnapshot is idempotent by natural key). Accumulated entries are
-// carried in the checkpoint so a resumed run emits one coherent snapshot.
+// each page. The checkpoint carries the acquired entries (username + igId) and
+// belongs to exactly one logical scan (job id): a resumed run restores the
+// full member set, so a crash can never silently drop an acquired page.
+// The observation identity (snapshot taken_at + evidence observed_at) derives
+// from the job's first-claim timestamp, which is stable across retries and
+// lease reclaims — a crash after the observation write dedupes on the natural
+// key instead of duplicating history. Completeness comes from the provider's
+// final page contract, never hardcoded.
 // ---------------------------------------------------------------------------
 
 export interface FollowerScanOptions {
@@ -222,6 +226,12 @@ export interface FollowerScanOptions {
 }
 
 const FOLLOWER_CHECKPOINT_KIND = "FOLLOWER_SCAN";
+
+interface FollowerCheckpointProgress {
+  cursor?: string;
+  page?: number;
+  entries?: Array<{ username: string; igId?: string }>;
+}
 
 export async function runFollowerScan(
   db: Database,
@@ -251,18 +261,45 @@ export async function runFollowerScan(
     return "unavailable";
   }
 
-  // Revive prior progress (cursors / pages done / accumulated usernames).
+  // Logical scan identity: claimJob preserves started_at across retries and
+  // lease reclaims, so every execution of this job observes the same instant.
+  const scanObservedAt = new Date(job.startedAt ?? Date.now()).toISOString();
+
+  // A checkpoint belongs to one logical scan. Resume only when this job owns
+  // it; a foreign or legacy checkpoint starts a fresh scan.
   const checkpoint = await loadCheckpoint(db, targetId, FOLLOWER_CHECKPOINT_KIND);
-  const progress = (checkpoint?.progress ?? {}) as {
-    cursor?: string;
-    page?: number;
-    usernames?: string[];
-  };
-  let cursor = progress.cursor;
-  let pageIndex = progress.page ?? 0;
-  const entries: NormalizedFollowEntry[] = [];
-  const seen = new Set<string>(progress.usernames ?? []);
+  const ownedCheckpoint =
+    checkpoint !== null && checkpoint.jobId === job.id ? checkpoint : null;
+  const progress = (ownedCheckpoint?.progress ?? undefined) as
+    | FollowerCheckpointProgress
+    | undefined;
+  let cursor = progress?.cursor;
+  let pageIndex = progress?.page ?? 0;
+  const entries: NormalizedFollowEntry[] = (progress?.entries ?? []).map((entry) => ({
+    username: entry.username,
+    ...(entry.igId !== undefined ? { igId: entry.igId } : {}),
+  }));
+  const seen = new Set<string>(entries.map((entry) => entry.username.toLowerCase()));
   let pagesProcessed = pageIndex;
+  let lastPageComplete = false;
+
+  const persistCheckpoint = async (nextCursor: string | undefined): Promise<void> => {
+    await saveCheckpoint(db, {
+      targetId,
+      kind: FOLLOWER_CHECKPOINT_KIND,
+      jobId: job.id,
+      ...(nextCursor !== undefined ? { cursor: nextCursor } : {}),
+      page: pagesProcessed,
+      progress: {
+        ...(nextCursor !== undefined ? { cursor: nextCursor } : {}),
+        page: pagesProcessed,
+        entries: entries.map((entry) => ({
+          username: entry.username,
+          ...(entry.igId !== undefined ? { igId: entry.igId } : {}),
+        })),
+      },
+    });
+  };
 
   const ref = accountRef(account);
 
@@ -302,6 +339,7 @@ export async function runFollowerScan(
     const page = pageResult.data;
     const pageCursor = page.nextCursor;
     const pageComplete = page.complete;
+    lastPageComplete = pageComplete;
 
     for (const entry of page.entries) {
       const key = entry.username.toLowerCase();
@@ -313,28 +351,14 @@ export async function runFollowerScan(
 
     // Simulated interruption (test hook) — leaves partial state behind.
     if (options.crashAfterPages !== undefined && pagesProcessed >= options.crashAfterPages) {
-      await saveCheckpoint(db, {
-        targetId,
-        kind: FOLLOWER_CHECKPOINT_KIND,
-        jobId: job.id,
-        ...(pageCursor !== undefined ? { cursor: pageCursor } : {}),
-        page: pagesProcessed,
-        progress: { cursor: pageCursor, page: pagesProcessed, usernames: [...seen] },
-      });
+      await persistCheckpoint(pageCursor);
       throw new JobExecutionError(
         `Simulated interruption after page ${pagesProcessed}`,
         { retryable: true, kind: "INTERRUPTED" },
       );
     }
 
-    await saveCheckpoint(db, {
-      targetId,
-      kind: FOLLOWER_CHECKPOINT_KIND,
-      jobId: job.id,
-      ...(pageCursor !== undefined ? { cursor: pageCursor } : {}),
-      page: pagesProcessed,
-      progress: { cursor: pageCursor, page: pagesProcessed, usernames: [...seen] },
-    });
+    await persistCheckpoint(pageCursor);
 
     if (pageComplete || pageCursor === undefined || pageCursor === "") {
       break;
@@ -343,11 +367,11 @@ export async function runFollowerScan(
   }
 
   // One coherent snapshot for the whole scan, evidence-linked at insert time.
-  if (entries.length === 0 && pageIndex === 0) {
+  if (entries.length === 0 && pagesProcessed === 0) {
     await recordCapabilityFailure(db, {
       source,
       capability: "getFollowers",
-      reason: "Provider returned no follower entries",
+      reason: "Provider returned no follower entries before any page completed",
       errorCategory: "EMPTY",
     });
     throw new JobExecutionError("Provider returned no follower entries", {
@@ -360,8 +384,11 @@ export async function runFollowerScan(
   // new snapshot is inserted, otherwise "latest" is the snapshot we just wrote.
   const previous = await latestFollowSnapshot(db, targetId, direction);
 
-  const observedAt = new Date().toISOString();
+  // Observation identity is the logical scan time (stable across retries and
+  // lease reclaims), not this execution's wall clock. captured_at stays real.
+  const observedAt = scanObservedAt;
   const observationId = `followers:${targetId}@${observedAt}`;
+  const completion = lastPageComplete ? "COMPLETE" : "PARTIAL";
   const evidence = evidenceFrom(
     source,
     "follow_snapshot",
@@ -372,7 +399,7 @@ export async function runFollowerScan(
       ref: account.username,
     },
     { count: entries.length, usernames: entries.map((e) => e.username) },
-    { direction, completion: "COMPLETE" },
+    { direction, completion },
   );
 
   const result = await recordFollowSnapshot(db, {
@@ -382,7 +409,7 @@ export async function runFollowerScan(
     evidence,
     page: {
       entries,
-      complete: true,
+      complete: lastPageComplete,
       meta: {
         category: ObservationCategory.OBSERVED,
         confidence: Confidence.HIGH,
@@ -405,7 +432,7 @@ export async function runFollowerScan(
     targetId,
     kind: FOLLOWER_CHECKPOINT_KIND,
     page: 0,
-    progress: { page: 0, usernames: [] },
+    progress: { page: 0, entries: [] },
   });
 
   await recordCapabilitySuccess(db, {

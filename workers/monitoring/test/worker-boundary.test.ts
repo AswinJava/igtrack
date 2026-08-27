@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
 import {
   available,
   Confidence,
@@ -128,6 +129,18 @@ describe.runIf(dbAvailable)("worker failure boundary", () => {
 
   afterAll(async () => {
     await handle.close();
+  });
+
+  // Claim-time serialization is per (kind, target): a job left running by one
+  // test must never block the next test's claim. Close any leftover running
+  // jobs after every test.
+  afterEach(async () => {
+    await handle.db.execute(sql`
+      UPDATE monitoring_jobs
+      SET status = 'succeeded', completed_at = now(),
+          locked_at = null, locked_by = null, updated_at = now()
+      WHERE status = 'running'
+    `);
   });
 
   it("survives a dead database while polling and keeps iterating (J3)", async () => {

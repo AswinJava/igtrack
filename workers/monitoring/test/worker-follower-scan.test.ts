@@ -19,6 +19,7 @@ import {
   followDeltas,
   followSnapshotMembers,
   followSnapshots,
+  saveCheckpoint,
   users,
   type DatabaseHandle,
   type JobRecord,
@@ -211,17 +212,38 @@ describe.runIf(dbAvailable)("worker follower scan reliability", () => {
 
   it("a different job never resumes another job's checkpoint (P8, B4)", async () => {
     const targetId = await makeTarget();
-    const crashedJob = await makeJob(targetId);
+    const freshJob = await makeJob(targetId);
     const src = paginatedSource([
       { usernames: ["alpha", "bravo", "charlie"], complete: false, nextCursor: "page-2" },
       { usernames: ["delta", "echo"], complete: true },
     ]);
 
-    await expect(
-      runFollowerScan(handle.db, crashedJob, src, { crashAfterPages: 1 }),
-    ).rejects.toThrow(/Simulated interruption/);
+    // A stale checkpoint owned by a DIFFERENT logical job must be ignored: the
+    // current scan starts fresh and produces its own complete snapshot.
+    // (job_checkpoints.job_id is an FK, so the "other job" must be a real row —
+    // it stays queued while this scan owns the target, which is exactly the
+    // scenario the worker would face after a lease reclaim collision.)
+    const { job: otherJob } = await enqueueJob(handle.db, {
+      kind: "FOLLOWER_SCAN",
+      targetId,
+    });
+    await saveCheckpoint(handle.db, {
+      targetId,
+      kind: "FOLLOWER_SCAN",
+      jobId: otherJob.id,
+      cursor: "page-2",
+      page: 1,
+      progress: {
+        cursor: "page-2",
+        page: 1,
+        entries: [
+          { username: "alpha" },
+          { username: "bravo" },
+          { username: "charlie" },
+        ],
+      },
+    });
 
-    const freshJob = await makeJob(targetId);
     await runFollowerScan(handle.db, freshJob, src);
 
     expect(await memberCount(targetId)).toBe(5);
