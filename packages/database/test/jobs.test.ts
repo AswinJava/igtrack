@@ -233,6 +233,15 @@ describe.runIf(available)("job queue", () => {
 
   // Leftovers from earlier tests must not leak into lease/serialization tests.
   async function drainClaimable(): Promise<void> {
+    await handle.db.execute(sql`
+      UPDATE monitoring_jobs
+      SET status = 'succeeded',
+          completed_at = now(),
+          locked_at = null,
+          locked_by = null,
+          updated_at = now()
+      WHERE status = 'running'
+    `);
     const rows = await handle.db
       .select({ id: monitoringJobs.id })
       .from(monitoringJobs)

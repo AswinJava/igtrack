@@ -141,10 +141,55 @@ function mapJobRow(row: ClaimableJobRow): JobRecord {
   };
 }
 
+export interface ClaimJobOptions {
+  // Lease duration for `running` jobs. A job whose lock is older than the
+  // lease is considered abandoned and may be reclaimed (attempts permitting).
+  // Deterministic tests pass leaseMs: 0 to reclaim immediately.
+  leaseMs?: number;
+}
+
+const DEFAULT_LEASE_MS = 300_000;
+
+function resolveLeaseMs(options: ClaimJobOptions): number {
+  const raw =
+    options.leaseMs ??
+    Number(process.env.IGTRACK_JOB_LEASE_MS ?? DEFAULT_LEASE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_LEASE_MS;
+}
+
 export async function claimJob(
   db: Database,
   workerId: string,
+  options: ClaimJobOptions = {},
 ): Promise<JobRecord | null> {
+  const leaseSeconds = resolveLeaseMs(options) / 1000;
+
+  // Terminal reap: stale running jobs with no attempts left fail outright, so
+  // an exhausted job can never churn through reclaim cycles forever.
+  await db.execute(sql`
+    UPDATE monitoring_jobs
+    SET status = 'failed',
+        completed_at = now(),
+        locked_at = null,
+        locked_by = null,
+        updated_at = now(),
+        error = coalesce(
+          monitoring_jobs.error,
+          jsonb_build_object(
+            'message', 'worker lease expired after the final attempt',
+            'kind', 'LEASE_EXPIRED',
+            'retryable', false
+          )
+        )
+    WHERE monitoring_jobs.status = 'running'
+      AND monitoring_jobs.locked_at IS NOT NULL
+      AND monitoring_jobs.locked_at < now() - make_interval(secs => ${leaseSeconds})
+      AND monitoring_jobs.attempts >= monitoring_jobs.max_attempts
+  `);
+
+  // Claim due queued/retry_wait jobs, or reclaim stale running jobs that still
+  // have attempts left. Same-kind same-target serialization: never two running
+  // jobs of the same kind against the same target (checkpoint isolation).
   const rows = await db.execute(sql<ClaimableJobRow>`
     UPDATE monitoring_jobs
     SET status = 'running',
@@ -156,8 +201,22 @@ export async function claimJob(
     WHERE monitoring_jobs.id = (
       SELECT monitoring_jobs.id
       FROM monitoring_jobs
-      WHERE monitoring_jobs.status IN ('queued', 'retry_wait')
-        AND monitoring_jobs.available_at <= now()
+      WHERE (
+        (monitoring_jobs.status IN ('queued', 'retry_wait')
+          AND monitoring_jobs.available_at <= now())
+        OR
+        (monitoring_jobs.status = 'running'
+          AND monitoring_jobs.locked_at IS NOT NULL
+          AND monitoring_jobs.locked_at < now() - make_interval(secs => ${leaseSeconds})
+          AND monitoring_jobs.attempts < monitoring_jobs.max_attempts)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM monitoring_jobs other
+        WHERE other.kind = monitoring_jobs.kind
+          AND other.target_id IS NOT DISTINCT FROM monitoring_jobs.target_id
+          AND other.status = 'running'
+          AND other.id <> monitoring_jobs.id
+      )
       ORDER BY monitoring_jobs.priority DESC,
                monitoring_jobs.available_at ASC,
                monitoring_jobs.id ASC
@@ -256,11 +315,20 @@ export async function failJob(
         attempt: job.attempts,
       },
     })
-    .where(sql`${monitoringJobs.id} = ${jobId}`)
+    // Ownership re-checked in the UPDATE itself: a lease reclaim that happened
+    // between the SELECT and here must never be clobbered by a stale worker.
+    .where(
+      sql`${monitoringJobs.id} = ${jobId}
+        AND ${monitoringJobs.status} = 'running'
+        AND ${monitoringJobs.lockedBy} = ${workerId}`,
+    )
     .returning();
   const row = rows[0];
   if (row === undefined) {
-    throw new JobStateError(jobId, `job ${jobId} disappeared during fail`);
+    throw new JobStateError(
+      jobId,
+      `job ${jobId} is not running under worker ${workerId}`,
+    );
   }
   return row;
 }
