@@ -170,7 +170,6 @@ export async function runProfileScan(
       capability: "getProfile",
       reason: err?.message ?? "Provider error",
       errorCategory: err?.kind ?? "INTERNAL",
-      ...(err !== undefined ? {} : {}),
     });
     throw new JobExecutionError(err?.message ?? "Provider error", {
       kind: err?.kind ?? "INTERNAL",
@@ -193,19 +192,17 @@ export async function runProfileScan(
     { capabilityStatus: result.status },
   );
 
-  const outcome = await recordProfileSnapshot(db, {
+  await recordProfileSnapshot(db, {
     profile: result.data,
     evidence,
   });
-  const wasDedup = outcome.deduplicated;
 
   await recordCapabilitySuccess(db, {
     source,
     capability: "getProfile",
-    ...(isSynthetic(source) ? {} : {}),
   });
 
-  return wasDedup ? "succeeded" : "succeeded";
+  return "succeeded";
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +331,7 @@ export async function runFollowerScan(
       targetId,
       kind: FOLLOWER_CHECKPOINT_KIND,
       jobId: job.id,
-      cursor: pageCursor,
+      ...(pageCursor !== undefined ? { cursor: pageCursor } : {}),
       page: pagesProcessed,
       progress: { cursor: pageCursor, page: pagesProcessed, usernames: [...seen] },
     });
@@ -345,7 +342,7 @@ export async function runFollowerScan(
     cursor = pageCursor;
   }
 
-    // One coherent snapshot for the whole scan, evidence-linked at insert time.
+  // One coherent snapshot for the whole scan, evidence-linked at insert time.
   if (entries.length === 0 && pageIndex === 0) {
     await recordCapabilityFailure(db, {
       source,
@@ -359,13 +356,18 @@ export async function runFollowerScan(
     });
   }
 
-  const observationId = `followers:${targetId}@${new Date().toISOString()}`;
+  // Derived follow deltas vs the PREVIOUS snapshot — must be read before the
+  // new snapshot is inserted, otherwise "latest" is the snapshot we just wrote.
+  const previous = await latestFollowSnapshot(db, targetId, direction);
+
+  const observedAt = new Date().toISOString();
+  const observationId = `followers:${targetId}@${observedAt}`;
   const evidence = evidenceFrom(
     source,
     "follow_snapshot",
     observationId,
     {
-      observedAt: new Date().toISOString(),
+      observedAt,
       confidence: Confidence.HIGH,
       ref: account.username,
     },
@@ -384,13 +386,11 @@ export async function runFollowerScan(
       meta: {
         category: ObservationCategory.OBSERVED,
         confidence: Confidence.HIGH,
-        observedAt: new Date().toISOString(),
+        observedAt,
       },
     },
   });
 
-  // Derived follow deltas vs the previous monitoring-window snapshot.
-  const previous = await latestFollowSnapshot(db, targetId, direction);
   if (previous !== null && previous.id !== result.snapshot.id) {
     await persistFollowDiff(db, {
       targetId,
@@ -415,6 +415,4 @@ export async function runFollowerScan(
 
   return "succeeded";
 }
-
-// __APPEND__1
 

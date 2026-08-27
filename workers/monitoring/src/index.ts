@@ -7,6 +7,7 @@ import {
 } from "./provider.js";
 
 export type { ExecutionSource, JobResult, FollowerScanOptions } from "./provider.js";
+export { createExecutionSource, providerFromEnv, defaultFixturesDir } from "./provider.js";
 
 export interface RunOutcome {
   claimed: boolean;
@@ -44,7 +45,7 @@ export async function executeOne(
       err instanceof JobExecutionError;
     await failJob(db, job.id, workerId, {
       message: isExec ? err.message : `Unexpected worker error: ${String(err)}`,
-      kind: isExec ? err.kind : "INTERNAL",
+            kind: isExec ? (err.kind ?? "INTERNAL") : "INTERNAL",
       retryable: isExec ? err.retryable : true,
     });
     const state = isExec && err.retryable ? "retry_wait" : "failed";

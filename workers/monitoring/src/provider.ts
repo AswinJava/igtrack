@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { FixtureProvider } from "@igtrack/ingestion";
 import type { InstagramProvider } from "@igtrack/core";
 import { buildSource, type ExecutionSource } from "./executors.js";
@@ -21,9 +22,11 @@ export function createExecutionSource(config: ProviderConfig): ExecutionSource {
 }
 
 export function defaultFixturesDir(): string {
-  // pnpm workspace: run from repo root resolves to packages/ingestion/fixtures/<version>
+  // Resolved relative to this module so the worker behaves identically no
+  // matter which directory it is started from (repo root, package dir, etc.).
   const version = process.env.IGTRACK_FIXTURE_VERSION ?? "v1";
-  return join(process.cwd(), "packages", "ingestion", "fixtures", version);
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  return join(here, "..", "..", "..", "packages", "ingestion", "fixtures", version);
 }
 
 export function providerFromEnv(): ExecutionSource {
@@ -38,3 +41,4 @@ export function providerFromEnv(): ExecutionSource {
 }
 
 export * from "./executors.js";
+
