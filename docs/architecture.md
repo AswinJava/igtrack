@@ -116,11 +116,39 @@ resumable pagination, per-target isolation, structured logs per run. Repositorie
 live in `packages/database/src/jobs/queue.ts`; business logic for diffs/scores
 remains in `packages/core`.
 
+**Phase 5 reliability additions:**
+- **Lease + stale reclamation.** `locked_at` doubles as a lease. `claimJob` reclaims
+  `running` jobs older than `IGTRACK_JOB_LEASE_MS` (default 5 min) while attempts
+  remain, and reaps exhausted stragglers to `failed` (`LEASE_EXPIRED`). `completeJob`
+  and `failJob` re-check ownership in the UPDATE itself — a stale worker can never
+  overwrite its successor's result.
+- **Same-target serialization.** Claim never yields two `running` jobs of the same
+  `kind` against the same `target_id`; `job_checkpoints` are validated by `job_id`
+  on resume so a job never adopts a foreign scan's progress.
+- **Worker error boundary.** The daemon classifies failures into execution
+  (`JobExecutionError`), ownership-race (`lost` outcome, no state change),
+  infrastructure (retryable `DATABASE`), and programming (`UNEXPECTED`,
+  non-retryable) — and survives all of them, logging without secrets.
+- **Logical scan identity.** Follower observation `taken_at`/`observed_at` derive
+  from the job's `started_at` (stable across retries and reclaims), making a
+  crashed-and-retried scan idempotent on its natural key.
+- **Completeness honesty.** `follow_snapshots.completeness` and evidence metadata
+  come from the provider's final page contract (`PARTIAL` never hardcoded to
+  `COMPLETE`).
+
 ## 6. Source health
 
 `sources` + `source_health`: per source × capability — status
 (HEALTHY/DEGRADED/UNAVAILABLE), last success, last failure + reason, coverage.
 Surfaced in UI; degradation triggers graceful UI messaging, not silent gaps.
+
+## 6a. Privacy / epistemic unknowns
+
+`ig_accounts.is_private`/`is_verified` are nullable (UNKNOWN). `upsertAccount`
+writes/updates them only when the observation explicitly carries them; normalizers
+never default absence to `false`. Evidence `raw_hash` is the genuine hash of the
+raw source payload when the provider transports one, else `NULL` — a normalized
+hash never masquerades as a raw one.
 
 ## 7. Deployment modes
 

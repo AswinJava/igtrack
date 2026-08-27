@@ -20,9 +20,10 @@ Principles:
 
 - **IgAccount** — one row per known Instagram account: id, ig_id (platform id
   when known, nullable), username, username_lower (unique), display_name,
-  is_private, is_verified, account_type, profile_pic_url, bio, external_url,
-  first_seen_at, last_seen_at. Current-state cache only; history lives in
-  snapshots.
+  is_private, is_verified (both nullable: UNKNOWN until an observation
+  explicitly states them — absence never writes false), account_type,
+  profile_pic_url, bio, external_url, first_seen_at, last_seen_at.
+  Current-state cache only; history lives in snapshots.
 
 ### Observations (append-only)
 
@@ -70,8 +71,9 @@ Principles:
 
 - **Evidence** — id, observation_kind, observation_id, source_type,
   source_reference, observed_at, captured_at, confidence, raw_hash (sha256 of
-  raw payload), normalized_hash (sha256 of normalized form), raw_payload_ref
-  (storage key; raw payloads retained only where appropriate).
+  the raw source payload; NULL when no raw representation exists — never faked
+  from normalized data), normalized_hash (sha256 of normalized form),
+  raw_payload_ref (storage key; raw payloads retained only where appropriate).
 - **Source** — id, kind (FIXTURE | IMPORT | GRAPH_API | ...), name, config_ref.
 - **SourceHealth** — source_id, capability, status (HEALTHY | DEGRADED |
   UNAVAILABLE), last_success_at, last_failure_at, last_failure_reason,
@@ -88,7 +90,9 @@ Principles:
 - **MonitoringJob** — id, kind, target_id?, idempotency_key (unique), state
   (QUEUED | RUNNING | SUCCEEDED | FAILED | CANCELLED), attempts, max_attempts,
   next_run_at, started_at?, finished_at?, checkpoint JSONB, error?,
-  locked_by?, lock_expires_at?.
+  locked_by?, locked_at? (lease: stale running jobs are reclaimable after
+  `IGTRACK_JOB_LEASE_MS`, default 5 min; exhausted-attempt stragglers are
+  reaped to FAILED; same-kind same-target jobs never run concurrently).
 - **JobRun** (audit) — job_id, attempt, started_at, finished_at, outcome,
   duration_ms, log_ref.
 

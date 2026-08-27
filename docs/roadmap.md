@@ -8,7 +8,9 @@ Each phase ends with: inspect → implement → test → review → fix → docu
 | 1 | Product specification (this repo's `docs/product-spec.md`) | **done (this commit)** |
 | 2 | Architecture & database: Drizzle schema, migrations, repositories, Postgres via docker-compose | next |
 | 3 | Core application shell: Next.js app, layout/nav, design system, auth | |
-| 4 | Target management: add/resolve/validate/pause/tags/notes | |
+| 4 | Target management: add/resolve/validate/pause/tags/notes | **done** |
+| 5 | Observation engine: job runner (Postgres SKIP LOCKED), profile scans, source health | **done** |
+| 5R | Reliability gate: worker error boundary, lease/stale reclamation, checkpoint resume integrity, privacy/verification unknowns, raw-hash honesty, same-target serialization | **done (Phase 5)** |
 | 5 | Observation engine: job runner (Postgres SKIP LOCKED), profile scans, source health | |
 | 6 | Story system: story observations + mention classification pipeline | |
 | 7 | Follower/following snapshots + diff engine UI | |
