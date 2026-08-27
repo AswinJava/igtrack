@@ -41,7 +41,9 @@ export async function recordStory(
       ...(input.owner.displayName !== undefined
         ? { displayName: input.owner.displayName }
         : {}),
-      isPrivate: input.owner.isPrivate,
+      ...(input.owner.isPrivate !== undefined
+        ? { isPrivate: input.owner.isPrivate }
+        : {}),
       seenAt: new Date(story.meta.observedAt),
     });
 
@@ -109,7 +111,9 @@ export async function recordStory(
         ...(mention.account.igId !== undefined
           ? { igId: mention.account.igId }
           : {}),
-        isPrivate: mention.account.isPrivate,
+        ...(mention.account.isPrivate !== undefined
+          ? { isPrivate: mention.account.isPrivate }
+          : {}),
         seenAt: new Date(mention.meta.observedAt),
       });
 

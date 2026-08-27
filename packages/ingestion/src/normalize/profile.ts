@@ -12,7 +12,7 @@ export function normalizeProfile(raw: RawProfileV1): NormalizedProfile {
       username: p.username,
       ...(p.id !== undefined ? { igId: p.id } : {}),
       ...(p.full_name !== undefined ? { displayName: p.full_name } : {}),
-      isPrivate: p.is_private ?? false,
+      ...(p.is_private !== undefined ? { isPrivate: p.is_private } : {}),
     },
     ...(p.biography !== undefined ? { bio: p.biography } : {}),
     ...(p.external_url !== undefined ? { externalUrl: p.external_url } : {}),
@@ -20,7 +20,7 @@ export function normalizeProfile(raw: RawProfileV1): NormalizedProfile {
     ...(p.follower_count !== undefined ? { followerCount: p.follower_count } : {}),
     ...(p.following_count !== undefined ? { followingCount: p.following_count } : {}),
     ...(p.media_count !== undefined ? { postCount: p.media_count } : {}),
-    isVerified: p.is_verified ?? false,
+    ...(p.is_verified !== undefined ? { isVerified: p.is_verified } : {}),
     meta: {
       category: ObservationCategory.OBSERVED,
       confidence: Confidence.HIGH,

@@ -116,13 +116,13 @@ function accountRef(account: {
   username: string;
   igId: string | null;
   displayName: string | null;
-  isPrivate: boolean;
+  isPrivate: boolean | null;
 }): NormalizedAccountRef {
   return {
     username: account.username,
     ...(account.igId !== null ? { igId: account.igId } : {}),
     ...(account.displayName !== null ? { displayName: account.displayName } : {}),
-    isPrivate: account.isPrivate,
+    ...(account.isPrivate !== null ? { isPrivate: account.isPrivate } : {}),
   };
 }
 

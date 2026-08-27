@@ -58,8 +58,12 @@ export async function recordProfileSnapshot(
       ...(profile.account.displayName !== undefined
         ? { displayName: profile.account.displayName }
         : {}),
-      isPrivate: profile.account.isPrivate,
-      isVerified: profile.isVerified,
+      ...(profile.account.isPrivate !== undefined
+        ? { isPrivate: profile.account.isPrivate }
+        : {}),
+      ...(profile.isVerified !== undefined
+        ? { isVerified: profile.isVerified }
+        : {}),
       ...(profile.profilePicUrl !== undefined
         ? { profilePicUrl: profile.profilePicUrl }
         : {}),

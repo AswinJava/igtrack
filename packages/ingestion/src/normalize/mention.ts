@@ -80,7 +80,6 @@ export function normalizeMention(
     account: {
       username: raw.username,
       ...(raw.id !== undefined ? { igId: raw.id } : {}),
-      isPrivate: false,
     },
     ...(geometry ? { geometry } : {}),
     ...(raw.is_hidden !== undefined ? { rawVisibilityFlag: raw.is_hidden } : {}),

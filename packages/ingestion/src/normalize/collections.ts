@@ -50,7 +50,6 @@ export function normalizeComments(raw: RawCommentsPageV1): NormalizedComment[] {
     author: {
       username: c.user.username,
       ...(c.user.id !== undefined ? { igId: c.user.id } : {}),
-      isPrivate: false,
     },
     text: c.text,
     createdAt: c.created_at,

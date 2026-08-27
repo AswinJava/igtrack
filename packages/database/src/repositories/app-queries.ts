@@ -40,8 +40,8 @@ interface TargetListRow {
   status: string;
   tags: string[] | null;
   local_name: string | null;
-  is_private: boolean;
-  is_verified: boolean;
+  is_private: boolean | null;
+  is_verified: boolean | null;
   last_observed: Date | string | null;
   follower_count: number | null;
   following_count: number | null;
@@ -54,8 +54,8 @@ export interface TargetListItem {
   status: string;
   tags: string[];
   localName: string | null;
-  isPrivate: boolean;
-  isVerified: boolean;
+  isPrivate: boolean | null;
+  isVerified: boolean | null;
   followerCount: number | null;
   followingCount: number | null;
   lastObserved: Date | null;

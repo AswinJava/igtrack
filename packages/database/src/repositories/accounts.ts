@@ -39,8 +39,10 @@ export async function upsertAccount(
       usernameLower,
       ...(input.igId !== undefined ? { igId: input.igId } : {}),
       ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
-      isPrivate: input.isPrivate ?? false,
-      isVerified: input.isVerified ?? false,
+      // Only write privacy/verification when the observation explicitly knows
+      // them; UNKNOWN never becomes false.
+      ...(input.isPrivate !== undefined ? { isPrivate: input.isPrivate } : {}),
+      ...(input.isVerified !== undefined ? { isVerified: input.isVerified } : {}),
       ...(input.accountType !== undefined ? { accountType: input.accountType } : {}),
       ...(input.profilePicUrl !== undefined
         ? { profilePicUrl: input.profilePicUrl }
@@ -55,8 +57,9 @@ export async function upsertAccount(
       set: {
         ...(input.igId !== undefined ? { igId: input.igId } : {}),
         ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
-        isPrivate: input.isPrivate ?? false,
-        isVerified: input.isVerified ?? false,
+        // Presence wins; absence never erodes a known fact.
+        ...(input.isPrivate !== undefined ? { isPrivate: input.isPrivate } : {}),
+        ...(input.isVerified !== undefined ? { isVerified: input.isVerified } : {}),
         ...(input.profilePicUrl !== undefined
           ? { profilePicUrl: input.profilePicUrl }
           : {}),

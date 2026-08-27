@@ -41,7 +41,7 @@ export default async function TargetsPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <CardTitle className="flex items-center gap-2">@{t.username}{t.isVerified && <span className="text-sky-400" title="Verified">✓</span>}</CardTitle>
-                      <CardDescription>{t.displayName ?? t.localName ?? "—"} {t.isPrivate ? "· Private" : "· Public"}</CardDescription>
+                      <CardDescription>{t.displayName ?? t.localName ?? "—"} {t.isPrivate === true ? "· Private" : t.isPrivate === false ? "· Public" : ""}</CardDescription>
                     </div>
                     <Badge tone={t.status === "ACTIVE" ? "success" : t.status === "PAUSED" ? "warning" : "muted"}>{t.status}</Badge>
                   </div>

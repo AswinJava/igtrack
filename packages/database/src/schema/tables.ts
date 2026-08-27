@@ -86,8 +86,10 @@ export const igAccounts = pgTable(
     username: text("username").notNull(),
     usernameLower: text("username_lower").notNull().unique(),
     displayName: text("display_name"),
-    isPrivate: boolean("is_private").notNull().default(false),
-    isVerified: boolean("is_verified").notNull().default(false),
+    // Privacy/verification are UNKNOWN (nullable) until an explicit observation
+    // states otherwise. Absence of information must never be written as false.
+    isPrivate: boolean("is_private"),
+    isVerified: boolean("is_verified"),
     accountType: text("account_type"),
     profilePicUrl: text("profile_pic_url"),
     bio: text("bio"),

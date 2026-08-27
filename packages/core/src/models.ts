@@ -11,7 +11,7 @@ export interface NormalizedAccountRef {
   igId?: string;
   username: string;
   displayName?: string;
-  isPrivate: boolean;
+  isPrivate?: boolean;
 }
 
 export interface NormalizedProfile {
@@ -22,7 +22,7 @@ export interface NormalizedProfile {
   followerCount?: number;
   followingCount?: number;
   postCount?: number;
-  isVerified: boolean;
+  isVerified?: boolean;
   accountType?: string;
   meta: ObservationMeta;
 }

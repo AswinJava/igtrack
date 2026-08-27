@@ -125,7 +125,9 @@ export class FixtureProvider implements InstagramProvider {
       ...(raw.profile.full_name !== undefined
         ? { displayName: raw.profile.full_name }
         : {}),
-      isPrivate: raw.profile.is_private ?? false,
+      ...(raw.profile.is_private !== undefined
+        ? { isPrivate: raw.profile.is_private }
+        : {}),
     };
     return available(ref, {
       ...meta,
