@@ -1,0 +1,23 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:18:00.000Z",
+  "posts": [
+    {
+      "id": "post-1",
+      "shortcode": "AxYz001",
+      "taken_at": "2026-08-25T12:00:00.000Z",
+      "caption": "Fjord light study I",
+      "like_count": 842,
+      "comment_count": 37
+    },
+    {
+      "id": "post-2",
+      "shortcode": "AxYz002",
+      "taken_at": "2026-08-20T09:30:00.000Z",
+      "caption": "Behind the scenes",
+      "like_count": 610,
+      "comment_count": 12
+    }
+  ],
+  "next_cursor": null
+}

@@ -1,0 +1,16 @@
+{
+  "version": "v1",
+  "description": "Synthetic fixture set for IGTrack development and tests. All accounts, ids, and content are fictional.",
+  "target_username": "aurora.wilde",
+  "captured_at": "2026-08-27T09:15:00.000Z",
+  "files": {
+    "profile": "profile.json",
+    "stories": "stories.json",
+    "followers": ["followers/page-1.json", "followers/page-2.json"],
+    "following": ["following/page-1.json"],
+    "posts": ["posts/page-1.json"],
+    "comments": {
+      "post-1": "comments/post-1.json"
+    }
+  }
+}

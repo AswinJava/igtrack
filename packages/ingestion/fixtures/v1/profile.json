@@ -1,0 +1,17 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:15:00.000Z",
+  "profile": {
+    "id": "9000000001",
+    "username": "aurora.wilde",
+    "full_name": "Aurora Wilde",
+    "biography": "Photographer. Chasing light in the nordics.",
+    "follower_count": 12480,
+    "following_count": 312,
+    "media_count": 148,
+    "is_verified": false,
+    "is_private": false,
+    "profile_pic_url": "https://cdn.igtrack.test/avatars/aurora.wilde.jpg",
+    "external_url": "https://aurorawilde.example"
+  }
+}

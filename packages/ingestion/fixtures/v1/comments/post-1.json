@@ -1,0 +1,26 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:18:30.000Z",
+  "post_id": "post-1",
+  "comments": [
+    {
+      "id": "c-1",
+      "user": { "id": "9000000002", "username": "noah.frames" },
+      "text": "Unreal light. Teach me.",
+      "created_at": "2026-08-25T13:05:00.000Z"
+    },
+    {
+      "id": "c-2",
+      "user": { "id": "9000000003", "username": "mira.lens" },
+      "text": "This is the one.",
+      "created_at": "2026-08-25T14:22:00.000Z"
+    },
+    {
+      "id": "c-3",
+      "user": { "id": "9000000002", "username": "noah.frames" },
+      "text": "Frame of the year.",
+      "created_at": "2026-08-26T08:10:00.000Z"
+    }
+  ],
+  "next_cursor": null
+}

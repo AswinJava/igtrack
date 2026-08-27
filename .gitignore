@@ -1,0 +1,42 @@
+# dependencies
+node_modules/
+
+# builds
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# env & secrets — never commit
+.env
+.env.*
+!.env.example
+
+# local data
+data/
+storage/
+*.sqlite
+*.db
+
+# test & coverage
+coverage/
+playwright-report/
+test-results/
+
+# logs
+*.log
+logs/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# opencode session artifacts (keep shared config, ignore local state)
+.opencode/cache/
+.opencode/tmp/
+.opencode/log/
+.playwright-cli/
