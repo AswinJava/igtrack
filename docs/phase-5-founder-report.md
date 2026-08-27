@@ -6,7 +6,7 @@ final verdict are appended at gate completion. Findings reference
 
 ## 1. Executive verdict (pre-gate)
 
-**NOT READY.** The Phase 0–4 baseline is architecturally sound (clean boundaries,
+**NOT READY (as written).** The Phase 0–4 baseline is architecturally sound (clean boundaries,
 append-only enforced at the DB, honest capability branches, 71/71 tests passing
 against real Postgres 16). But the observation engine is **unfit for continuous
 monitoring** until four verified P0 violations are closed:
@@ -200,3 +200,49 @@ deterministic:
    job loses the failing worker's error record — recovery is correct (reclaim
    path owns the job), only diagnostics detail is lost.
 4. D2/D3/D4 honesty gaps remain open until their deferred fix (tracked above).
+
+---
+
+## Final verdict (appended at gate completion)
+
+**Status: READY.** All Phase 5 reliability gates are closed on real Postgres 16.
+
+### Test summary (real Postgres 16 — `igtrack_test`, migrated fresh)
+
+| Suite | Result |
+|---|---|
+| `packages/database` (jobs incl. lease, persistence, follows, stories, retention, schema, source-health, **privacy**) | **PASSED** |
+| `workers/monitoring` (boundary + follower-scan failure-injection) | **PASSED** (12) |
+| `packages/ingestion`, `packages/core`, `apps/web` | **PASSED** |
+| **Total** | **92 passed · 1 skipped (inverted no-DB fallback) · 18 files** |
+| `pnpm typecheck` (5/5 workspaces) | **PASSED** |
+| `pnpm --filter @igtrack/web build` | **PASSED** |
+
+### Gate checklist
+
+- [x] B2 worker survives transient infrastructure failures (dead-proxy DB test)
+- [x] B1 stale running jobs reclaimable (+ terminal reap; deterministic `leaseMs` tests)
+- [x] Stale workers cannot overwrite successor results (guarded `completeJob`/`failJob`)
+- [x] B3 checkpoint resume preserves all acquired pages (crash-after-page-1 test)
+- [x] No fabricated LOST members after crash/recovery (delta-count assertion)
+- [x] D1 privacy/verification unknowns cannot overwrite known facts (nullable cols, absence-preserving upsert, normalizers)
+- [x] C1 logical scan retry is idempotent (job `started_at` scan identity)
+- [x] C2 PARTIAL cannot become COMPLETE (provider-contract completeness)
+- [x] B4 same-target scan concurrency safe (claim-time serialization + checkpoint `job_id` ownership)
+- [x] Evidence hashes semantically truthful (`raw_hash` NULL when no raw representation; provider-transported genuine raw hash)
+- [x] Worker tests exist and execute (12 tests run against real Postgres)
+- [x] Failure-injection tests execute (crash/resume, lease, dead-DB, ownership races)
+- [x] Real Postgres tests execute (no silent skips)
+- [x] `pnpm test` · `pnpm typecheck` · web build all pass
+- [x] Documentation matches implementation (failure matrix, founder report, data-model, architecture, roadmap)
+- [x] Git working tree clean; commits logically separated
+
+### Migrations added
+`0002` — `ig_accounts.is_private/is_verified` nullable (D1). `0003` — `evidence.raw_hash` nullable (E). Run `pnpm --filter @igtrack/database db:migrate`.
+
+### Commit history (this phase)
+`394f74e` docs matrix · `3b2d638` docs report · `d9b7c49` boundary RED · `a62109b` B2 fix · `dc69b38` lease RED · `b353a17` B1 fix · `a561125` follower RED · `653b3ab` B3/C1/C2/B4 fix · `e009d79` D1 fix + 0002 · `5d1d5dc` E fix + 0003 · `3517a52` docs.
+HEAD: **`3517a52`**.
+
+### Deferred (documented, not hidden)
+D2 empty-vs-zero reclassification, D3 profile PARTIAL surfacing, D4 job-outcome dimension, scheduler, FOLLOWING_SCAN/STORY_SCAN wiring, Playwright/CI, staging-table checkpoints, session-purge scheduling, diagnostics scoping, web `@igtrack/ingestion` cleanup. Each is tracked in the failure matrix / P2 list.
