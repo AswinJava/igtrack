@@ -45,3 +45,5 @@ Thumbs.db
 cleanup.ps1
 *.out.txt
 .muse/
+
+test-log.txt
