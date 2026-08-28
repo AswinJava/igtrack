@@ -21,6 +21,11 @@ import {
 
 export type { ExecutionSource, JobResult, FollowerScanOptions } from "./provider.js";
 export { createExecutionSource, providerFromEnv, defaultFixturesDir } from "./provider.js";
+import {
+  runSchedulerTick,
+  schedulerEnabled,
+  schedulerTickIntervalMs,
+} from "./scheduler.js";
 
 export type RunOutcomeState =
   | "succeeded"
@@ -252,14 +257,39 @@ export async function runWorkerLoop(opts: {
   pollMs?: number;
   maxIterations?: number;
   onError?: (err: unknown) => void;
+  scheduler?: {
+    enabled?: boolean;
+    tickMs?: number;
+  };
 }): Promise<void> {
   const { db, src } = opts;
   const pollMs = opts.pollMs ?? Number(process.env.IGTRACK_JOB_POLL_MS ?? 5000);
   const maxIterations = opts.maxIterations ?? Number(process.env.IGTRACK_JOB_MAX_ITER ?? Infinity);
+  const schedulerOn = opts.scheduler?.enabled ?? schedulerEnabled();
+  const schedulerTickMs = opts.scheduler?.tickMs ?? schedulerTickIntervalMs();
   const workerId = makeWorkerId();
+  let lastSchedulerTick = 0;
   let iterations = 0;
   for (;;) {
     if (maxIterations !== Infinity && iterations >= maxIterations) break;
+    // Scheduler cadence is independent of job polling: the tick only enqueues
+    // due scans (orchestration), the poll loop claims and executes them.
+    if (schedulerOn && Date.now() - lastSchedulerTick >= schedulerTickMs) {
+      try {
+        const tick = await runSchedulerTick(db);
+        lastSchedulerTick = Date.now();
+        if (tick.enqueued > 0) {
+          logWorker("info", "scheduler_tick", {
+            enqueued: tick.enqueued,
+            deduplicated: tick.deduplicated,
+            targets: tick.targetsConsidered,
+          });
+        }
+      } catch (err) {
+        logWorker("warn", "scheduler_tick_error", { message: messageOf(err) });
+        opts.onError?.(err);
+      }
+    }
     try {
       await pollOnce(db, workerId, src);
     } catch (err) {

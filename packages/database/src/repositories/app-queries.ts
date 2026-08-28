@@ -818,6 +818,13 @@ export interface OperationsSnapshot {
     lastClaimStartedAt: Date | null;
     runningCount: number;
   };
+  scheduler: {
+    enabled: boolean;
+    lastTickAt: Date | null;
+    lastSuccessAt: Date | null;
+    lastError: string | null;
+    outcomes: Record<string, number>;
+  };
   runningJobs: JobQueueSummary[];
   retryWaitJobs: JobQueueSummary[];
   failedJobs: JobQueueSummary[];
@@ -828,7 +835,7 @@ export interface OperationsSnapshot {
 export async function getOperationsSnapshot(db: Database): Promise<OperationsSnapshot> {
   try {
     await db.execute(sql`SELECT 1`);
-    const [migrationCheck, q, tables, runningJobs, retryWaitJobs, failedJobs, health, workerRow] =
+    const [migrationCheck, q, tables, runningJobs, retryWaitJobs, failedJobs, health, workerRow, schedulerRow, outcomeRows] =
       await Promise.all([
         query<{ exists: boolean }>(
           db,
@@ -855,6 +862,20 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
           db,
           sql`SELECT max(started_at) AS started_at FROM monitoring_jobs`,
         ).catch(() => [] as Array<{ started_at: Date | string | null }>),
+        query<{ last_tick_at: Date | string | null; last_success_at: Date | string | null; last_error: { message?: string } | null }>(
+          db,
+          sql`SELECT last_tick_at, last_success_at,
+                     (CASE WHEN last_error IS NULL THEN NULL
+                           ELSE left(coalesce(last_error->>'message', 'unknown error'), 300) END) AS last_error
+                FROM scheduler_state WHERE id = 'default'`,
+        ).catch(() => [] as Array<{ last_tick_at: Date | string | null; last_success_at: Date | string | null; last_error: { message?: string } | null }>),
+        query<{ outcome: string; n: number }>(
+          db,
+          sql`SELECT outcome::text AS outcome, count(*)::int AS n
+              FROM monitoring_jobs
+              WHERE outcome IS NOT NULL
+              GROUP BY outcome`,
+        ).catch(() => [] as Array<{ outcome: string; n: number }>),
       ]);
 
     const lastClaimRaw = workerRow[0]?.started_at ?? null;
@@ -876,6 +897,21 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
         lastClaimStartedAt: lastClaimRaw === null ? null : asDate(lastClaimRaw),
         runningCount: runningJobs.length,
       },
+      scheduler: {
+        enabled: process.env.IGTRACK_SCHEDULER_ENABLED !== "false",
+        lastTickAt:
+          schedulerRow[0]?.last_tick_at === null || schedulerRow[0] === undefined
+            ? null
+            : asDate(schedulerRow[0].last_tick_at),
+        lastSuccessAt:
+          schedulerRow[0]?.last_success_at === null || schedulerRow[0] === undefined
+            ? null
+            : asDate(schedulerRow[0].last_success_at),
+        lastError: schedulerRow[0]?.last_error?.message ?? null,
+        outcomes: Object.fromEntries(
+          outcomeRows.map((r) => [r.outcome, int(r.n)]),
+        ),
+      },
       runningJobs,
       retryWaitJobs,
       failedJobs,
@@ -886,6 +922,13 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
       database: { connected: false, migrationsApplied: false, tables: [] },
       queue: { queued: 0, running: 0, retryWait: 0, succeeded: 0, failed: 0, cancelled: 0 },
       workers: { lastClaimStartedAt: null, runningCount: 0 },
+      scheduler: {
+        enabled: process.env.IGTRACK_SCHEDULER_ENABLED !== "false",
+        lastTickAt: null,
+        lastSuccessAt: null,
+        lastError: null,
+        outcomes: {},
+      },
       runningJobs: [],
       retryWaitJobs: [],
       failedJobs: [],

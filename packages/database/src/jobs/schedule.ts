@@ -134,7 +134,7 @@ export async function listActiveTargetIds(
     ORDER BY created_at ASC, id ASC
     LIMIT ${limit}
   `);
-  return Array.from(rows as Array<{ id: string }>).map((row) => row.id);
+  return Array.from(rows as unknown as Array<{ id: string }>).map((row) => row.id);
 }
 
 // ---------------------------------------------------------------------------

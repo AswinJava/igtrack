@@ -107,6 +107,7 @@ interface ClaimableJobRow {
   payload: unknown;
   priority: number;
   status: JobStatus;
+  outcome: (typeof monitoringJobs.$inferSelect)["outcome"];
   attempts: number;
   max_attempts: number;
   available_at: Date;
@@ -128,6 +129,7 @@ function mapJobRow(row: ClaimableJobRow): JobRecord {
     payload: row.payload,
     priority: row.priority,
     status: row.status,
+    outcome: row.outcome,
     attempts: row.attempts,
     maxAttempts: row.max_attempts,
     availableAt: row.available_at,

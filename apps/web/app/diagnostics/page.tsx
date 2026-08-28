@@ -83,6 +83,49 @@ export default async function DiagnosticsPage() {
             </p>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Scheduler</CardTitle>
+            <CardDescription>Deterministic scan tick — orchestration only, no provider logic.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-xs">
+            <div className="flex items-center justify-between rounded-lg bg-zinc-800/50 px-3 py-2">
+              <span className="text-zinc-500">Enabled</span>
+              <Badge tone={data.scheduler.enabled ? "success" : "muted"}>
+                {data.scheduler.enabled ? "enabled" : "disabled"}
+              </Badge>
+            </div>
+            <div className="flex items-center justify-between rounded-lg bg-zinc-800/50 px-3 py-2">
+              <span className="text-zinc-500">Last tick</span>
+              <span className="font-medium text-zinc-200">{data.scheduler.lastTickAt ? formatRelative(data.scheduler.lastTickAt) : "never"}</span>
+            </div>
+            <div className="flex items-center justify-between rounded-lg bg-zinc-800/50 px-3 py-2">
+              <span className="text-zinc-500">Last successful tick</span>
+              <span className="font-medium text-zinc-200">{data.scheduler.lastSuccessAt ? formatRelative(data.scheduler.lastSuccessAt) : "never"}</span>
+            </div>
+            {data.scheduler.lastError && (
+              <div className="rounded-lg border border-red-500/30 bg-red-950/30 px-3 py-2">
+                <p className="font-medium text-red-400">Last tick failed</p>
+                <p className="mt-1 break-words text-zinc-300">{data.scheduler.lastError}</p>
+              </div>
+            )}
+            {Object.keys(data.scheduler.outcomes).length > 0 && (
+              <div>
+                <p className="mb-1 text-zinc-500">Job outcomes</p>
+                <dl className="grid grid-cols-2 gap-2">
+                  {Object.entries(data.scheduler.outcomes).map(([kind, n]) => (
+                    <div key={kind} className="rounded-lg bg-zinc-800/50 px-3 py-2">
+                      <dt className="text-zinc-500">{kind}</dt>
+                      <dd className="mt-1 text-lg font-semibold text-zinc-200">{n}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">

@@ -592,16 +592,17 @@ export async function runStoryScan(
 
   for (const story of stories) {
     const observationId = storyObservationId(account.username, story);
+    const rawMeta = {
+      observedAt: story.meta.observedAt,
+      confidence: story.meta.confidence,
+      ...(result.rawPayloadHash !== undefined ? { rawPayloadHash: result.rawPayloadHash } : {}),
+      ...(result.rawReference !== undefined ? { rawReference: result.rawReference } : {}),
+    };
     const evidence = evidenceFrom(
       source,
       "story",
       observationId,
-      {
-        observedAt: story.meta.observedAt,
-        confidence: story.meta.confidence,
-        rawPayloadHash: result.rawPayloadHash,
-        rawReference: result.rawReference,
-      },
+      rawMeta,
       story,
       { completion },
     );
@@ -619,8 +620,12 @@ export async function runStoryScan(
         {
           observedAt: mention.meta.observedAt,
           confidence: mention.meta.confidence,
-          rawPayloadHash: result.rawPayloadHash,
-          rawReference: result.rawReference,
+          ...(result.rawPayloadHash !== undefined
+            ? { rawPayloadHash: result.rawPayloadHash }
+            : {}),
+          ...(result.rawReference !== undefined
+            ? { rawReference: result.rawReference }
+            : {}),
         },
         mention,
         {

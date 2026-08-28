@@ -379,7 +379,7 @@ export class FixtureProvider implements InstagramProvider {
     if (!("value" in json)) {
       return new ErrorResult({
         kind: CapabilityErrorKind.SCHEMA_MISMATCH,
-        message: `Profile fixture is not valid JSON: ${json.error.message.slice(0, 300)}`,
+        message: `Profile fixture is not valid JSON: ${(json.error?.message ?? "parse failure").slice(0, 300)}`,
         retryable: false,
       });
     }
