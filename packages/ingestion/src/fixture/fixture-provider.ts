@@ -160,7 +160,9 @@ export class FixtureProvider implements InstagramProvider {
     const meta = this.meta(account);
     const manifest = await this.loadManifest();
     const rawText = await this.readFixture(manifest.files.stories);
-    const parsed = rawStoriesV1.safeParse(JSON.parse(rawText));
+    const json = this.parseJson(rawText);
+    if (!("value" in json)) return json;
+    const parsed = rawStoriesV1.safeParse(json.value);
     if (!parsed.success) return this.schemaError(meta, parsed.error.message);
 
     const raw: RawStoriesV1 = parsed.data;
@@ -212,7 +214,9 @@ export class FixtureProvider implements InstagramProvider {
     }
 
     const rawText = await this.readFixture(files[index]!);
-    const parsed = rawPostsPageV1.safeParse(JSON.parse(rawText));
+    const json = this.parseJson(rawText);
+    if (!("value" in json)) return json;
+    const parsed = rawPostsPageV1.safeParse(json.value);
     if (!parsed.success) return this.schemaError(meta, parsed.error.message);
 
     const raw: RawPostsPageV1 = parsed.data;
@@ -242,7 +246,9 @@ export class FixtureProvider implements InstagramProvider {
     }
 
     const rawText = await this.readFixture(file);
-    const parsed = rawCommentsPageV1.safeParse(JSON.parse(rawText));
+    const json = this.parseJson(rawText);
+    if (!("value" in json)) return json;
+    const parsed = rawCommentsPageV1.safeParse(json.value);
     if (!parsed.success) return this.schemaError(meta, parsed.error.message);
 
     const raw: RawCommentsPageV1 = parsed.data;
@@ -269,7 +275,9 @@ export class FixtureProvider implements InstagramProvider {
     const pages: Array<{ raw: RawFollowPageV1; rawText: string; file: string }> = [];
     for (const file of files) {
       const rawText = await this.readFixture(file);
-      const parsed = rawFollowPageV1.safeParse(JSON.parse(rawText));
+      const json = this.parseJson(rawText);
+      if (!("value" in json)) return json;
+      const parsed = rawFollowPageV1.safeParse(json.value);
       if (!parsed.success) return this.schemaError(meta, parsed.error.message);
       pages.push({ raw: parsed.data, rawText, file });
     }
@@ -333,6 +341,19 @@ export class FixtureProvider implements InstagramProvider {
     });
   }
 
+  // A malformed payload is a CapabilityResult, never a thrown exception: the
+  // provider contract keeps parsing failures inside the capability model (C5).
+  private parseJson(rawText: string): { value: unknown } | CapabilityResult<never> {
+    try {
+      return { value: JSON.parse(rawText) };
+    } catch (err) {
+      return this.schemaError(
+        this.meta(),
+        err instanceof Error ? err.message : "Fixture payload is not valid JSON",
+      );
+    }
+  }
+
   private async loadManifest(): Promise<FixtureManifest> {
     if (this.manifestCache !== undefined) return this.manifestCache;
     const text = await readFile(join(this.fixturesDir, "manifest.json"), "utf8");
@@ -354,7 +375,15 @@ export class FixtureProvider implements InstagramProvider {
   > {
     const manifest = await this.loadManifest();
     const rawText = await this.readFixture(manifest.files.profile);
-    const parsed = rawProfileV1.safeParse(JSON.parse(rawText));
+    const json = this.parseJson(rawText);
+    if (!("value" in json)) {
+      return new ErrorResult({
+        kind: CapabilityErrorKind.SCHEMA_MISMATCH,
+        message: `Profile fixture is not valid JSON: ${json.error.message.slice(0, 300)}`,
+        retryable: false,
+      });
+    }
+    const parsed = rawProfileV1.safeParse(json.value);
     if (!parsed.success) {
       return new ErrorResult({
         kind: CapabilityErrorKind.SCHEMA_MISMATCH,

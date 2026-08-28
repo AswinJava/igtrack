@@ -251,8 +251,35 @@ export interface FollowerScanOptions {
 }
 
 const FOLLOWER_CHECKPOINT_KIND = "FOLLOWER_SCAN";
+const FOLLOWING_CHECKPOINT_KIND = "FOLLOWING_SCAN";
 
-interface FollowerCheckpointProgress {
+export interface FollowScanConfig {
+  jobKind: "FOLLOWER_SCAN" | "FOLLOWING_SCAN";
+  direction: FollowDirection;
+  capability: "getFollowers" | "getFollowing";
+  checkpointKind: string;
+  // Stable observation-identity prefix; the FOLLOWERS value preserves the
+  // Phase 5 identity scheme exactly.
+  identityPrefix: string;
+}
+
+const FOLLOWER_SCAN_CONFIG: FollowScanConfig = {
+  jobKind: "FOLLOWER_SCAN",
+  direction: "FOLLOWERS",
+  capability: "getFollowers",
+  checkpointKind: FOLLOWER_CHECKPOINT_KIND,
+  identityPrefix: "followers",
+};
+
+const FOLLOWING_SCAN_CONFIG: FollowScanConfig = {
+  jobKind: "FOLLOWING_SCAN",
+  direction: "FOLLOWING",
+  capability: "getFollowing",
+  checkpointKind: FOLLOWING_CHECKPOINT_KIND,
+  identityPrefix: "following",
+};
+
+interface FollowCheckpointProgress {
   cursor?: string;
   page?: number;
   entries?: Array<{ username: string; igId?: string }>;
@@ -264,8 +291,30 @@ export async function runFollowerScan(
   src: ExecutionSource,
   options: FollowerScanOptions = {},
 ): Promise<JobResult> {
+  return runFollowScan(db, job, src, FOLLOWER_SCAN_CONFIG, options);
+}
+
+export async function runFollowingScan(
+  db: Database,
+  job: JobRecord,
+  src: ExecutionSource,
+  options: FollowerScanOptions = {},
+): Promise<JobResult> {
+  return runFollowScan(db, job, src, FOLLOWING_SCAN_CONFIG, options);
+}
+
+// Direction-generic follow scan: one reliability architecture (checkpoint
+// ownership, logical scan identity, completeness honesty, derived deltas)
+// shared by FOLLOWER_SCAN and FOLLOWING_SCAN.
+export async function runFollowScan(
+  db: Database,
+  job: JobRecord,
+  src: ExecutionSource,
+  cfg: FollowScanConfig,
+  options: FollowerScanOptions = {},
+): Promise<JobResult> {
   if (job.targetId === null) {
-    throw new JobExecutionError("FOLLOWER_SCAN requires a target", { retryable: false });
+    throw new JobExecutionError(`${cfg.jobKind} requires a target`, { retryable: false });
   }
   const targetId = job.targetId;
   const { account } = await loadAccountForTarget(db, job);
@@ -274,14 +323,14 @@ export async function runFollowerScan(
     throw new JobExecutionError(`target ${targetId} not found`, { retryable: false });
   }
   const source = src.source;
-  const direction: FollowDirection = "FOLLOWERS";
+  const direction = cfg.direction;
 
   const caps = src.provider.capabilities();
-  if (caps.getFollowers !== true) {
+  if (caps[cfg.capability] !== true) {
     await markCapabilityUnavailable(db, {
       source,
-      capability: "getFollowers",
-      coverageNote: "Provider declares the getFollowers capability unavailable.",
+      capability: cfg.capability,
+      coverageNote: `Provider declares the ${cfg.capability} capability unavailable.`,
     });
     return "unavailable";
   }
@@ -292,11 +341,11 @@ export async function runFollowerScan(
 
   // A checkpoint belongs to one logical scan. Resume only when this job owns
   // it; a foreign or legacy checkpoint starts a fresh scan.
-  const checkpoint = await loadCheckpoint(db, targetId, FOLLOWER_CHECKPOINT_KIND);
+  const checkpoint = await loadCheckpoint(db, targetId, cfg.checkpointKind);
   const ownedCheckpoint =
     checkpoint !== null && checkpoint.jobId === job.id ? checkpoint : null;
   const progress = (ownedCheckpoint?.progress ?? undefined) as
-    | FollowerCheckpointProgress
+    | FollowCheckpointProgress
     | undefined;
   let cursor = progress?.cursor;
   let pageIndex = progress?.page ?? 0;
@@ -311,7 +360,7 @@ export async function runFollowerScan(
   const persistCheckpoint = async (nextCursor: string | undefined): Promise<void> => {
     await saveCheckpoint(db, {
       targetId,
-      kind: FOLLOWER_CHECKPOINT_KIND,
+      kind: cfg.checkpointKind,
       jobId: job.id,
       ...(nextCursor !== undefined ? { cursor: nextCursor } : {}),
       page: pagesProcessed,
@@ -329,7 +378,7 @@ export async function runFollowerScan(
   const ref = accountRef(account);
 
   for (;;) {
-    const pageResult = await src.provider.getFollowers(
+    const pageResult = await src.provider[cfg.capability](
       ref,
       cursor !== undefined ? { value: cursor } : undefined,
     );
@@ -337,8 +386,10 @@ export async function runFollowerScan(
     if (pageResult.status === CapabilityStatus.UNAVAILABLE) {
       await markCapabilityUnavailable(db, {
         source,
-        capability: "getFollowers",
-        coverageNote: pageResult.note ?? "Follower list unavailable from this source.",
+        capability: cfg.capability,
+        coverageNote:
+          pageResult.note ??
+          `${direction === "FOLLOWERS" ? "Follower" : "Following"} list unavailable from this source.`,
       });
       return "unavailable";
     }
@@ -346,7 +397,7 @@ export async function runFollowerScan(
       const err = pageResult.error;
       await recordCapabilityFailure(db, {
         source,
-        capability: "getFollowers",
+        capability: cfg.capability,
         reason: err?.message ?? "Provider error",
         errorCategory: err?.kind ?? "INTERNAL",
       });
@@ -395,14 +446,18 @@ export async function runFollowerScan(
   if (entries.length === 0 && pagesProcessed === 0) {
     await recordCapabilityFailure(db, {
       source,
-      capability: "getFollowers",
-      reason: "Provider returned no follower entries before any page completed",
+      capability: cfg.capability,
+      reason:
+        "Provider returned no follow entries before any page completed",
       errorCategory: "EMPTY",
     });
-    throw new JobExecutionError("Provider returned no follower entries", {
-      retryable: true,
-      kind: "EMPTY",
-    });
+    throw new JobExecutionError(
+      `Provider returned no ${direction === "FOLLOWERS" ? "follower" : "following"} entries`,
+      {
+        retryable: true,
+        kind: "EMPTY",
+      },
+    );
   }
 
   // Derived follow deltas vs the PREVIOUS snapshot — must be read before the
@@ -412,7 +467,7 @@ export async function runFollowerScan(
   // Observation identity is the logical scan time (stable across retries and
   // lease reclaims), not this execution's wall clock. captured_at stays real.
   const observedAt = scanObservedAt;
-  const observationId = `followers:${targetId}@${observedAt}`;
+  const observationId = `${cfg.identityPrefix}:${targetId}@${observedAt}`;
   const completion = lastPageComplete ? "COMPLETE" : "PARTIAL";
   const evidence = evidenceFrom(
     source,
@@ -455,14 +510,14 @@ export async function runFollowerScan(
   // Clear the checkpoint now the scan is complete so the next scan starts fresh.
   await saveCheckpoint(db, {
     targetId,
-    kind: FOLLOWER_CHECKPOINT_KIND,
+    kind: cfg.checkpointKind,
     page: 0,
     progress: { page: 0, entries: [] },
   });
 
   await recordCapabilitySuccess(db, {
     source,
-    capability: "getFollowers",
+    capability: cfg.capability,
   });
 
   return "succeeded";

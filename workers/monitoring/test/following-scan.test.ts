@@ -18,6 +18,7 @@ import {
 } from "@igtrack/core";
 import {
   claimJob,
+  completeJob,
   createTarget,
   enqueueJob,
   followDeltas,
@@ -308,7 +309,7 @@ describe.runIf(dbAvailable)("worker FOLLOWING_SCAN", () => {
     const result = await runFollowingScan(handle.db, job, src);
     expect(result).toBe("unavailable");
     expect(await followingSnapshotRows(targetId)).toHaveLength(0);
-    const health = await getSourceHealth(handle.db, "stub:unavail");
+    const health = await getSourceHealth(handle.db, "stub:following");
     expect(health.find((h) => h.capability === "getFollowing")?.status).toBe("UNAVAILABLE");
   });
 
@@ -412,6 +413,8 @@ describe.runIf(dbAvailable)("worker FOLLOWING_SCAN", () => {
       job1,
       paginatedFollowingSource([{ usernames: ["alpha", "bravo"], complete: true }]),
     );
+    // Release the target so the second logical scan can be claimed.
+    await completeJob(handle.db, job1.id, "worker-following");
 
     const job2 = await makeJob(targetId);
     await runFollowingScan(
