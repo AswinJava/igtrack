@@ -88,13 +88,19 @@ Principles:
 ### Operations
 
 - **MonitoringJob** — id, kind, target_id?, idempotency_key (unique), state
-  (QUEUED | RUNNING | SUCCEEDED | FAILED | CANCELLED), attempts, max_attempts,
+  (QUEUED | RUNNING | SUCCEEDED | FAILED | CANCELLED), **outcome** (nullable
+  diagnostics dimension: COMPLETED | COMPLETED_EMPTY | COMPLETED_PARTIAL |
+  UNAVAILABLE | SKIPPED_PAUSED | SKIPPED_STOPPED — how the job concluded;
+  failures stay in status/error), attempts, max_attempts,
   next_run_at, started_at?, finished_at?, checkpoint JSONB, error?,
   locked_by?, locked_at? (lease: stale running jobs are reclaimable after
   `IGTRACK_JOB_LEASE_MS`, default 5 min; exhausted-attempt stragglers are
   reaped to FAILED; same-kind same-target jobs never run concurrently).
+- **SchedulerState** — singleton row (`id='default'`): last_tick_at,
+  last_success_at, last_error (message + failedAt only; no stack traces).
+  Diagnostics truth, never a scheduling decision.
 - **JobRun** (audit) — job_id, attempt, started_at, finished_at, outcome,
-  duration_ms, log_ref.
+  duration_ms, log_ref. (Planned; not yet persisted.)
 
 ### Notifications (post-MVP)
 

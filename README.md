@@ -12,18 +12,23 @@ evidence. IGTrack never pretends to know what the platform does not expose.
 
 ## Status
 
-Phase 0/1 — repository foundation, product spec, core contracts, and
-fixture-driven ingestion. See `docs/roadmap.md`.
+Phase 6 — deterministic scheduler + complete observation coverage
+(FOLLOWING_SCAN, STORY_SCAN + mention pipeline, job outcomes, scheduler
+diagnostics, first Playwright E2E) on top of the Phase 5 reliability gate.
+Ingestion remains **fixture-only**: no production Instagram monitoring exists.
+See `docs/roadmap.md`.
 
 ## Quickstart
 
 ```bash
 pnpm install
-pnpm test          # vitest, fixture-driven, no network
+pnpm test          # vitest, fixture-driven; DB suites run against real Postgres
 pnpm typecheck
+pnpm e2e           # Playwright smoke (needs Docker Postgres; provisions igtrack_e2e)
 ```
 
-Postgres (Phase 2+): start Docker Desktop, then `docker compose up -d`.
+Postgres: start Docker Desktop, then `docker compose up -d` (or any Postgres 16
+at `postgresql://igtrack:igtrack@127.0.0.1:5432`).
 
 ## Layout
 
@@ -32,7 +37,7 @@ apps/web              Next.js app (Phase 3)
 packages/core         domain types, provider contracts, diff/scoring primitives
 packages/ingestion    source adapters, normalizers, versioned fixtures
 packages/database     Drizzle schema + repositories (Phase 2)
-workers/monitoring    db-backed job runner (Phase 5)
+workers/monitoring    db-backed job runner + deterministic scheduler (Phase 5–6)
 docs/                 spec, architecture, data model, platform limitations
 ```
 

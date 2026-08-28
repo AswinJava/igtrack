@@ -55,6 +55,13 @@ fake coverage.
 ## 5. Consequences baked into the product
 
 - Every provider method returns `CapabilityResult` — UNAVAILABLE is a first-class answer.
+- The scheduler is provider-agnostic: it only enqueues scans for ACTIVE targets
+  and never fabricates work when a provider cannot serve them. A scheduled scan
+  of an unavailable provider completes with outcome `UNAVAILABLE` — never as an
+  empty dataset.
+- Story scans respect ephemerality: only stories actually observed in a scan
+  window are persisted. Gaps between scans are unobserved time, never "no
+  stories existed".
 - Source health dashboard shows degradation; UI degrades gracefully with honest copy.
 - Relationship scores are INFERRED, evidence-linked, never definitive.
 - Coverage gaps are displayed ("no story observations between Aug 3–5"), never papered over.

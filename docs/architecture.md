@@ -136,6 +136,42 @@ remains in `packages/core`.
   come from the provider's final page contract (`PARTIAL` never hardcoded to
   `COMPLETE`).
 
+**Phase 6 additions (scheduler + coverage):**
+- **Scheduler = orchestration only.** `workers/monitoring/src/scheduler.ts`
+  decides WHICH scans are due and enqueues them; it contains no provider logic
+  and never executes scans. Persistence primitives (guarded enqueue, active-target
+  batching, scheduler-state) live in `packages/database/src/jobs/schedule.ts`.
+- **Deterministic cadence.** PROFILE/FOLLOWER/FOLLOWING every 6h, STORY every
+  30min (stories expire after 24h — a missed poll is a permanent gap). Fully
+  configurable via `IGTRACK_SCAN_PROFILE_MS`, `IGTRACK_SCAN_FOLLOWERS_MS`,
+  `IGTRACK_SCAN_FOLLOWING_MS`, `IGTRACK_SCAN_STORY_MS`; no code change needed.
+- **Window idempotency.** Job key = `sched:<KIND>:<targetId>:<windowStartISO>`
+  where `windowStart = floor(now / interval)`. The key MUST encode the window:
+  a completed job permanently holds its key, so a bare `target+kind` key would
+  suppress all future scans. Repeated ticks and concurrent scheduler instances
+  converge via the unique idempotency index.
+- **Race-safe enqueue.** A single guarded `INSERT…SELECT … FROM targets WHERE
+  status='ACTIVE' … ON CONFLICT DO NOTHING` — a target paused/deleted between
+  tick selection and enqueue can never receive a job. Residual race (pause
+  AFTER enqueue) is closed worker-side: the executor completes such jobs with
+  outcome `SKIPPED_PAUSED`/`SKIPPED_STOPPED` without scanning.
+- **Job outcome dimension (D4).** `monitoring_jobs.outcome` (nullable enum:
+  `COMPLETED | COMPLETED_EMPTY | COMPLETED_PARTIAL | UNAVAILABLE |
+  SKIPPED_PAUSED | SKIPPED_STOPPED`) distinguishes a succeeded scan with real
+  observations from an unavailable provider on the job row itself; failures
+  stay in `status`/`error`. `scheduler_state` (singleton) records last tick,
+  last success and last error for diagnostics.
+- **FOLLOWING_SCAN** shares the direction-generic follow-scan implementation
+  with FOLLOWER_SCAN (checkpoint ownership, logical scan identity, completeness
+  honesty, derived `FOLLOWING` deltas). **STORY_SCAN** reuses the existing
+  `recordStory` pipeline: capability check → UNAVAILABLE never becomes zero;
+  AVAILABLE+0 is recorded honestly as `COMPLETED_EMPTY`; PARTIAL is preserved
+  in evidence metadata; mention evidence links story, classification
+  (`MentionVisibilityClass`), source, timestamps, confidence and hashes.
+- Scheduler tick cadence (`IGTRACK_SCHEDULER_TICK_MS`, default 60s) is
+  independent of job polling; the daemon loop calls the tick, bounded batches
+  (`IGTRACK_SCHEDULER_BATCH`, default 200) keep large fleets safe.
+
 ## 6. Source health
 
 `sources` + `source_health`: per source × capability — status

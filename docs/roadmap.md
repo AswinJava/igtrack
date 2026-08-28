@@ -4,23 +4,22 @@ Each phase ends with: inspect → implement → test → review → fix → docu
 
 | Phase | Scope | Status |
 |---|---|---|
-| 0 | Repo & architecture discovery: audit, foundation files, docs, monorepo scaffold, core contracts, fixture-driven ingestion | **in progress** |
-| 1 | Product specification (this repo's `docs/product-spec.md`) | **done (this commit)** |
-| 2 | Architecture & database: Drizzle schema, migrations, repositories, Postgres via docker-compose | next |
-| 3 | Core application shell: Next.js app, layout/nav, design system, auth | |
+| 0 | Repo & architecture discovery: audit, foundation files, docs, monorepo scaffold, core contracts, fixture-driven ingestion | **done** |
+| 1 | Product specification (`docs/product-spec.md`) | **done** |
+| 2 | Architecture & database: Drizzle schema, migrations, repositories, Postgres via docker-compose | **done** |
+| 3 | Core application shell: Next.js app, layout/nav, design system, auth | **done** |
 | 4 | Target management: add/resolve/validate/pause/tags/notes | **done** |
 | 5 | Observation engine: job runner (Postgres SKIP LOCKED), profile scans, source health | **done** |
-| 5R | Reliability gate: worker error boundary, lease/stale reclamation, checkpoint resume integrity, privacy/verification unknowns, raw-hash honesty, same-target serialization | **done (Phase 5)** |
-| 5 | Observation engine: job runner (Postgres SKIP LOCKED), profile scans, source health | |
-| 6 | Story system: story observations + mention classification pipeline | |
-| 7 | Follower/following snapshots + diff engine UI | |
+| 5R | Reliability gate: worker error boundary, lease/stale reclamation, checkpoint resume integrity, privacy/verification unknowns, raw-hash honesty, same-target serialization | **done** |
+| 6 | Scheduler + complete observation coverage: deterministic DB-backed scheduler (window idempotency, guarded ACTIVE-only enqueue), FOLLOWING_SCAN, STORY_SCAN + mention pipeline, job outcome dimension, scheduler diagnostics, Playwright E2E | **done** |
+| 7 | Honesty depth in UI: empty-vs-zero reclassification (D2), PARTIAL surfacing (D3), diff engine UI depth | next |
 | 8 | Interaction system: comments/mentions/tags + likes capability layer | |
 | 9 | Relationship intelligence: weighted scoring, decay, explainable rankings | |
 | 10 | Evidence system UI: provenance panels, hashes, "why do we know this?" | |
 | 11 | Alerts: rules engine + notification adapters (in-app, browser, email) | |
 | 12 | Analytics: growth, frequency, concentration charts | |
-| 13 | Hardening: security review, rate limiting, retention jobs, backups | |
-| 14 | Production readiness: self-host + low-cost cloud deploy guides, diagnostics | |
+| 13 | Hardening: security review, rate limiting, retention jobs, backups, CI | |
+| 14 | Production readiness: self-host + low-cost cloud deploy guides | |
 
 ## MVP gate (end of Phase 10)
 
