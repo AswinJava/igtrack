@@ -5,6 +5,8 @@ import {
   Confidence,
   ObservationCategory,
   CapabilityStatus,
+  CapabilityErrorKind,
+  isRetryableCapabilityKind,
   type CapabilityResult,
   type InstagramProvider,
   type NormalizedAccountRef,
@@ -23,6 +25,10 @@ import {
   persistFollowDiff,
   loadCheckpoint,
   saveCheckpoint,
+  stageFollowScanMembers,
+  loadStagedFollowScanMembers,
+  clearStagedFollowScanMembers,
+  clearForeignFollowScanStaging,
   getTarget,
   getAccountById,
   type Database,
@@ -31,6 +37,11 @@ import {
   type EvidenceRecordInput,
   type FollowDirection,
 } from "@igtrack/database";
+import {
+  ProviderTimeoutError,
+  providerTimeoutMs,
+  withProviderTimeout,
+} from "./timeout.js";
 
 export interface ExecutionSource {
   provider: InstagramProvider;
@@ -40,15 +51,17 @@ export interface ExecutionSource {
 export class JobExecutionError extends Error {
   readonly kind: string | undefined;
   readonly retryable: boolean;
+  readonly retryAfterMs: number | undefined;
 
   constructor(
     message: string,
-    options: { kind?: string; retryable?: boolean } = {},
+    options: { kind?: string; retryable?: boolean; retryAfterMs?: number } = {},
   ) {
     super(message);
     this.name = "JobExecutionError";
     this.kind = options.kind;
     this.retryable = options.retryable ?? true;
+    this.retryAfterMs = options.retryAfterMs;
   }
 }
 
@@ -56,16 +69,71 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function sourceKindFor(sourceId: string): SourceKind {
-  return sourceId.startsWith("fixture") ? SourceKind.FIXTURE : SourceKind.IMPORT;
+// STEP 11: explicit source classification. Classifications are decided by
+// explicit rules, never a catch-all. The source id is `<class>:<name>:<ver>`:
+// class decides SourceKind; the provider is responsible for its own label.
+const SOURCE_KIND_BY_CLASS: Record<string, SourceKind> = {
+  fixture: SourceKind.FIXTURE,
+  import: SourceKind.IMPORT,
+  graph: SourceKind.GRAPH_API,
+  user: SourceKind.USER_PROVIDED,
+};
+
+export function sourceKindFor(sourceId: string): SourceKind {
+  const cls = sourceId.split(":")[0] ?? "";
+  return SOURCE_KIND_BY_CLASS[cls] ?? SourceKind.IMPORT;
+}
+
+// PC-T1: every provider capability call crosses the timeout boundary. A hang
+// becomes a typed retryable TIMEOUT capability failure (source health records
+// it); no evidence is produced and nothing is marked complete.
+async function providerCall<T>(
+  db: Database,
+  source: SourceInput,
+  capability: string,
+  op: () => Promise<CapabilityResult<T>>,
+): Promise<CapabilityResult<T>> {
+  const timeoutMs = providerTimeoutMs();
+  try {
+    return await withProviderTimeout(op(), capability, timeoutMs);
+  } catch (err) {
+    if (err instanceof ProviderTimeoutError) {
+      await recordCapabilityFailure(db, {
+        source,
+        capability,
+        reason: err.message,
+        errorCategory: "TIMEOUT",
+      });
+      throw new JobExecutionError(err.message, {
+        kind: "TIMEOUT",
+        retryable: true,
+      });
+    }
+    throw err;
+  }
+}
+
+// STEP 9: provider-declared retryability wins; the taxonomy decides when the
+// provider leaves it unset. A non-retryable kind is permanent regardless of
+// what a broken provider claims.
+function resolvedRetryable(err: { kind?: string; retryable?: boolean } | undefined): boolean {
+  const kind = err?.kind;
+  const declared = kind !== undefined && Object.values(CapabilityErrorKind).includes(kind as CapabilityErrorKind)
+    ? isRetryableCapabilityKind(kind as CapabilityErrorKind)
+    : true;
+  return err?.retryable ?? declared;
 }
 
 export function buildSource(provider: InstagramProvider): SourceInput {
+  // sourceId forms: "<class>:<version>" (fixture:v1) or "<class>:<name>:<version>"
+  // (<class>:graph:v2). The class drives SourceKind; the last segment is the
+  // provider version.
+  const parts = provider.sourceId.split(":");
   return {
     id: provider.sourceId,
     kind: sourceKindFor(provider.sourceId),
     name: `${provider.sourceId} provider`,
-    providerVersion: provider.sourceId.split(":")[1] ?? "unknown",
+    providerVersion: parts[parts.length - 1] ?? "unknown",
   };
 }
 
@@ -172,8 +240,11 @@ export async function runProfileScan(
     return "unavailable";
   }
 
-  const result: CapabilityResult<NormalizedProfile> = await src.provider.getProfile(
-    accountRef(account),
+  const result: CapabilityResult<NormalizedProfile> = await providerCall(
+    db,
+    source,
+    "getProfile",
+    () => src.provider.getProfile(accountRef(account)),
   );
 
   if (result.status === CapabilityStatus.UNAVAILABLE) {
@@ -195,7 +266,8 @@ export async function runProfileScan(
     });
     throw new JobExecutionError(err?.message ?? "Provider error", {
       kind: err?.kind ?? "INTERNAL",
-      retryable: err?.retryable ?? true,
+      retryable: resolvedRetryable(err),
+      ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
     });
   }
 
@@ -289,6 +361,8 @@ const FOLLOWING_SCAN_CONFIG: FollowScanConfig = {
 interface FollowCheckpointProgress {
   cursor?: string;
   page?: number;
+  // Legacy (pre-0005) checkpoints carried the full entries array; staging
+  // replaced it. Empty array below means "no legacy entries".
   entries?: Array<{ username: string; igId?: string }>;
 }
 
@@ -347,24 +421,48 @@ export async function runFollowScan(
   const scanObservedAt = new Date(job.startedAt ?? Date.now()).toISOString();
 
   // A checkpoint belongs to one logical scan. Resume only when this job owns
-  // it; a foreign or legacy checkpoint starts a fresh scan.
+  // it; a foreign or legacy checkpoint starts a fresh scan. PC-T2: acquired
+  // members live in the durable staging table (append-only, idempotent), so a
+  // resumed scan continues with the already-staged rows for THIS job —
+  // including legacy entries fostered from an old JSONB checkpoint.
   const checkpoint = await loadCheckpoint(db, targetId, cfg.checkpointKind);
   const ownedCheckpoint =
     checkpoint !== null && checkpoint.jobId === job.id ? checkpoint : null;
   const progress = (ownedCheckpoint?.progress ?? undefined) as
     | FollowCheckpointProgress
     | undefined;
+
+  if (ownedCheckpoint === null) {
+    // Fresh logical scan: clear any abandoned staging from a crashed or
+    // superseded job before reusing this target's rows.
+    await clearForeignFollowScanStaging(db, { targetId, keepJobId: job.id });
+  } else {
+    // Owned checkpoint: todays already-staged rows are our resume basis.
+    await clearForeignFollowScanStaging(db, { targetId, keepJobId: job.id });
+  }
+
+  const legacyEntries: NormalizedFollowEntry[] = (progress?.entries ?? []).map(
+    (entry) => ({
+      username: entry.username,
+      ...(entry.igId !== undefined ? { igId: entry.igId } : {}),
+    }),
+  );
+  if (legacyEntries.length > 0) {
+    // Foster pre-staging checkpoint members into the staging table exactly
+    // once, under this job's ownership.
+    await stageFollowScanMembers(db, {
+      jobId: job.id,
+      targetId,
+      entries: legacyEntries,
+    });
+  }
+
   let cursor = progress?.cursor;
-  let pageIndex = progress?.page ?? 0;
-  const entries: NormalizedFollowEntry[] = (progress?.entries ?? []).map((entry) => ({
-    username: entry.username,
-    ...(entry.igId !== undefined ? { igId: entry.igId } : {}),
-  }));
-  const seen = new Set<string>(entries.map((entry) => entry.username.toLowerCase()));
-  let pagesProcessed = pageIndex;
+  let pagesProcessed = progress?.page ?? 0;
   let lastPageComplete = false;
 
   const persistCheckpoint = async (nextCursor: string | undefined): Promise<void> => {
+    // Checkpoint is now cursor/page only (PC-T2): no O(n²) array rewrites.
     await saveCheckpoint(db, {
       targetId,
       kind: cfg.checkpointKind,
@@ -374,10 +472,6 @@ export async function runFollowScan(
       progress: {
         ...(nextCursor !== undefined ? { cursor: nextCursor } : {}),
         page: pagesProcessed,
-        entries: entries.map((entry) => ({
-          username: entry.username,
-          ...(entry.igId !== undefined ? { igId: entry.igId } : {}),
-        })),
       },
     });
   };
@@ -385,9 +479,11 @@ export async function runFollowScan(
   const ref = accountRef(account);
 
   for (;;) {
-    const pageResult = await src.provider[cfg.capability](
-      ref,
-      cursor !== undefined ? { value: cursor } : undefined,
+    const pageResult = await providerCall(db, source, cfg.capability, () =>
+      src.provider[cfg.capability](
+        ref,
+        cursor !== undefined ? { value: cursor } : undefined,
+      ),
     );
 
     if (pageResult.status === CapabilityStatus.UNAVAILABLE) {
@@ -410,7 +506,8 @@ export async function runFollowScan(
       });
       throw new JobExecutionError(err?.message ?? "Provider error", {
         kind: err?.kind ?? "INTERNAL",
-        retryable: err?.retryable ?? true,
+        retryable: resolvedRetryable(err),
+        ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
       });
     }
     if (pageResult.data === undefined) {
@@ -424,12 +521,13 @@ export async function runFollowScan(
     const pageComplete = page.complete;
     lastPageComplete = pageComplete;
 
-    for (const entry of page.entries) {
-      const key = entry.username.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      entries.push(entry);
-    }
+    // PC-T2: stage the new members durably NOW — append-only and idempotent.
+    // pagesProcessed advances only after the persistent write succeeds.
+    await stageFollowScanMembers(db, {
+      jobId: job.id,
+      targetId,
+      entries: page.entries,
+    });
     pagesProcessed += 1;
 
     // Simulated interruption (test hook) — leaves partial state behind.
@@ -450,22 +548,14 @@ export async function runFollowScan(
   }
 
   // One coherent snapshot for the whole scan, evidence-linked at insert time.
-  if (entries.length === 0 && pagesProcessed === 0) {
-    await recordCapabilityFailure(db, {
-      source,
-      capability: cfg.capability,
-      reason:
-        "Provider returned no follow entries before any page completed",
-      errorCategory: "EMPTY",
-    });
-    throw new JobExecutionError(
-      `Provider returned no ${direction === "FOLLOWERS" ? "follower" : "following"} entries`,
-      {
-        retryable: true,
-        kind: "EMPTY",
-      },
-    );
-  }
+  // PC-T2: the final member set is read from durable staging in acquisition
+  // order — a genuine empty list (AVAILABLE, complete, zero entries) is an
+  // honest positive observation of absence (F8-2), recorded as COMPLETED_EMPTY,
+  // never converted into a failure.
+  const members: NormalizedFollowEntry[] = await loadStagedFollowScanMembers(
+    db,
+    job.id,
+  );
 
   // Derived follow deltas vs the PREVIOUS snapshot — must be read before the
   // new snapshot is inserted, otherwise "latest" is the snapshot we just wrote.
@@ -485,7 +575,7 @@ export async function runFollowScan(
       confidence: Confidence.HIGH,
       ref: account.username,
     },
-    { count: entries.length, usernames: entries.map((e) => e.username) },
+    { count: members.length, usernames: members.map((e) => e.username) },
     { direction, completion },
   );
 
@@ -495,7 +585,7 @@ export async function runFollowScan(
     source,
     evidence,
     page: {
-      entries,
+      entries: members,
       complete: lastPageComplete,
       meta: {
         category: ObservationCategory.OBSERVED,
@@ -514,12 +604,14 @@ export async function runFollowScan(
     });
   }
 
-  // Clear the checkpoint now the scan is complete so the next scan starts fresh.
+  // Clear the checkpoint and owned staging now the scan is complete so the
+  // next scan starts fresh. Foreign-staging cleanup already ran at scan start.
+  await clearStagedFollowScanMembers(db, job.id);
   await saveCheckpoint(db, {
     targetId,
     kind: cfg.checkpointKind,
     page: 0,
-    progress: { page: 0, entries: [] },
+    progress: { page: 0 },
   });
 
   await recordCapabilitySuccess(db, {
@@ -527,6 +619,7 @@ export async function runFollowScan(
     capability: cfg.capability,
   });
 
+  if (members.length === 0) return "succeeded-empty";
   return lastPageComplete ? "succeeded" : "succeeded-partial";
 }
 
@@ -556,7 +649,9 @@ export async function runStoryScan(
     return "unavailable";
   }
 
-  const result = await src.provider.getStories(accountRef(account));
+  const result = await providerCall(db, source, "getStories", () =>
+    src.provider.getStories(accountRef(account)),
+  );
 
   if (result.status === CapabilityStatus.UNAVAILABLE) {
     // An unavailable story tray is NOT an empty tray: no story rows, no
@@ -579,7 +674,8 @@ export async function runStoryScan(
     });
     throw new JobExecutionError(err?.message ?? "Provider error", {
       kind: err?.kind ?? "INTERNAL",
-      retryable: err?.retryable ?? true,
+      retryable: resolvedRetryable(err),
+      ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
     });
   }
 

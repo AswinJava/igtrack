@@ -23,11 +23,62 @@ Every result carries: `status`, `observedAt` (provider-declared capture instant)
 (`kind`, `message`, `retryable`).
 
 Error kinds: `SOURCE_NOT_FOUND | ACCOUNT_NOT_FOUND | ACCOUNT_PRIVATE | RATE_LIMITED |
-SCHEMA_MISMATCH | NETWORK | AUTH_REQUIRED | INTERNAL`. `RATE_LIMITED` must map to a
-retryable ERROR or an UNAVAILABLE with note — **never** to an empty result.
+SCHEMA_MISMATCH | NETWORK | AUTH_REQUIRED | FORBIDDEN | TIMEOUT | PROVIDER_ERROR |
+INTERNAL | UNKNOWN`. `RATE_LIMITED` must map to a retryable ERROR or an UNAVAILABLE
+with note — **never** to an empty result. `TIMEOUT` is produced by the worker's
+execution boundary (PC-T1), never by the provider.
 
-`sourceKindFor` classifies sources: non-fixture providers currently map to IMPORT
-(known Phase 7 limitation — a real provider requires a proper SourceKind mapping).
+Source classification (STEP 11): `sourceKindFor` maps the source-id class prefix
+explicitly — `fixture:` → FIXTURE, `import:` → IMPORT, `graph:` → GRAPH_API,
+`user:` → USER_PROVIDED; an unrecognized class falls back to IMPORT rather than
+silently impersonating a permitted integration. A future authorized-API provider
+must use the `graph:` class (or register a new explicit class) — it can never be
+mislabeled as IMPORT by default.
+
+## 1a. Result semantics (STEP 2, A–J) — the normative answers
+
+| Q | Semantics (per operation) |
+|---|---|
+| A. AVAILABLE | Data for this operation is present and usable. For pages: `entries` + `complete` flag; for stories: the observed tray snapshot; for profile: the snapshot. AVAILABLE never implies completeness on its own. |
+| B. PARTIAL | Some data, incomplete coverage. Followers/following: `complete:false` on the final page (status may still be AVAILABLE); stories: status PARTIAL = incomplete tray window. Snapshots persist PARTIAL forever — never upgraded. |
+| C. UNAVAILABLE | The capability cannot be served at all (no access / source down / capability off). Zero rows are written; source health records UNAVAILABLE; outcome `UNAVAILABLE`. UNAVAILABLE is never zero, never empty. |
+| D. ERROR | The provider failed for a typed reason (`CapabilityErrorKind`). No observations are produced; source health records the failure category; the job fails or retries per taxonomy. |
+| E. Empty successful result | An honest positive observation of absence: stories AVAILABLE+[] → `COMPLETED_EMPTY` (no "no stories" claims); followers/following AVAILABLE + `complete:true` + zero entries → empty COMPLETE snapshot + `COMPLETED_EMPTY` (Phase 8 fix). Empty ≠ unavailable. |
+| F. Incomplete page | `complete:false` → the scan continues while a cursor exists; a final incomplete page persists a PARTIAL snapshot (never COMPLETE). |
+| G. Provider timeout | Worker-enforced (PC-T1): the call is raced against `IGTRACK_PROVIDER_TIMEOUT_MS` (default 30s). Timeout → typed `TIMEOUT`, retryable, source-health category TIMEOUT, **no evidence**, **no partial completion**. The worker loop survives. |
+| H. Malformed provider data | `SCHEMA_MISMATCH`, non-retryable by taxonomy. Parsed inside the capability model — a provider parse failure is a `CapabilityResult`, never a thrown crash. Raw upstream payloads are never echoed into error messages. |
+| I. Retryable | `RATE_LIMITED`, `NETWORK`, `TIMEOUT`, `PROVIDER_ERROR`, `INTERNAL` — unless the provider explicitly sets `retryable:false`. Provider may downgrade a retryable kind to non-retryable, never the reverse (`effectiveRetryability`). |
+| J. Permanently non-retryable | `SOURCE_NOT_FOUND`, `ACCOUNT_NOT_FOUND`, `ACCOUNT_PRIVATE`, `AUTH_REQUIRED`, `FORBIDDEN`, `SCHEMA_MISMATCH`, `UNKNOWN`. |
+
+## 1b. Rate-limit contract (STEP 10)
+
+A provider communicates throttling through `CapabilityError`:
+
+- `kind: RATE_LIMITED`, `retryable: true`.
+- `retryAfterMs` (optional): the provider-supplied delay (Retry-After / reset). The
+  worker honors it **verbatim** as the retry's `available_at` — no exponential
+  backoff is stacked on top. Absent → standard backoff (30s → cap 15min).
+- Rate limiting must never surface as zero data or an empty list.
+
+Scheduler interaction is unchanged: rate-limited jobs wait in `retry_wait`; the
+scheduler only enqueues due scans by window and never hammers a throttled provider.
+
+## 1c. Checkpoint staging (PC-T2, STEP 5)
+
+Acquired follow-scan members are staged durably in `follow_scan_staging`
+(append-only, one row per member, unique `(job_id, username_lower)`), and the
+checkpoint holds cursor/page only. Properties: crash-safe resume, duplicate-page
+idempotency, stale-lease reclaim safety, first-acquisition ordering, cleanup on
+completion (and foreign-job cleanup at scan start), cascade with target deletion.
+The old O(n²) JSONB rewrite is gone; measured results are in
+`docs/phase-8-founder-report.md` §21.
+
+## 1d. Security boundary (STEP 13, PC-S1)
+
+Provider credentials live exclusively in provider configuration (env, future secret
+store). They must NEVER appear in: evidence rows, observation payloads, job metadata,
+logs, diagnostics, or client responses. Evidence carries only hashes, references,
+usernames, and timestamps. Raw upstream payloads are never persisted or logged.
 
 ## 2. Requirements for any real provider (gate before integration)
 

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import {
   bigint,
+  bigserial,
   boolean,
   check,
   index,
@@ -497,6 +498,34 @@ export const jobCheckpoints = pgTable(
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.targetId, table.kind] })],
+);
+
+// PC-T2 staging: acquired follow-scan members are appended here durably, one
+// row per member, instead of rewriting a growing JSONB array every page. The
+// checkpoint keeps only cursor/page. Unique (job_id, username_lower) makes
+// duplicate pages and reclaim re-execution idempotent; ordering by `id`
+// preserves first-acquisition order; foreign-job rows are cleared at scan
+// start and own rows at completion (or cascade with the target).
+export const followScanStaging = pgTable(
+  "follow_scan_staging",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    jobId: text("job_id").notNull(),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => targets.id, { onDelete: "cascade" }),
+    username: text("username").notNull(),
+    usernameLower: text("username_lower").notNull(),
+    igId: text("ig_id"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("follow_scan_staging_job_username_idx").on(
+      table.jobId,
+      table.usernameLower,
+    ),
+    index("follow_scan_staging_target_idx").on(table.targetId),
+  ],
 );
 
 export const schedulerState = pgTable("scheduler_state", {

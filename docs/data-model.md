@@ -132,7 +132,14 @@ Principles:
 
 - **Append-only enforcement:** Postgres `BEFORE UPDATE` trigger `igtrack_reject_update()` on `evidence`, `profile_snapshots`, `profile_changes`, `stories`, `story_mentions`, `follow_snapshots`, `follow_snapshot_members`, `follow_deltas`, `interactions`. The trigger rejects any UPDATE; DELETE remains permitted for lawful retention/target-cascade cleanup. The trigger lives in migration `0000_...sql`; it is outside drizzle's snapshot (drizzle cannot model triggers) and is re-checked by `schema.test.ts`.
 - **Evidence linkage:** `evidence.observation_id` stores the database row id of the observation; the observation row stores `evidence_id` FK. On re-ingestion the repository checks existence first (by natural unique — `(ig_account_id, story_id, source_id)` etc.) and returns `deduplicated` without inserting duplicate evidence/observation rows.
-- **Follow model:** normalized `ig_accounts` + `follow_snapshot_members` (PK `(snapshot_id, ig_account_id)`); diff computation stays in `packages/core/diff/follow-diff.ts` and is persisted as `follow_deltas`; the DB never reimplements the algorithm.
+- **Follow model:** normalized `ig_accounts` + `follow_snapshot_members` (PK
+  `(snapshot_id, ig_account_id)`); diff computation stays in `packages/core/diff/follow-diff.ts` and is persisted as `follow_deltas`; the DB never reimplements the algorithm.
+- **Scan staging (Phase 8, migration 0005):** `follow_scan_staging` — durable
+  append-only acquired-member rows keyed by `(job_id, username_lower)` (unique),
+  `target_id` FK cascade, `id` bigserial preserving first-acquisition order.
+  Checkpoints store cursor/page only. Cleared on completion; foreign-job rows
+  cleared at scan start. Append-only triggers do NOT apply (transient scan state,
+  not observation history).
 - **Media:** `media_assets` holds metadata only (`content_hash` unique for dedup, `storage_key`, bytes, checksum); binaries are not stored in Postgres.
 
 ## Retention & deletion

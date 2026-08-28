@@ -18,16 +18,50 @@ export const CapabilityErrorKind = {
   SCHEMA_MISMATCH: "SCHEMA_MISMATCH",
   NETWORK: "NETWORK",
   AUTH_REQUIRED: "AUTH_REQUIRED",
+  FORBIDDEN: "FORBIDDEN",
+  TIMEOUT: "TIMEOUT",
+  PROVIDER_ERROR: "PROVIDER_ERROR",
   INTERNAL: "INTERNAL",
+  UNKNOWN: "UNKNOWN",
 } as const;
 
 export type CapabilityErrorKind =
   (typeof CapabilityErrorKind)[keyof typeof CapabilityErrorKind];
 
+// Provider-neutral retryability contract (STEP 9). A provider may override a
+// retryable kind with retryable:false, never the reverse: a non-retryable kind
+// is permanently non-retryable regardless of what the provider claims.
+const RETRYABLE_KINDS: ReadonlySet<CapabilityErrorKind> = new Set([
+  CapabilityErrorKind.RATE_LIMITED,
+  CapabilityErrorKind.NETWORK,
+  CapabilityErrorKind.TIMEOUT,
+  CapabilityErrorKind.PROVIDER_ERROR,
+  CapabilityErrorKind.INTERNAL,
+]);
+
+export function isRetryableCapabilityKind(kind: CapabilityErrorKind): boolean {
+  return RETRYABLE_KINDS.has(kind);
+}
+
+// Effective retryability for a provider error: the provider's explicit
+// `retryable` override wins; otherwise the taxonomy decides. A non-retryable
+// kind is permanently non-retryable regardless of override.
+export function effectiveRetryability(
+  kind: CapabilityErrorKind,
+  override?: boolean,
+): boolean {
+  if (override !== undefined && override === false) return false;
+  return isRetryableCapabilityKind(kind);
+}
+
 export interface CapabilityError {
   kind: CapabilityErrorKind;
   message: string;
   retryable: boolean;
+  // Provider-supplied retry delay (e.g. HTTP Retry-After / rate-limit reset).
+  // Honored verbatim by the worker as the job's next availability time; never
+  // combined with exponential backoff. Absent → default backoff applies.
+  retryAfterMs?: number;
 }
 
 export interface SourceRef {

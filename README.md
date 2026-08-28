@@ -37,8 +37,12 @@ pnpm --filter @igtrack/monitoring start   # worker daemon: job polling + schedul
 ```
 
 SIGINT/SIGTERM shut the daemon down cooperatively (in-flight job finishes, pool
-closes). See `docs/deployment.md` for topology, lifecycle guarantees, backup and
-retention assumptions, and `docs/provider-contract.md` for the ingestion boundary.
+closes). Provider calls are bounded by `IGTRACK_PROVIDER_TIMEOUT_MS` (default 30s)
+— a hung provider becomes a typed retryable TIMEOUT, never a wedge. Follow-scan
+members stage durably (`follow_scan_staging`, migration 0005) instead of JSONB
+checkpoint rewrites. See `docs/deployment.md` for topology, lifecycle guarantees,
+backup and retention assumptions, and `docs/provider-contract.md` for the ingestion
+boundary and its conformance harness.
 
 ## Layout
 

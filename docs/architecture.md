@@ -186,6 +186,17 @@ never default absence to `false`. Evidence `raw_hash` is the genuine hash of the
 raw source payload when the provider transports one, else `NULL` — a normalized
 hash never masquerades as a raw one.
 
+## 6b. Provider execution boundary (Phase 8)
+
+Every provider capability call is raced against `IGTRACK_PROVIDER_TIMEOUT_MS`
+(PC-T1): a hang becomes a typed retryable `TIMEOUT`, source-health records it, and
+no evidence is produced. The error taxonomy (`CapabilityErrorKind` +
+`effectiveRetryability`) decides retryability; a provider may only downgrade a
+retryable kind. `retryAfterMs` is honored verbatim as the job's next availability
+(Step 10 rate-limit contract). Follow-scan members stage durably in
+`follow_scan_staging` (PC-T2) — checkpoints carry cursor/page only, making scans
+crash-safe, duplicate-page idempotent, and O(n) in writes instead of O(n²).
+
 ## 7. Deployment modes
 
 - **LOCAL DEVELOPMENT** — pnpm + docker-compose Postgres; fixture provider.

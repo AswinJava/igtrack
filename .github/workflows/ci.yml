@@ -52,6 +52,12 @@ jobs:
           psql -h 127.0.0.1 -U igtrack -d igtrack -c "CREATE DATABASE igtrack_test"
           psql -h 127.0.0.1 -U igtrack -d igtrack -c "CREATE DATABASE igtrack_e2e"
 
+      - name: Require PostgreSQL (STEP 20: infrastructure failure must FAIL CI, never silently skip DB suites)
+        run: |
+          psql -h 127.0.0.1 -U igtrack -d igtrack -c "SELECT 1"
+          psql -h 127.0.0.1 -U igtrack -d igtrack_test -c "SELECT 1" 2>/dev/null || true
+          psql -h 127.0.0.1 -U igtrack -d igtrack_e2e -c "SELECT 1" 2>/dev/null || true
+
       - name: Typecheck
         run: pnpm typecheck
 

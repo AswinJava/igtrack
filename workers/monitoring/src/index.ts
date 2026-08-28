@@ -184,6 +184,7 @@ export async function executeOne(
         message: err.message,
         ...(err.kind !== undefined ? { kind: err.kind } : {}),
         retryable: err.retryable,
+        ...(err.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
       });
     }
     if (isInfrastructureError(err)) {

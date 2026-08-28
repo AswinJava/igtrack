@@ -268,6 +268,9 @@ export interface FailJobInput {
   message: string;
   kind?: string;
   retryable?: boolean;
+  // Provider-supplied retry delay (STEP 10): honored verbatim as the retry's
+  // availability time instead of exponential backoff.
+  retryAfterMs?: number;
 }
 
 export async function failJob(
@@ -304,7 +307,8 @@ export async function failJob(
       ...(willRetry
         ? {
             availableAt: new Date(
-              Date.now() + computeBackoffMs(job.attempts, backoff),
+              Date.now() +
+                (error.retryAfterMs ?? computeBackoffMs(job.attempts, backoff)),
             ),
           }
         : { completedAt: new Date() }),

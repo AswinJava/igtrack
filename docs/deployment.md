@@ -16,10 +16,13 @@ is the queue boundary.
 
 Environment: copy `.env.example` → `.env`. Required: `DATABASE_URL`. Optional:
 `IGTRACK_JOB_POLL_MS` (5000), `IGTRACK_SCHEDULER_TICK_MS` (60000),
-`IGTRACK_SCHEDULER_BATCH` (200), `IGTRACK_JOB_LEASE_MS` (300000),
-`IGTRACK_SCAN_*_MS` intervals, `IGTRACK_PROVIDER=fixture`, `IGTRACK_LOG_LEVEL`.
-**Unused today**: `IGTRACK_SESSION_SECRET` (documented but not consumed — decision
-pending), `IGTRACK_JOB_CONCURRENCY` (worker is sequential).
+`IGTRACK_SCHEDULER_BATCH` (200), `IGTRACK_JOB_LEASE_MS` (300000, must exceed the
+longest expected scan — no in-flight renewal), `IGTRACK_PROVIDER_TIMEOUT_MS`
+(30000, PC-T1 provider call boundary), `IGTRACK_SCAN_*_MS` intervals,
+`IGTRACK_PROVIDER=fixture`, `IGTRACK_LOG_LEVEL`.
+**Reserved-unused (decision pending)**: `IGTRACK_SESSION_SECRET`.
+Removed in Phase 8: `IGTRACK_JOB_CONCURRENCY` (was documented but never read;
+the worker is strictly sequential).
 
 Migrations: applied by the app/test harnesses via `runMigrations` (drizzle journal).
 For production, run a one-shot migrate step before the web/worker processes start.
