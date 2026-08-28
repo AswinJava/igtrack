@@ -275,9 +275,11 @@ export async function runWorkerLoop(opts: {
     // Scheduler cadence is independent of job polling: the tick only enqueues
     // due scans (orchestration), the poll loop claims and executes them.
     if (schedulerOn && Date.now() - lastSchedulerTick >= schedulerTickMs) {
+      // Advance the tick clock regardless of outcome: a failing tick must be
+      // retried at the next tick interval, never on every poll iteration.
+      lastSchedulerTick = Date.now();
       try {
         const tick = await runSchedulerTick(db);
-        lastSchedulerTick = Date.now();
         if (tick.enqueued > 0) {
           logWorker("info", "scheduler_tick", {
             enqueued: tick.enqueued,

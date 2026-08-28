@@ -150,9 +150,27 @@ describe.runIf(dbAvailable)("worker failure boundary", () => {
       src: stubSource(),
       pollMs: 1,
       maxIterations: 3,
+      // Scoped to the polling boundary; scheduler tick failures have their
+      // own contract (interval-bounded retries, scheduler_state.last_error).
+      scheduler: { enabled: false },
       onError: (err) => errors.push(err),
     });
     expect(errors).toHaveLength(3);
+  });
+
+  it("a failing scheduler tick does not repeat on every poll iteration", async () => {
+    const errors: unknown[] = [];
+    await runWorkerLoop({
+      db: dbFailingOnExecute(handle.db),
+      src: stubSource(),
+      pollMs: 1,
+      maxIterations: 3,
+      scheduler: { enabled: true, tickMs: 60_000 },
+      onError: (err) => errors.push(err),
+    });
+    // Exactly one scheduler tick error (interval-bounded) plus one poll error
+    // per iteration — a dead DB is never hammered tick-per-poll.
+    expect(errors).toHaveLength(4);
   });
 
   it("fails unknown job kinds non-retryably without crashing the loop (J11)", async () => {
