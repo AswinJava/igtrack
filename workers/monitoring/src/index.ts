@@ -30,6 +30,9 @@ export type RunOutcomeState =
   | "unrecorded"
   | "none";
 
+export { runSchedulerTick, schedulerEnabled, schedulerTickIntervalMs } from "./scheduler.js";
+export type { SchedulerTickOptions, SchedulerTickResult } from "./scheduler.js";
+
 export interface RunOutcome {
   claimed: boolean;
   jobId: string | null;
