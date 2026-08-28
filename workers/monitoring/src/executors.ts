@@ -10,6 +10,7 @@ import {
   type NormalizedAccountRef,
   type NormalizedProfile,
   type NormalizedFollowEntry,
+  type NormalizedStory,
 } from "@igtrack/core";
 import {
   recordCapabilitySuccess,
@@ -17,6 +18,7 @@ import {
   markCapabilityUnavailable,
   recordProfileSnapshot,
   recordFollowSnapshot,
+  recordStory,
   latestFollowSnapshot,
   persistFollowDiff,
   loadCheckpoint,
@@ -141,7 +143,12 @@ function accountRef(account: {
   };
 }
 
-export type JobResult = "succeeded" | "unavailable" | "failure";
+export type JobResult =
+  | "succeeded"
+  | "succeeded-empty"
+  | "succeeded-partial"
+  | "unavailable"
+  | "failure";
 
 // ---------------------------------------------------------------------------
 // PROFILE_SCAN
@@ -520,6 +527,129 @@ export async function runFollowScan(
     capability: cfg.capability,
   });
 
-  return "succeeded";
+  return lastPageComplete ? "succeeded" : "succeeded-partial";
+}
+
+// ---------------------------------------------------------------------------
+// STORY_SCAN
+// ---------------------------------------------------------------------------
+
+function storyObservationId(accountUsername: string, story: NormalizedStory): string {
+  return `story:${accountUsername}:${story.storyId}@${story.meta.observedAt}`;
+}
+
+export async function runStoryScan(
+  db: Database,
+  job: JobRecord,
+  src: ExecutionSource,
+): Promise<JobResult> {
+  const { account } = await loadAccountForTarget(db, job);
+  const source = src.source;
+
+  const caps = src.provider.capabilities();
+  if (caps.getStories !== true) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getStories",
+      coverageNote: "Provider declares the getStories capability unavailable.",
+    });
+    return "unavailable";
+  }
+
+  const result = await src.provider.getStories(accountRef(account));
+
+  if (result.status === CapabilityStatus.UNAVAILABLE) {
+    // An unavailable story tray is NOT an empty tray: no story rows, no
+    // "no story" claims — source health carries the truth.
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getStories",
+      coverageNote: result.note ?? "Stories unavailable from this source.",
+    });
+    return "unavailable";
+  }
+
+  if (result.status === CapabilityStatus.ERROR) {
+    const err = result.error;
+    await recordCapabilityFailure(db, {
+      source,
+      capability: "getStories",
+      reason: err?.message ?? "Provider error",
+      errorCategory: err?.kind ?? "INTERNAL",
+    });
+    throw new JobExecutionError(err?.message ?? "Provider error", {
+      kind: err?.kind ?? "INTERNAL",
+      retryable: err?.retryable ?? true,
+    });
+  }
+
+  if (result.data === undefined) {
+    throw new JobExecutionError("Provider returned no story data", { retryable: false });
+  }
+
+  const stories = result.data;
+  const completion = result.status === CapabilityStatus.PARTIAL ? "PARTIAL" : "COMPLETE";
+
+  for (const story of stories) {
+    const observationId = storyObservationId(account.username, story);
+    const evidence = evidenceFrom(
+      source,
+      "story",
+      observationId,
+      {
+        observedAt: story.meta.observedAt,
+        confidence: story.meta.confidence,
+        rawPayloadHash: result.rawPayloadHash,
+        rawReference: result.rawReference,
+      },
+      story,
+      { completion },
+    );
+
+    // Mention evidence keyed by lowercase username, exactly as recordStory
+    // consumes it. Classification reuses the normalizer's visibility class —
+    // no second taxonomy exists or is invented here.
+    const mentionEvidence: Record<string, EvidenceRecordInput> = {};
+    for (const mention of story.mentions) {
+      const usernameKey = mention.account.username.toLowerCase();
+      mentionEvidence[usernameKey] = evidenceFrom(
+        source,
+        "story_mention",
+        `story_mention:${account.username}:${story.storyId}:${usernameKey}@${story.meta.observedAt}`,
+        {
+          observedAt: mention.meta.observedAt,
+          confidence: mention.meta.confidence,
+          rawPayloadHash: result.rawPayloadHash,
+          rawReference: result.rawReference,
+        },
+        mention,
+        {
+          storyId: story.storyId,
+          classification: mention.visibilityClass,
+          mentionedUsername: mention.account.username,
+        },
+      );
+    }
+
+    await recordStory(db, {
+      owner: accountRef(account),
+      story,
+      sourceId: source.id,
+      evidence,
+      mentionEvidence,
+    });
+  }
+
+  await recordCapabilitySuccess(db, {
+    source,
+    capability: "getStories",
+  });
+
+  if (stories.length === 0) {
+    // AVAILABLE + zero stories is an honest positive observation of absence —
+    // never conflated with UNAVAILABLE.
+    return "succeeded-empty";
+  }
+  return completion === "PARTIAL" ? "succeeded-partial" : "succeeded";
 }
 

@@ -3,6 +3,7 @@ import {
   claimJob,
   completeJob,
   failJob,
+  getTarget,
   JobStateError,
   type Database,
   type FailJobInput,
@@ -11,8 +12,11 @@ import {
 import {
   JobExecutionError,
   runFollowerScan,
+  runFollowingScan,
   runProfileScan,
+  runStoryScan,
   type ExecutionSource,
+  type JobResult,
 } from "./provider.js";
 
 export type { ExecutionSource, JobResult, FollowerScanOptions } from "./provider.js";
@@ -115,11 +119,44 @@ export async function executeOne(
   src: ExecutionSource,
   job: JobRecord,
 ): Promise<RunOutcome> {
+  // Target lifecycle guard: scans only run for ACTIVE targets. A pause that
+  // happened after the scheduler enqueued the job must never produce a scan.
+  if (job.targetId !== null) {
+    const target = await getTarget(db, job.targetId);
+    if (target !== null && target.status !== "ACTIVE") {
+      const outcome = target.status === "PAUSED" ? "SKIPPED_PAUSED" : "SKIPPED_STOPPED";
+      try {
+        await completeJob(db, job.id, workerId, outcome);
+        logWorker("info", "job_skipped_target_inactive", {
+          jobId: job.id,
+          kind: job.kind,
+          targetStatus: target.status,
+        });
+        return { claimed: true, jobId: job.id, kind: job.kind, state: "succeeded" };
+      } catch (err) {
+        if (err instanceof JobStateError) {
+          return lostOutcome(job, "skip rejected: job is no longer owned by this worker");
+        }
+        logWorker("error", "job_skip_unrecorded", {
+          jobId: job.id,
+          kind: job.kind,
+          reason: messageOf(err),
+        });
+        return { claimed: true, jobId: job.id, kind: job.kind, state: "unrecorded" };
+      }
+    }
+  }
+
+  let result: JobResult = "failure";
   try {
     if (job.kind === "PROFILE_SCAN") {
-      await runProfileScan(db, job, src);
+      result = await runProfileScan(db, job, src);
     } else if (job.kind === "FOLLOWER_SCAN") {
-      await runFollowerScan(db, job, src);
+      result = await runFollowerScan(db, job, src);
+    } else if (job.kind === "FOLLOWING_SCAN") {
+      result = await runFollowingScan(db, job, src);
+    } else if (job.kind === "STORY_SCAN") {
+      result = await runStoryScan(db, job, src);
     } else {
       return await recordFailure(db, workerId, job, {
         message: `Unknown job kind ${job.kind}`,
@@ -159,8 +196,20 @@ export async function executeOne(
   }
 
   try {
-    await completeJob(db, job.id, workerId);
-    logWorker("info", "job_succeeded", { jobId: job.id, kind: job.kind });
+    // D4 outcome dimension: a succeeded scan with real observations must be
+    // distinguishable from an unavailable provider on the job row itself.
+    const outcome =
+      result === "succeeded"
+        ? "COMPLETED"
+        : result === "succeeded-empty"
+          ? "COMPLETED_EMPTY"
+          : result === "succeeded-partial"
+            ? "COMPLETED_PARTIAL"
+            : result === "unavailable"
+              ? "UNAVAILABLE"
+              : null;
+    await completeJob(db, job.id, workerId, outcome);
+    logWorker("info", "job_succeeded", { jobId: job.id, kind: job.kind, outcome });
     return { claimed: true, jobId: job.id, kind: job.kind, state: "succeeded" };
   } catch (err) {
     if (err instanceof JobStateError) {

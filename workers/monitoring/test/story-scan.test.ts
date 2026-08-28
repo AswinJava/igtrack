@@ -302,7 +302,7 @@ describe.runIf(dbAvailable)("worker STORY_SCAN", () => {
     const src = storySource({ stories: [] });
 
     const result = await runStoryScan(handle.db, job, src);
-    expect(result).toBe("succeeded");
+    expect(result).toBe("succeeded-empty");
 
     expect(await storyRows(targetId)).toHaveLength(0);
     const health = await getSourceHealth(handle.db, "stub:story");
@@ -342,7 +342,7 @@ describe.runIf(dbAvailable)("worker STORY_SCAN", () => {
     });
 
     const result = await runStoryScan(handle.db, job, src);
-    expect(result).toBe("succeeded");
+    expect(result).toBe("succeeded-partial");
 
     const rows = await storyRows(targetId);
     expect(rows).toHaveLength(1);
