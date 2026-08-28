@@ -3,7 +3,7 @@ import { isDevLoginEnabled, startSessionForUser, findUserByEmailSafe } from "@/l
 
 export const dynamic = "force-dynamic";
 
-async function devLogin(): Promise<NextResponse> {
+async function devLogin(request: Request): Promise<NextResponse> {
   // Hard production gate. This endpoint must not exist operationally in prod.
   if (!isDevLoginEnabled()) {
     return NextResponse.json(
@@ -16,9 +16,10 @@ async function devLogin(): Promise<NextResponse> {
     return NextResponse.json({ error: { code: "NOT_FOUND", message: "No dev user - run db:seed" } }, { status: 404 });
   }
   await startSessionForUser(user.id);
-  return NextResponse.redirect(new URL("/", process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000"), 303);
+  const base = process.env.NEXT_PUBLIC_BASE_URL ?? new URL(request.url).origin;
+  return NextResponse.redirect(new URL('/', base), 303);
 }
 
-export async function POST() {
-  return devLogin();
+export async function POST(request: Request) {
+  return devLogin(request);
 }
