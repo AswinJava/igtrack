@@ -30,6 +30,16 @@ pnpm e2e           # Playwright smoke (needs Docker Postgres; provisions igtrack
 Postgres: start Docker Desktop, then `docker compose up -d` (or any Postgres 16
 at `postgresql://igtrack:igtrack@127.0.0.1:5432`).
 
+## Running
+
+```bash
+pnpm --filter @igtrack/monitoring start   # worker daemon: job polling + scheduler
+```
+
+SIGINT/SIGTERM shut the daemon down cooperatively (in-flight job finishes, pool
+closes). See `docs/deployment.md` for topology, lifecycle guarantees, backup and
+retention assumptions, and `docs/provider-contract.md` for the ingestion boundary.
+
 ## Layout
 
 ```

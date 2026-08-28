@@ -8,7 +8,7 @@
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "start": "tsx src/index.ts",
+    "start": "tsx src/main.ts",
     "run-once": "tsx src/run-once.ts"
   },
   "dependencies": {

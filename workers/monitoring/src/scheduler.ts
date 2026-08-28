@@ -1,4 +1,5 @@
 import {
+  countActiveTargets,
   enqueueScheduledScan,
   listActiveTargetIds,
   recordSchedulerTickFailure,
@@ -66,7 +67,16 @@ export async function runSchedulerTick(
 
   try {
     await recordSchedulerTickStart(db, now);
-    const targetIds = await listActiveTargetIds(db, batchLimit);
+    // Fleet rotation (S11): the per-tick batch is bounded, but WHICH window of
+    // the fleet is considered rotates deterministically with the clock. A
+    // stable ORDER BY with a fixed LIMIT would starve every target beyond the
+    // first batch forever — targets are considered once per pageCount ticks.
+    const totalTargets = await countActiveTargets(db);
+    const pageCount = Math.max(1, Math.ceil(totalTargets / batchLimit));
+    const ROTATION_GRANULARITY_MS = 60_000;
+    const rotationKey = Math.floor(now.getTime() / ROTATION_GRANULARITY_MS);
+    const offset = (rotationKey % pageCount) * batchLimit;
+    const targetIds = await listActiveTargetIds(db, batchLimit, offset);
     result.targetsConsidered = targetIds.length;
 
     for (const kind of SCHEDULABLE_KINDS) {

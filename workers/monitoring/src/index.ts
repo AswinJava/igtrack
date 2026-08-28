@@ -1,4 +1,7 @@
-import { PostgresError } from "postgres";
+import postgres from "postgres";
+// postgres.js exposes PostgresError as a static on its default export; the
+// package's ESM build has no named `PostgresError` export.
+const PostgresError = postgres.PostgresError;
 import {
   claimJob,
   completeJob,
@@ -55,7 +58,7 @@ function messageOf(err: unknown): string {
 
 // Structured, secret-free worker logging: event + context only, never
 // provider payloads, credentials, or job data.
-function logWorker(
+export function logWorker(
   level: "info" | "warn" | "error",
   event: string,
   fields: Record<string, unknown>,
@@ -250,13 +253,17 @@ export function makeWorkerId(): string {
 
 // The daemon loop never terminates on recoverable errors: infrastructure
 // failures, malformed jobs, and ownership races are logged (never silently
-// swallowed) and polling resumes after a backoff sleep.
+// swallowed) and polling resumes after a backoff sleep. Idle iterations sleep
+// the poll interval — an empty queue must never spin the claim query (J12).
+// `shouldStop` provides cooperative shutdown (J13): SIGINT/SIGTERM flip it,
+// the loop exits between iterations, and the in-flight job finishes first.
 export async function runWorkerLoop(opts: {
   db: Database;
   src: ExecutionSource;
   pollMs?: number;
   maxIterations?: number;
   onError?: (err: unknown) => void;
+  shouldStop?: () => boolean;
   scheduler?: {
     enabled?: boolean;
     tickMs?: number;
@@ -272,6 +279,7 @@ export async function runWorkerLoop(opts: {
   let iterations = 0;
   for (;;) {
     if (maxIterations !== Infinity && iterations >= maxIterations) break;
+    if (opts.shouldStop?.()) break;
     // Scheduler cadence is independent of job polling: the tick only enqueues
     // due scans (orchestration), the poll loop claims and executes them.
     if (schedulerOn && Date.now() - lastSchedulerTick >= schedulerTickMs) {
@@ -292,13 +300,18 @@ export async function runWorkerLoop(opts: {
         opts.onError?.(err);
       }
     }
+    let outcome: RunOutcome;
     try {
-      await pollOnce(db, workerId, src);
+      outcome = await pollOnce(db, workerId, src);
     } catch (err) {
       logWorker("warn", "worker_poll_error", { worker: workerId, message: messageOf(err) });
       opts.onError?.(err);
       await delay(pollMs);
+      iterations += 1;
+      continue;
     }
+    // Idle: no claimable work — back off instead of spinning the claim query.
+    if (!outcome.claimed) await delay(pollMs);
     iterations += 1;
   }
 }

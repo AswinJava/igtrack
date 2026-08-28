@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+﻿import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
   available,
@@ -158,6 +158,38 @@ describe.runIf(dbAvailable)("worker failure boundary", () => {
     expect(errors).toHaveLength(3);
   });
 
+  it("sleeps between idle polls instead of spinning on the database (J12)", async () => {
+    await handle.db.execute(sql`DELETE FROM monitoring_jobs`);
+    const start = Date.now();
+    await runWorkerLoop({
+      db: handle.db,
+      src: stubSource(),
+      pollMs: 50,
+      maxIterations: 3,
+      scheduler: { enabled: false },
+    });
+    const elapsed = Date.now() - start;
+    // Three idle iterations must each wait a poll interval: a tight claim
+    // loop against an empty queue hammers Postgres for no work.
+    expect(elapsed).toBeGreaterThanOrEqual(120);
+  });
+
+  it("cooperative shutdown: shouldStop ends the loop between iterations (J13)", async () => {
+    const errors: unknown[] = [];
+    await runWorkerLoop({
+      db: dbFailingOnExecute(handle.db),
+      src: stubSource(),
+      pollMs: 1,
+      // Safety net only: the loop must exit via shouldStop after the first
+      // failure, long before this bound.
+      maxIterations: 50,
+      scheduler: { enabled: false },
+      onError: (err) => errors.push(err),
+      shouldStop: () => errors.length >= 1,
+    });
+    expect(errors).toHaveLength(1);
+  });
+
   it("a failing scheduler tick does not repeat on every poll iteration", async () => {
     const errors: unknown[] = [];
     await runWorkerLoop({
@@ -169,7 +201,7 @@ describe.runIf(dbAvailable)("worker failure boundary", () => {
       onError: (err) => errors.push(err),
     });
     // Exactly one scheduler tick error (interval-bounded) plus one poll error
-    // per iteration — a dead DB is never hammered tick-per-poll.
+    // per iteration â€” a dead DB is never hammered tick-per-poll.
     expect(errors).toHaveLength(4);
   });
 

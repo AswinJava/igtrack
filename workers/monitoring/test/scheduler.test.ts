@@ -170,3 +170,47 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
     expect(row.last_error).toBeNull();
   });
 });
+
+describe.runIf(dbAvailable)("scheduler fleet coverage", () => {
+  let handle: DatabaseHandle;
+
+  beforeAll(async () => {
+    handle = await createFreshTestDb();
+    const userRows = await handle.db
+      .insert(users)
+      .values({ email: "fleet@igtrack.local" })
+      .returning({ id: users.id });
+    const userId = userRows[0]!.id;
+    // 250 ACTIVE targets: strictly more than one batch window (default 200).
+    await handle.sql`
+      INSERT INTO ig_accounts (id, username, username_lower)
+      SELECT 'fleet-acc-' || i, 'fleet_u' || i, 'fleet_u' || i
+      FROM generate_series(1, 250) i
+    `;
+    await handle.sql`
+      INSERT INTO targets (id, user_id, ig_account_id)
+      SELECT 'fleet-tgt-' || i, ${userId}, 'fleet-acc-' || i
+      FROM generate_series(1, 250) i
+    `;
+  });
+
+  afterAll(async () => {
+    await handle.close();
+  });
+
+  it("every ACTIVE target is scheduled across consecutive ticks, not just the first batch (S11)", async () => {
+    // Two ticks inside the same scheduling window but different rotation
+    // keys: page 0 and page 1 of the fleet must both be considered.
+    await runSchedulerTick(handle.db, { now: new Date(T0) });
+    await runSchedulerTick(handle.db, { now: new Date(T0 + 61_000) });
+
+    const rows = await handle.db
+      .select({ key: monitoringJobs.idempotencyKey })
+      .from(monitoringJobs)
+      .where(sql`${monitoringJobs.kind} = 'PROFILE_SCAN'`);
+    const coveredTargets = new Set(
+      rows.map((r) => r.key?.split(":")[2] ?? ""),
+    );
+    expect(coveredTargets.size).toBe(250);
+  });
+});

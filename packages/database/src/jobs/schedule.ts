@@ -123,18 +123,31 @@ export async function enqueueScheduledScan(
 
 // Bounded consideration set for one scheduler tick (S10). The scheduler never
 // loads every target into memory; large fleets are handled across ticks.
+// `offset` supports fleet rotation (S11): consecutive ticks page through the
+// fleet so targets beyond the first window are never starved.
 export async function listActiveTargetIds(
   db: Database,
   limit: number,
+  offset = 0,
 ): Promise<string[]> {
   const rows = await db.execute(sql`
     SELECT id::text AS id
     FROM targets
     WHERE status = 'ACTIVE'
     ORDER BY created_at ASC, id ASC
-    LIMIT ${limit}
+    LIMIT ${limit} OFFSET ${offset}
   `);
   return Array.from(rows as unknown as Array<{ id: string }>).map((row) => row.id);
+}
+
+export async function countActiveTargets(db: Database): Promise<number> {
+  const rows = await db.execute(sql`
+    SELECT count(*)::int AS n
+    FROM targets
+    WHERE status = 'ACTIVE'
+  `);
+  const row = Array.from(rows as unknown as Array<{ n: number }>)[0];
+  return row?.n ?? 0;
 }
 
 // ---------------------------------------------------------------------------

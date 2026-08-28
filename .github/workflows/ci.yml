@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: igtrack
+          POSTGRES_PASSWORD: igtrack
+          POSTGRES_DB: igtrack
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U igtrack -d igtrack"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://igtrack:igtrack@127.0.0.1:5432/igtrack
+      IGTRACK_TEST_DATABASE_URL: postgresql://igtrack:igtrack@127.0.0.1:5432/igtrack_test
+      IGTRACK_DATABASE_URL: postgresql://igtrack:igtrack@127.0.0.1:5432/igtrack_e2e
+      PGPASSWORD: igtrack
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Provision test databases
+        run: |
+          psql -h 127.0.0.1 -U igtrack -d igtrack -c "CREATE DATABASE igtrack_test"
+          psql -h 127.0.0.1 -U igtrack -d igtrack -c "CREATE DATABASE igtrack_e2e"
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit + integration + worker tests (real PostgreSQL, migrations applied)
+        run: pnpm test
+
+      - name: Worker daemon boot smoke (one loop iteration against PostgreSQL)
+        run: pnpm --filter @igtrack/monitoring start
+        env:
+          IGTRACK_JOB_MAX_ITER: 1
+          IGTRACK_JOB_POLL_MS: 100
+          DATABASE_URL: postgresql://igtrack:igtrack@127.0.0.1:5432/igtrack
+
+      - name: Production web build
+        run: pnpm --filter @igtrack/web build
+
+      - name: Install Playwright chromium
+        run: pnpm e2e:install
+
+      - name: Playwright E2E (isolated igtrack_e2e database)
+        run: pnpm e2e
