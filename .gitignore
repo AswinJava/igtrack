@@ -47,3 +47,6 @@ cleanup.ps1
 .muse/
 
 test-log.txt
+
+p9-*.txt
+p9-jobs.json
