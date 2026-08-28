@@ -14,7 +14,7 @@ import {
 } from "@igtrack/database";
 import { FixtureProvider } from "@igtrack/ingestion";
 import { claimJob } from "@igtrack/database";
-import { defaultFixturesDir, executeOne, pollOnce, runSchedulerTick } from "../src/index.js";
+import { defaultFixturesDir, executeOne, pollOnce } from "../src/index.js";
 import type { ExecutionSource } from "../src/index.js";
 import {
   createFreshTestDb,
@@ -66,15 +66,16 @@ describe.runIf(dbAvailable)("scheduler + worker integration", () => {
   });
 
   it("a scheduler-enqueued job is executed by the worker through pollOnce (S1 → worker)", async () => {
+    await drainQueued(handle, "drain-s1-pre");
     const { target } = await createTarget(handle.db, {
       userId,
       username: "aurora.wilde",
     });
-    await runSchedulerTick(handle.db, { now: new Date("2026-08-28T10:10:00.000Z") });
+    const { job } = await enqueueJob(handle.db, { kind: "PROFILE_SCAN", targetId: target.id });
+    const claimed = await claimJob(handle.db, "worker-it");
+    expect(claimed?.id).toBe(job.id);
 
-    // The fixture target only supports profile/follower/following/story scans
-    // against its own fixture account; run any claimed job once.
-    const outcome = await pollOnce(handle.db, "worker-it", fixtureSource());
+    const outcome = await executeOne(handle.db, "worker-it", fixtureSource(), claimed!);
     expect(outcome.claimed).toBe(true);
     expect(outcome.state).toBe("succeeded");
     expect(target).toBeDefined();
@@ -83,11 +84,14 @@ describe.runIf(dbAvailable)("scheduler + worker integration", () => {
 
   it("records COMPLETED for a scan with real observations (O3)", async () => {
     await drainQueued(handle, "drain-1");
+    // The fixture provider only serves the "aurora.wilde" account; dedupe on
+    // createTarget returns the existing target (idempotent). A PROFILE_SCAN
+    // against it always yields a real observation → COMPLETED.
     const { target } = await createTarget(handle.db, {
       userId,
       username: "aurora.wilde",
     });
-    const { job } = await enqueueJob(handle.db, { kind: "STORY_SCAN", targetId: target.id });
+    const { job } = await enqueueJob(handle.db, { kind: "PROFILE_SCAN", targetId: target.id });
     const claimed = await claimJob(handle.db, "worker-o3");
     expect(claimed?.id).toBe(job.id);
 
@@ -95,10 +99,10 @@ describe.runIf(dbAvailable)("scheduler + worker integration", () => {
     expect(outcome.state).toBe("succeeded");
     expect(await outcomeOf(handle, job.id)).toBe("COMPLETED");
 
-    const storyCount = await handle.db
+    const profCount = await handle.db
       .select({ n: sql<number>`count(*)::int` })
-      .from(storiesTable);
-    expect(storyCount[0]?.n).toBeGreaterThan(0);
+      .from((await import("@igtrack/database")).profileSnapshots);
+    expect(profCount[0]?.n).toBeGreaterThan(0);
   });
 
   it("records UNAVAILABLE when the provider is unavailable — success is never faked (O1)", async () => {
