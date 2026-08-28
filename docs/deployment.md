@@ -66,9 +66,30 @@ a window; backward jumps re-enter an already-keyed window (deduplicated no-op).
   not restore content.
 - **Reconstructible**: users/sessions (re-provision), targets (re-create), scheduler
   state (self-heals), source health (rebuilds from scans), checkpoints (derive from
-  job state).
+  job state), `follow_scan_staging` (transient).
 - **Required practice**: scheduled `pg_dump` (or managed snapshots). Acceptable RPO is
   a founder decision — recommended ≤ 24h given story ephemerality (24h expiry).
+
+## 4a. Initial backup / RPO policy (Phase 9 founder decision)
+
+- **Target RPO**: ≤ 24 hours.
+- **What is backed up**: the full PostgreSQL database (all tables, including
+  append-only observation/evidence history).
+- **What is NOT backed up**: none inside the DB — everything critical is in
+  PostgreSQL. Provider credentials (if ever introduced) live in environment/secret
+  store, not in the DB, and are excluded.
+- **Backup frequency**: daily `pg_dump` (logical) to off-box storage; retained 14 days.
+- **Restore procedure**: `pg_restore` (or `psql -f` for plain dumps) into a fresh
+  database, then point `DATABASE_URL` at it and run migrations (should be a no-op).
+- **Retention**: 14 daily backups = last 14 days of history.
+- **Verification**: weekly restore drill to a scratch database + `SELECT count(*)`
+  spot checks on observation tables.
+- **Story ephemerality implications**: a 24h RPO means up to 24h of story
+  observations may be lost on a restore — acceptable for the initial policy; tighten
+  to hourly only if story observation becomes a critical guarantee.
+
+**Status: POLICY DOCUMENTED — IMPLEMENTATION NOT YET DEPLOYED.** No backup cron or
+managed snapshot exists in this repository. Do not claim backups exist.
 
 ## 5. Retention
 
@@ -77,7 +98,7 @@ a window; backward jumps re-enter an already-keyed window (deduplicated no-op).
 | Expired sessions | `purgeExpiredSessions` exists, **not scheduled yet** | unbounded growth |
 | Terminal `monitoring_jobs` | none yet | unbounded growth; recommend 90d policy |
 | Checkpoints | overwritten per (target,kind); cascade-deleted with target | bounded |
-| Target deletion | `deleteTargetWithObservations` removes snapshots/stories/mentions/interactions/deltas + evidence atomically | `ig_accounts` survives by design as shared registry (retention policy decision pending) |
+| Target deletion | `deleteTargetWithObservations` removes snapshots/stories/mentions/interactions/deltas + evidence atomically | `ig_accounts` survives by design as shared registry |
 | Story media | `media_assets.retention_state` column exists; no reaper yet | — |
 
 ## 6. Logging policy
