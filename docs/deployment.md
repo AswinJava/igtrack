@@ -20,9 +20,10 @@ Environment: copy `.env.example` → `.env`. Required: `DATABASE_URL`. Optional:
 longest expected scan — no in-flight renewal), `IGTRACK_PROVIDER_TIMEOUT_MS`
 (30000, PC-T1 provider call boundary), `IGTRACK_SCAN_*_MS` intervals,
 `IGTRACK_PROVIDER=fixture`, `IGTRACK_LOG_LEVEL`.
-**Reserved-unused (decision pending)**: `IGTRACK_SESSION_SECRET`.
-Removed in Phase 8: `IGTRACK_JOB_CONCURRENCY` (was documented but never read;
-the worker is strictly sequential).
+Removed in Phase 8: `IGTRACK_JOB_CONCURRENCY`. Removed in Phase 9:
+`IGTRACK_SESSION_SECRET` — sessions use opaque random tokens stored SHA-256-hashed
+in the database; there is no server-side cookie signature to protect, so the
+variable was dead configuration (see `docs/phase-9-forensic-audit.md` §3A).
 
 Migrations: applied by the app/test harnesses via `runMigrations` (drizzle journal).
 For production, run a one-shot migrate step before the web/worker processes start.
