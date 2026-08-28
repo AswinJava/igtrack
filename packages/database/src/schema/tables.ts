@@ -19,6 +19,7 @@ import {
   followChangeEnum,
   followDirectionEnum,
   interactionKindEnum,
+  jobOutcomeEnum,
   jobStatusEnum,
   mediaTypeEnum,
   mentionVisibilityEnum,
@@ -455,6 +456,7 @@ export const monitoringJobs = pgTable(
     payload: jsonb("payload").notNull().default({}),
     priority: integer("priority").notNull().default(0),
     status: jobStatusEnum("status").notNull().default("queued"),
+    outcome: jobOutcomeEnum("outcome"),
     attempts: integer("attempts").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(3),
     availableAt: timestamptz("available_at").notNull().defaultNow(),
@@ -496,6 +498,16 @@ export const jobCheckpoints = pgTable(
   },
   (table) => [primaryKey({ columns: [table.targetId, table.kind] })],
 );
+
+export const schedulerState = pgTable("scheduler_state", {
+  // Single-row singleton ("default"). Multiple scheduler instances converge
+  // on this row; it carries diagnostics truth, not scheduling decisions.
+  id: text("id").primaryKey(),
+  lastTickAt: timestamptz("last_tick_at"),
+  lastSuccessAt: timestamptz("last_success_at"),
+  lastError: jsonb("last_error"),
+  updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+});
 
 export const sourceHealth = pgTable(
   "source_health",

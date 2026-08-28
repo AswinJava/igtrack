@@ -18,3 +18,4 @@ export * from "./repositories/source-health.js";
 export * from "./repositories/app-queries.js";
 export * from "./jobs/backoff.js";
 export * from "./jobs/queue.js";
+export * from "./jobs/schedule.js";

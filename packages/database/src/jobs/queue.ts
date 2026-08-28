@@ -234,11 +234,13 @@ export async function completeJob(
   db: Database,
   jobId: string,
   workerId: string,
+  outcome?: typeof monitoringJobs.$inferSelect.outcome,
 ): Promise<JobRecord> {
   const rows = await db
     .update(monitoringJobs)
     .set({
       status: "succeeded",
+      outcome: outcome ?? null,
       completedAt: new Date(),
       lockedAt: null,
       lockedBy: null,

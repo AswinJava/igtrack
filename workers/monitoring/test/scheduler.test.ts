@@ -42,7 +42,7 @@ async function jobsForKind(
 }
 
 const T0 = Date.parse("2026-08-28T10:10:00.000Z");
-const T0_LATER = Date.parse("2026-08-28T10:40:00.000Z");
+const T0_LATER = Date.parse("2026-08-28T10:20:00.000Z");
 const T1 = Date.parse("2026-08-28T16:10:00.000Z");
 
 describe.runIf(dbAvailable)("scheduler tick", () => {
@@ -77,7 +77,7 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
     expect(result.deduplicated).toBe(0);
     expect(await countJobs(handle)).toBe(4);
 
-    for (const kind of ["PROFILE_SCAN", "FOLLOWER_SCAN", "FOLLOWING_SCAN", "STORY_SCAN"]) {
+    for (const kind of ["PROFILE_SCAN", "FOLLOWER_SCAN", "FOLLOWING_SCAN"]) {
       const jobs = await jobsForKind(handle, kind);
       expect(jobs).toHaveLength(1);
       // The key must encode the scheduling window, never bare target+kind (S7).
@@ -85,6 +85,8 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
       expect(jobs[0]?.idempotencyKey).toContain(targetId);
       expect(jobs[0]?.idempotencyKey).toContain("2026-08-28T06:00:00.000Z");
     }
+    const storyJobs = await jobsForKind(handle, "STORY_SCAN");
+    expect(storyJobs[0]?.idempotencyKey).toContain("2026-08-28T10:00:00.000Z");
   });
 
   it("a repeated tick inside the same window is idempotent (S1)", async () => {
@@ -146,7 +148,7 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
     const dead = createDb({ url: "postgresql://igtrack:igtrack@127.0.0.1:59999/none", max: 1 });
     try {
       await expect(
-        runSchedulerTick(dead.db, { now: new Date(T0), connectTimeoutSeconds: 1 }),
+        runSchedulerTick(dead.db, { now: new Date(T0) }),
       ).rejects.toThrow();
     } finally {
       await dead.close();

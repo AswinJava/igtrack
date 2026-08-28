@@ -64,6 +64,20 @@ export const jobStatusEnum = pgEnum("job_status", [
   "cancelled",
 ]);
 
+// Diagnostics-only outcome dimension (Phase 6 D4). Failures stay in
+// `status`/`error`; outcome records HOW a job concluded:
+// COMPLETED (real observations), COMPLETED_EMPTY (AVAILABLE + zero),
+// COMPLETED_PARTIAL (provider PARTIAL, preserved), UNAVAILABLE,
+// SKIPPED_PAUSED / SKIPPED_STOPPED (target not ACTIVE at execution).
+export const jobOutcomeEnum = pgEnum("job_outcome", [
+  "COMPLETED",
+  "COMPLETED_EMPTY",
+  "COMPLETED_PARTIAL",
+  "UNAVAILABLE",
+  "SKIPPED_PAUSED",
+  "SKIPPED_STOPPED",
+]);
+
 export const sourceHealthStatusEnum = pgEnum("source_health_status", [
   "HEALTHY",
   "DEGRADED",

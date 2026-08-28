@@ -1,0 +1,51 @@
+$ vitest run
+
+[1m[46m RUN [49m[22m [36mv3.2.7 [39m[90mC:/Users/aswin/Desktop/igtrack[39m
+
+ [32m✓[39m workers/monitoring/test/worker-follower-scan.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 1930[2mms[22m[39m
+ [32m✓[39m packages/database/test/jobs.test.ts [2m([22m[2m14 tests[22m[2m)[22m[33m 1922[2mms[22m[39m
+ [32m✓[39m workers/monitoring/test/scheduler.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 1746[2mms[22m[39m
+[90mstderr[2m | workers/monitoring/test/worker-boundary.test.ts[2m > [22m[2mworker failure boundary[2m > [22m[2msurvives a dead database while polling and keeps iterating (J3)
+[22m[39m{"ts":"2026-08-28T03:48:36.549Z","level":"warn","event":"worker_poll_error","worker":"worker-6648-1787888916549","message":"ECONNREFUSED (injected)"}
+
+[90mstderr[2m | workers/monitoring/test/worker-boundary.test.ts[2m > [22m[2mworker failure boundary[2m > [22m[2msurvives a dead database while polling and keeps iterating (J3)
+[22m[39m{"ts":"2026-08-28T03:48:36.560Z","level":"warn","event":"worker_poll_error","worker":"worker-6648-1787888916549","message":"ECONNREFUSED (injected)"}
+
+[90mstderr[2m | workers/monitoring/test/worker-boundary.test.ts[2m > [22m[2mworker failure boundary[2m > [22m[2msurvives a dead database while polling and keeps iterating (J3)
+[22m[39m{"ts":"2026-08-28T03:48:36.561Z","level":"warn","event":"worker_poll_error","worker":"worker-6648-1787888916549","message":"ECONNREFUSED (injected)"}
+
+[90mstderr[2m | workers/monitoring/test/worker-boundary.test.ts[2m > [22m[2mworker failure boundary[2m > [22m[2mreturns lost instead of throwing when completion loses ownership (J7)
+[22m[39m{"ts":"2026-08-28T03:48:36.706Z","level":"warn","event":"job_ownership_lost","jobId":"d41bbff9-5f03-4de5-b8b0-8a3818faa0ae","kind":"PROFILE_SCAN","reason":"completion rejected: job is no longer owned by this worker"}
+
+[90mstderr[2m | workers/monitoring/test/worker-boundary.test.ts[2m > [22m[2mworker failure boundary[2m > [22m[2mreturns lost instead of throwing when failure recording loses ownership (J5)
+[22m[39m{"ts":"2026-08-28T03:48:36.746Z","level":"warn","event":"job_ownership_lost","jobId":"fda0da83-9f78-48af-acaa-a687928c2028","kind":"PROFILE_SCAN","reason":"failure rejected: job is no longer owned by this worker"}
+
+[90mstderr[2m | workers/monitoring/test/worker-boundary.test.ts[2m > [22m[2mworker failure boundary[2m > [22m[2mfails unexpected (programming) errors non-retryably as UNEXPECTED
+[22m[39m{"ts":"2026-08-28T03:48:36.782Z","level":"error","event":"unexpected_job_error","jobId":"45e21864-d344-41b4-9fd7-93e2323deccd","kind":"PROFILE_SCAN","errorName":"Error","message":"boom: programming error"}
+
+[90mstdout[2m | workers/monitoring/test/worker-boundary.test.ts[2m > [22m[2mworker failure boundary[2m > [22m[2mcompletes UNAVAILABLE capability scans honestly without fabricated data (C3)
+[22m[39m{"ts":"2026-08-28T03:48:36.889Z","level":"info","event":"job_succeeded","jobId":"b86e4113-6154-4f21-86e8-884919c2fbca","kind":"PROFILE_SCAN"}
+
+ [32m✓[39m workers/monitoring/test/worker-boundary.test.ts [2m([22m[2m7 tests[22m[2m)[22m[33m 1576[2mms[22m[39m
+ [32m✓[39m packages/database/test/scheduler.test.ts [2m([22m[2m9 tests[22m[2m)[22m[33m 1393[2mms[22m[39m
+ [32m✓[39m packages/database/test/follows.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 1439[2mms[22m[39m
+ [32m✓[39m packages/database/test/retention.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 1298[2mms[22m[39m
+ [32m✓[39m packages/database/test/persistence.test.ts [2m([22m[2m5 tests[22m[2m)[22m[33m 1386[2mms[22m[39m
+ [32m✓[39m packages/database/test/stories.test.ts [2m([22m[2m2 tests[22m[2m)[22m[33m 1271[2mms[22m[39m
+ [32m✓[39m packages/database/test/privacy.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 1265[2mms[22m[39m
+ [32m✓[39m packages/database/test/source-health.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 1274[2mms[22m[39m
+ [32m✓[39m packages/database/test/schema.test.ts [2m([22m[2m5 tests[22m[2m | [22m[33m1 skipped[39m[2m)[22m[33m 1260[2mms[22m[39m
+ [32m✓[39m apps/web/test/format.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 52[2mms[22m[39m
+ [32m✓[39m packages/ingestion/test/fixture-provider.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 28[2mms[22m[39m
+ [32m✓[39m packages/core/test/capability.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m apps/web/test/evidence.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m apps/web/test/capability.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m packages/core/test/follow-diff.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+ [32m✓[39m packages/core/test/profile-diff.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+ [32m✓[39m packages/ingestion/test/mention-classification.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m20 passed[39m[22m[90m (20)[39m
+[2m      Tests [22m [1m[32m108 passed[39m[22m[2m | [22m[33m1 skipped[39m[90m (109)[39m
+[2m   Start at [22m 09:18:24
+[2m   Duration [22m 34.91s[2m (transform 536ms, setup 0ms, collect 10.04s, tests 17.87s, environment 4ms, prepare 2.64s)[22m
+
