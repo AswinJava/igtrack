@@ -90,4 +90,38 @@ describe.runIf(available)("source health", () => {
       "getStories",
     ]);
   });
+
+  // STEP 15 (Phase 10): authorization lifecycle. Revocation must surface as a
+  // FORBIDDEN/AUTH_REQUIRED failure that degrades health — a stale HEALTHY must
+  // never survive a known authorization loss — and recovery (re-authorization)
+  // must restore HEALTHY. UNAVAILABLE stays reserved for capability gaps.
+  it("revoked authorization degrades health; recovery restores it (PH10-R1)", async () => {
+    // healthy baseline for the capability
+    await recordCapabilitySuccess(handle.db, {
+      source: SOURCE,
+      capability: "getFollowers",
+    });
+    // authorization revoked → provider answers FORBIDDEN
+    const revoked = await recordCapabilityFailure(handle.db, {
+      source: SOURCE,
+      capability: "getFollowers",
+      reason: "authorization revoked",
+      errorCategory: "FORBIDDEN",
+    });
+    expect(revoked.status).toBe("DEGRADED");
+    expect(revoked.errorCategory).toBe("FORBIDDEN");
+    expect(revoked.consecutiveFailures).toBe(1);
+
+    // re-authorization → recovery
+    const recovered = await recordCapabilitySuccess(handle.db, {
+      source: SOURCE,
+      capability: "getFollowers",
+    });
+    expect(recovered.status).toBe("HEALTHY");
+    expect(recovered.consecutiveFailures).toBe(0);
+
+    const health = await getSourceHealth(handle.db, SOURCE.id);
+    const followers = health.find((h) => h.capability === "getFollowers");
+    expect(followers?.status).toBe("HEALTHY");
+  });
 });
