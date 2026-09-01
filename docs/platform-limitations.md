@@ -19,13 +19,15 @@ fake coverage.
 
 | Capability | Reliability | Notes |
 |---|---|---|
-| Profile metadata (bio, counts, verified) | Medium | Public web embeds change shape without notice; counts are point-in-time |
-| Stories of public accounts | Medium | 24h expiry; missed poll windows = permanent gaps |
+| Profile metadata (bio, counts, verified) | Medium | Public web embeds change shape without notice; counts are point-in-time. Business Discovery / Graph API returns a *subset* (counts, bio, website) for other Business/Creator accounts; personal accounts not discoverable. |
+| Stories of public accounts | Medium | 24h expiry; missed poll windows = permanent gaps. Graph API story read is scope/format-dependent (owned accounts only, where permission granted — see `docs/phase-10-provider-evaluation.md` §3.6). |
 | Story mention metadata | Low–Medium | Only what the source payload includes; hidden-mention signals vary by source/version; never guaranteed |
-| Follower/following lists | Low–Medium | Paginated, rate-limited, login-gated in most surfaces; large accounts may only sync partially |
-| Comments on public posts | Medium | Paginated; top/filtered views may hide items |
+| Follower/following lists | **UNAVAILABLE via official API; Low–Medium via synthetic/other** | The **official Graph API does not expose follower/following lists** — only counts (`followers_count` / `follows_count`). Any provider claiming a full list for arbitrary accounts requires explicit legal review; IGTrack's `FixtureProvider` is synthetic. See `docs/phase-10-provider-evaluation.md` §3.6 and `docs/provider-contract.md` §1e. Large accounts may only sync partially where a provider does expose lists. |
+| Comments on public posts | Medium (owned media via Graph API) | Paginated; top/filtered views may hide items. Graph API: `GET /{media-id}/comments?limit=50&after={cursor}` on owned media only. |
 | Likes | **Unavailable as history** | No public "everything they liked" feed exists. Only like signals present in specific payloads, if any → capability layer reports PARTIAL/UNAVAILABLE |
 | DMs / private anything | Unavailable | By design and by rule |
+| Hashtag search | PARTIAL (Graph API) | 30 unique hashtags per 7 days per IG account; `ig_hashtag_search` → `top_media` / `recent_media`. Not yet consumed by IGTrack. |
+| Business Discovery | PARTIAL | `business_discovery.username({target})` returns limited metadata for *other* Business/Creator accounts only; personal accounts not discoverable. One call per target, counts toward 200/h. |
 
 ## 3. Legal / ToS position
 
