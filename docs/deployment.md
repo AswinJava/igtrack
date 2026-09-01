@@ -50,12 +50,13 @@ a window; backward jumps re-enter an already-keyed window (deduplicated no-op).
 ## 3. Deployment requirements (self-host baseline)
 
 - Restart policy: web and worker both `restart: unless-stopped` (or a process manager).
-- Health: `GET /` (unauthenticated redirect), `/api/targets` 401 for anonymous, and the
-  authenticated diagnostics page (DB connectivity, migration state, queue depth,
-  scheduler last-tick/success/error, source health). A machine-readable `/healthz` is
-  future work.
+- Health:
+  - **Machine-readable liveness (Phase 10):** `GET /api/healthz` — no auth, no secrets — returns `{status, db, migrations, latencyMs, provider, version, ts}` (200 when DB ok, 503 when degraded). Suitable for load-balancer / orchestrator probes and for deployment verification. Source for web: `apps/web/app/api/healthz/route.ts` (secret-free by construction).
+  - `GET /` (unauthenticated redirect), `/api/targets` 401 for anonymous, and the authenticated diagnostics page (DB connectivity, migration state, queue depth, scheduler last-tick/success/error, source health).
 - Migrations: run once per deploy before processes start; rollback = redeploy previous
   build; migrations are forward-only (append-only schema).
+- Pool / wire timeouts (Phase 10 hardening): `packages/database/src/client/client.ts` now bounds `connect_timeout 10s / idle_timeout 30s / max_lifetime 30m` so a stalled Postgres cannot wedge the worker or web requests. Override via `DATABASE_URL` query params if a deployment needs different values; no extra indirection yet.
+- Login rate limiting (Phase 10, before public exposure): `POST /api/auth/login` is limited to **5 attempts per 15m per IP+email** in-memory (`apps/web/lib/rate-limit.ts`); overflow returns `429 + Retry-After`. Limiter is single-instance and resets on restart (documented); a distributed limiter (Redis/DB) would replace it at multi-instance scale.
 - Container packaging (Dockerfiles) is deferred until the target platform is chosen.
 
 ## 4. Backup / recovery assumptions

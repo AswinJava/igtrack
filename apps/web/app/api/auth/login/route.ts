@@ -17,6 +17,23 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
+    // Phase 10 P2 #1 — brute-force protection before any public exposure.
+    // In-memory sliding window per IP+email; 429 with Retry-After on overflow.
+    // Never logs passwords or tokens.
+    const ip =
+      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+      req.headers.get("x-real-ip") ??
+      "unknown";
+    const { checkRateLimit, loginRateLimitKey, LOGIN_LIMIT } = await import("@/lib/rate-limit");
+    const rateKey = loginRateLimitKey(ip, parsed.data.email.toLowerCase());
+    const limit = checkRateLimit(rateKey, LOGIN_LIMIT);
+    if (!limit.allowed) {
+      const retryAfterSec = Math.ceil((limit.retryAfterMs ?? LOGIN_LIMIT.windowMs) / 1000);
+      return NextResponse.json(
+        { error: { code: "RATE_LIMITED", message: "Too many login attempts. Please try again later." } },
+        { status: 429, headers: { "Retry-After": String(retryAfterSec) } },
+      );
+    }
     const { verifyCredentials, startSessionForUser } = await import("@/lib/auth");
     const user = await verifyCredentials(parsed.data.email, parsed.data.password);
     if (!user) {

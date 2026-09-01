@@ -32,7 +32,16 @@ export function defaultFixturesDir(): string {
 export function providerFromEnv(): ExecutionSource {
   const name = process.env.IGTRACK_PROVIDER ?? "fixture";
   if (name !== "fixture") {
-    throw new Error(`igtrack worker: no provider implementation for "${name}"`);
+    // Phase 10 credential-safety (§7): an unknown provider name is a
+    // *configuration* failure, not a provider UNAVAILABLE. The worker must
+    // fail fast before any observation is attempted so a missing credential
+    // can never be mis-surfaced as an empty dataset.
+    const expected =
+      'IGTRACK_PROVIDER=fixture (allowed values: "fixture"; a Graph API provider requires explicit founder authorization and is not yet configured — see docs/phase-10-provider-evaluation.md)';
+    throw new Error(
+      `igtrack worker: no provider implementation for "${name}". Expected ${expected}. ` +
+        `If you intended the authorized Graph API provider, it is not yet integrated — see phase-10-provider-evaluation.md §3.`,
+    );
   }
   return createExecutionSource({
     name: "fixture",

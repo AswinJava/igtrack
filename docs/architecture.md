@@ -197,6 +197,28 @@ retryable kind. `retryAfterMs` is honored verbatim as the job's next availabilit
 `follow_scan_staging` (PC-T2) — checkpoints carry cursor/page only, making scans
 crash-safe, duplicate-page idempotent, and O(n) in writes instead of O(n²).
 
+## 6c. Operational hardening (Phase 10)
+
+- **Pool / wire timeouts** (`packages/database/src/client/client.ts`):
+  `connect_timeout 10s`, `idle_timeout 30s`, `max_lifetime 30m` bound every pool
+  and wire wait so a stalled Postgres cannot wedge the worker or web requests.
+  Override via `DATABASE_URL` query params if a deployment needs different bounds.
+- **Health endpoint** (`apps/web/app/api/healthz/route.ts`): `GET /api/healthz`
+  returns machine-readable liveness + DB reachability (`status: ok|degraded`,
+  `db`, `migrations`, `latencyMs`, `provider`, `version`, `ts`), 200/503, no
+  auth, no secrets — suitable for orchestrator probes and deployment verification.
+  The richer authenticated `/diagnostics` page remains the human diagnostics surface.
+- **Login rate limiting** (`apps/web/lib/rate-limit.ts`): `POST /api/auth/login`
+  in-memory sliding window **5 attempts / 15m per IP+email**, `429 + Retry-After`
+  on overflow, never logs passwords/tokens. Single-instance resets on restart
+  (documented); a distributed limiter (Redis/DB) replaces it only at multi-instance
+  scale. This closes the P1-adjacent P2 before any public exposure.
+- **Provider credential safety** (`workers/monitoring/src/provider.ts`): unknown
+  `IGTRACK_PROVIDER` now fails fast with an actionable configuration error,
+  never as a silently-unavailable provider. Credentials (future `graph:` provider)
+  live only in env/secret store, are never persisted in evidence/DB/logs/browser,
+  and are documented in `.env.example` without values (`IGTRACK_GRAPH_*`).
+
 ## 7. Deployment modes
 
 - **LOCAL DEVELOPMENT** — pnpm + docker-compose Postgres; fixture provider.
