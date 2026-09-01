@@ -14,7 +14,11 @@ Each phase ends with: inspect → implement → test → review → fix → docu
 | 6 | Scheduler + complete observation coverage: deterministic DB-backed scheduler (window idempotency, guarded ACTIVE-only enqueue), FOLLOWING_SCAN, STORY_SCAN + mention pipeline, job outcome dimension, scheduler diagnostics, Playwright E2E | **done** |
 | 6.5 | Production-readiness gate: forensic audit, CI (real-Postgres tests + worker boot smoke + build + E2E), worker daemon entry + graceful shutdown, idle backoff, scheduler fleet rotation, deployment/provider-contract/ops docs | **done** |
 | 6.6 | Provider-integration hardening: PC-T1 provider timeout boundary, PC-T2 checkpoint staging (durable `follow_scan_staging`, O(n) writes), provider error taxonomy + retryability + retry-after, empty-list honesty, source-class registry, conformance harness + fixture suite, migration 0005 verified on existing DBs, CI infra guard, config audit | **done** |
-| 7 | Honesty depth in UI: empty-vs-zero reclassification (D2), PARTIAL surfacing (D3), diff engine UI depth | next |
+| 7 | Honesty depth in UI: empty-vs-zero reclassification (D2), PARTIAL surfacing (D3), diff engine UI depth | **deferred — honesty enforced at contract level; UI depth pending after value validation** |
+| 8 | Interaction system: comments/mentions/tags + likes capability layer | deferred |
+| 9 | Relationship intelligence: weighted scoring, decay, explainable rankings | deferred |
+| 10 | Phase 9/10 Provider evaluation lane: lawful provider appraisal (fixture vs import vs Graph API vs T3), capability matrix, legal/ToS boundary, conformance gate | **done — Phase 10 AUTHORIZED PROVIDER EVALUATION COMPLETE (real-provider testing not yet available pending D1)** |
+| 11 | Phase 10 Operational hardening lane: credential safety, pool timeouts (10s/30s/30m), `/api/healthz` (200/503, no secrets), login rate limit (5/15m/IP+email), deployment/docs hygiene | **done** |
 | 8 | Interaction system: comments/mentions/tags + likes capability layer | |
 | 9 | Relationship intelligence: weighted scoring, decay, explainable rankings | |
 | 10 | Evidence system UI: provenance panels, hashes, "why do we know this?" | |

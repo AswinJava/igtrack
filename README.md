@@ -12,11 +12,17 @@ evidence. IGTrack never pretends to know what the platform does not expose.
 
 ## Status
 
-Phase 6 — deterministic scheduler + complete observation coverage
-(FOLLOWING_SCAN, STORY_SCAN + mention pipeline, job outcomes, scheduler
-diagnostics, first Playwright E2E) on top of the Phase 5 reliability gate.
-Ingestion remains **fixture-only**: no production Instagram monitoring exists.
-See `docs/roadmap.md`.
+Phase 10 — **Authorized Provider Evaluation Complete — Real Provider Testing Not Yet Available** (founder gate D1 pending).
+Provider evaluation is complete: every Graph API capability has an explicit
+`AVAILABLE / PARTIAL / UNAVAILABLE / UNKNOWN` answer with evidence
+(`docs/phase-10-provider-evaluation.md`), the adapter contract is mapped
+method-by-method (`docs/provider-contract.md` §1e), and conformance + failure
+injection remain green. Controlled Graph API testing is intentionally
+`NOT YET AVAILABLE` until the founder explicitly authorizes a owned
+Business/Creator account + Meta app + token via env/secret-store (no scraping,
+no private-API). Until then, ingestion remains **fixture-only**
+(`fixture:v1`) — the canonical conformance reference. See `docs/roadmap.md`,
+`docs/phase-10-founder-report.md`, and `docs/phase-10-controlled-testing.md`.
 
 ## Quickstart
 
