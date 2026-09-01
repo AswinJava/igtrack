@@ -109,15 +109,21 @@ export async function recordFollowSnapshot(
     }
 
     if (accountIds.length > 0) {
-      await tx
-        .insert(followSnapshotMembers)
-        .values(
-          accountIds.map((igAccountId) => ({
-            snapshotId: snapshot.id,
-            igAccountId,
-          })),
-        )
-        .onConflictDoNothing();
+      // Chunk to stay under Postgres max parameters (65534) — 2 params per row → ~32k max per statement.
+      // Batching at 5k (≈10k params) keeps us safely under the limit and bounded for 500k snapshots.
+      const BATCH = 5000;
+      for (let i = 0; i < accountIds.length; i += BATCH) {
+        const batch = accountIds.slice(i, i + BATCH);
+        await tx
+          .insert(followSnapshotMembers)
+          .values(
+            batch.map((igAccountId) => ({
+              snapshotId: snapshot.id,
+              igAccountId,
+            })),
+          )
+          .onConflictDoNothing();
+      }
     }
 
     return {
