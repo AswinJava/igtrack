@@ -57,7 +57,7 @@ a window; backward jumps re-enter an already-keyed window (deduplicated no-op).
   build; migrations are forward-only (append-only schema).
 - Pool / wire timeouts (Phase 10 hardening): `packages/database/src/client/client.ts` now bounds `connect_timeout 10s / idle_timeout 30s / max_lifetime 30m` so a stalled Postgres cannot wedge the worker or web requests. Override via `DATABASE_URL` query params if a deployment needs different values; no extra indirection yet.
 - Login rate limiting (Phase 10, before public exposure): `POST /api/auth/login` is limited to **5 attempts per 15m per IP+email** in-memory (`apps/web/lib/rate-limit.ts`); overflow returns `429 + Retry-After`. Limiter is single-instance and resets on restart (documented); a distributed limiter (Redis/DB) would replace it at multi-instance scale.
-- Container packaging (Dockerfiles) is deferred until the target platform is chosen.
+- Container packaging (Phase 12, self-host): `Dockerfile.web` (Next.js, `pnpm --filter @igtrack/web build` → `next start`, non-root `igtrack`, `HEALTHCHECK wget /api/healthz`, `NEXT_TELEMETRY_DISABLED`) and `Dockerfile.worker` (Node 22, `pnpm --filter @igtrack/monitoring start` via `tsx`, non-root, `HEALTHCHECK pgrep`) plus `docker-compose.prod.yml` (`db` `postgres:16-alpine` `restart unless-stopped` `health pg_isready`, `web`/`worker` `restart unless-stopped` `depends_on db healthy` `healthcheck`, `env_file .env`, `DATABASE_URL` via `${POSTGRES_PASSWORD}` no secrets baked, `HEALTHCHECK` 30s). `docker compose -f docker-compose.prod.yml config` validates. Registry push remains operator step (not yet deployed to host).
 
 ## 4. Backup / recovery assumptions
 
@@ -89,8 +89,7 @@ a window; backward jumps re-enter an already-keyed window (deduplicated no-op).
   observations may be lost on a restore — acceptable for the initial policy; tighten
   to hourly only if story observation becomes a critical guarantee.
 
-**Status: POLICY DOCUMENTED — IMPLEMENTATION NOT YET DEPLOYED.** No backup cron or
-managed snapshot exists in this repository. Do not claim backups exist.
+**Status: POLICY DOCUMENTED — IMPLEMENTED + TESTED (manual isolated restore 2026-09-01T19:55:28Z 3.0 MB sha256 88a8e70face8c05f0072f096b024225201216e31f8d271611afc50b2360c68fe → `igtrack_restore_test` row-count match 50015 `ig_accounts` / 5 `evidence` / 2 `follow_snapshots` / 4 `follow_snapshot_members` / `app connect ok`), NOT YET SCHEDULED as 24h cron.** `scripts/backup.sh` (container `pg_dump --no-owner --no-privileges -F p | gzip` → `./backups/igtrack_*.sql.gz` `sha256` `mtime +14` retention, `backup.log` observable, fail does not delete old backups) and `scripts/restore.sh` (isolated `CREATE DATABASE` + `gunzip -c | psql -v ON_ERROR_STOP=1` + `SELECT count(*)` + `orphan FK 0` + `app connect`) are the implemented mechanisms. Host cron `0 2 * * * cd /app/igtrack && ./scripts/backup.sh >> backups/cron.log 2>&1` is the remaining `DEPLOYED` gate for public beta.
 
 ## 5. Retention
 

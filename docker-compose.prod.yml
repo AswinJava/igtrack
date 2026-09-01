@@ -1,0 +1,74 @@
+name: igtrack-prod
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: igtrack-db-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: igtrack
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required (set in .env)}
+      POSTGRES_DB: igtrack
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - igtrack_pgdata_prod:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U igtrack -d igtrack"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    container_name: igtrack-web-prod
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://igtrack:${POSTGRES_PASSWORD}@db:5432/igtrack
+      IGTRACK_DATABASE_URL: postgresql://igtrack:${POSTGRES_PASSWORD}@db:5432/igtrack
+      # IGTRACK_PROVIDER=fixture is default; Graph remains disabled
+    ports:
+      - "${IGTRACK_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/healthz | grep -q '\"status\":\"ok\"'"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: igtrack-worker-prod
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://igtrack:${POSTGRES_PASSWORD}@db:5432/igtrack
+      IGTRACK_DATABASE_URL: postgresql://igtrack:${POSTGRES_PASSWORD}@db:5432/igtrack
+    # no ports — worker is internal
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'workers/monitoring' >/dev/null || pgrep -f 'tsx.*main' >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  igtrack_pgdata_prod:
+    name: igtrack_pgdata_prod

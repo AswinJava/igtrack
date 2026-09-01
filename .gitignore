@@ -28,6 +28,10 @@ test-results/
 *.log
 logs/
 
+# backups (pg_dump artifacts — never commit large dumps; keep scripts, not data)
+backups/
+!backups/.gitkeep
+
 # os / editor
 .DS_Store
 Thumbs.db

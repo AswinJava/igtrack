@@ -1,0 +1,41 @@
+# IGTrack web — Next.js production image (self-host beta)
+# Deterministic, no secrets baked, non-root.
+FROM node:22-alpine AS base
+RUN corepack enable && corepack prepare pnpm@11.21.0 --activate
+WORKDIR /app
+
+# deps
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
+COPY packages/core/package.json packages/core/package.json
+COPY packages/ingestion/package.json packages/ingestion/package.json
+COPY packages/database/package.json packages/database/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY workers/monitoring/package.json workers/monitoring/package.json
+RUN pnpm install --frozen-lockfile
+
+# source (keep layer cache narrow — copy only what web needs + shared packages)
+COPY tsconfig.base.json tsconfig.base.json
+COPY packages/core packages/core
+COPY packages/ingestion packages/ingestion
+COPY packages/database packages/database
+COPY apps/web apps/web
+
+# build (Next.js standalone output not used yet — keep simple `next build`)
+RUN pnpm --filter @igtrack/web build
+
+# runtime
+FROM node:22-alpine AS runner
+RUN addgroup -S igtrack && adduser -S igtrack -G igtrack
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+# pnpm runtime not needed — copy built app + node_modules
+COPY --from=base /app/node_modules ./node_modules
+COPY --from=base /app/package.json ./package.json
+COPY --from=base /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
+COPY --from=base /app/apps/web ./apps/web
+COPY --from=base /app/packages ./packages
+USER igtrack
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 CMD wget -qO- http://127.0.0.1:3000/api/healthz | grep -q '"status":"ok"' || exit 1
+CMD ["sh","-c","pnpm --filter @igtrack/web start -- -p ${IGTRACK_PORT:-3000} -H 0.0.0.0"]
