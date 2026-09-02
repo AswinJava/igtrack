@@ -1,0 +1,46 @@
+# dependencies
+node_modules/
+
+# builds
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# env & secrets — never commit
+.env
+.env.*
+!.env.example
+
+# local data
+data/
+storage/
+*.sqlite
+*.db
+
+# generated CLI output (`igtrack public --out …`) — local observation artifacts
+*_dossier.json
+
+# test & coverage
+coverage/
+playwright-report/
+test-results/
+
+# logs
+*.log
+logs/
+
+# local scratch output from scripts/
+.tmp/
+
+# backups (pg_dump artifacts — never commit large dumps; keep scripts, not data)
+backups/
+!backups/.gitkeep
+
+# os / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

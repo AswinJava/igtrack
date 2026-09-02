@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "workers/*"
+
+onlyBuiltDependencies:
+  - esbuild
+allowBuilds:
+  esbuild: true
+
+overrides:
+  postcss: '^8.5.26'

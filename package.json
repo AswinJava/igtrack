@@ -1,0 +1,48 @@
+{
+  "name": "igtrack",
+  "private": true,
+  "version": "1.0.0",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AswinJava/igtrack.git"
+  },
+  "type": "module",
+  "description": "Evidence-first Instagram observation engine: JSON CLI, MCP server, append-only evidence ledger.",
+  "homepage": "https://github.com/AswinJava/igtrack#readme",
+  "author": "Aswin S (https://github.com/AswinJava)",
+  "keywords": [
+    "instagram",
+    "instagram-analytics",
+    "evidence",
+    "provenance",
+    "mcp",
+    "model-context-protocol",
+    "cli",
+    "self-hosted",
+    "postgresql",
+    "monitoring"
+  ],
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "pnpm -r run typecheck",
+    "verify:graph": "pnpm exec tsx scripts/verify-graph-provider.ts",
+    "docs:capabilities": "pnpm exec tsx scripts/capability-matrix.ts",
+    "bench:research": "pnpm exec tsx scripts/bench-research.ts",
+    "bench:audit": "pnpm exec tsx scripts/bench-audit.ts",
+    "igtrack": "pnpm --filter @igtrack/cli run start",
+    "mcp": "pnpm --filter @igtrack/cli run start mcp",
+    "worker": "pnpm --filter @igtrack/monitoring start"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
