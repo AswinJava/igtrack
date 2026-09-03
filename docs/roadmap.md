@@ -19,6 +19,11 @@ Each phase ends with: inspect → implement → test → review → fix → docu
 | 9 | Relationship intelligence: weighted scoring, decay, explainable rankings | deferred |
 | 10 | Phase 9/10 Provider evaluation lane: lawful provider appraisal (fixture vs import vs Graph API vs T3), capability matrix, legal/ToS boundary, conformance gate | **done — Phase 10 AUTHORIZED PROVIDER EVALUATION COMPLETE (real-provider testing not yet available pending D1)** |
 | 11 | Phase 10 Operational hardening lane: credential safety, pool timeouts (10s/30s/30m), `/api/healthz` (200/503, no secrets), login rate limit (5/15m/IP+email), deployment/docs hygiene | **done** |
+| 11a | Forensic audit gate: infra + DB + worker + E2E verified on real Postgres (161/1, 7/7 E2E, typecheck + build PASS) | **done** |
+| 11b | Scale benchmark: durable staging to 50k MEASURED PASS, P1 MAX_PARAMETERS fixed via 5k batching, 500k INFERRED with P2 gate | **done** |
+| 11d | Final production readiness: P2 ledger, backup/RPO + session-purge + lease gates, local/self-host READY, public cloud gated | **done** |
+| 12 | Production beta deployment & recovery gate: Dockerfiles + compose.prod + backup/restore scripts IMPLEMENTED + TESTED (isolated restore 50015 match) | **done** |
+| 13 | Zero-cost beta readiness: Render Free + Neon Free + GitHub Actions ephemeral worker + R2 backups IMPLEMENTED ($0, no card), DEPLOYED needs founder secrets | **done — READY WITH EXPLICIT P2 GATES** |
 | 8 | Interaction system: comments/mentions/tags + likes capability layer | |
 | 9 | Relationship intelligence: weighted scoring, decay, explainable rankings | |
 | 10 | Evidence system UI: provenance panels, hashes, "why do we know this?" | |

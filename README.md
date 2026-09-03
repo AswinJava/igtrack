@@ -12,16 +12,24 @@ evidence. IGTrack never pretends to know what the platform does not expose.
 
 ## Status
 
-Phase 10 — **Authorized Provider Evaluation Complete — Real Provider Testing Not Yet Available** (founder gate D1 pending).
+Phase 13 — **Zero-Cost Public Beta Ready with Explicit P2 Gates**
+(fixture-only `fixture:v1`, no Graph integration, no live Instagram calls).
 Provider evaluation is complete: every Graph API capability has an explicit
 `AVAILABLE / PARTIAL / UNAVAILABLE / UNKNOWN` answer with evidence
 (`docs/phase-10-provider-evaluation.md`), the adapter contract is mapped
 method-by-method (`docs/provider-contract.md` §1e), and conformance + failure
 injection remain green. Controlled Graph API testing is intentionally
-`NOT YET AVAILABLE` until the founder explicitly authorizes a owned
+`NOT YET AVAILABLE` until the founder explicitly authorizes an owned
 Business/Creator account + Meta app + token via env/secret-store (no scraping,
 no private-API). Until then, ingestion remains **fixture-only**
-(`fixture:v1`) — the canonical conformance reference. See `docs/roadmap.md`,
+(`fixture:v1`) — the canonical conformance reference. The $0 deploy path
+(Render Free web + Neon Free Postgres + GitHub Actions ephemeral worker +
+R2 backups) is **IMPLEMENTED** (`render.yaml`, `Dockerfile.web/worker`,
+`.github/workflows/`, `scripts/backup*.sh`) but **not yet DEPLOYED**
+until the founder creates the Neon project + Render service + GitHub secrets
+and runs Migrate → Worker → Backup → Restore live (15 min, no card).
+See `docs/roadmap.md`, `docs/zero-cost-beta-deployment.md`,
+`docs/phase-13-zero-cost-beta-readiness.md`,
 `docs/phase-10-founder-report.md`, and `docs/phase-10-controlled-testing.md`.
 
 ## Quickstart
