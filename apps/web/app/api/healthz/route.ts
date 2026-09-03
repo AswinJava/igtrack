@@ -14,9 +14,12 @@ export async function GET() {
     const sql = getSql();
     await sql`SELECT 1`;
     db = "ok";
-    // Lightweight migration state probe — not a full diagnostics dump
+    // Drizzle's postgres-js migrator tracks state in drizzle.__drizzle_migrations
+    // (schema drizzle, table __drizzle_migrations). Query it explicitly: the
+    // unqualified `drizzle_migrations` name does not exist and would report
+    // "unknown" forever on a healthy database.
     try {
-      await sql`SELECT 1 FROM drizzle_migrations LIMIT 1`;
+      await sql`SELECT 1 FROM drizzle.__drizzle_migrations LIMIT 1`;
       migrations = "ok";
     } catch {
       migrations = "unknown";
