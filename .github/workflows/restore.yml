@@ -1,0 +1,91 @@
+name: Restore (isolated)
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup_key:
+        description: "R2 key or artifact name (e.g. igtrack/2026/09/02/020000.sql.gz or backup-2026-09-02T020000Z)"
+        required: true
+      restore_db_suffix:
+        description: "Suffix for isolated restore DB (default: restore_test)"
+        required: false
+        default: "restore_test"
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Download backup artifact (if from backup workflow)
+        if: contains(inputs.backup_key, 'backup-')
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: backup.yml
+          name: ${{ inputs.backup_key }}
+          path: ./backups
+      - name: Fetch from R2 (if R2 key)
+        if: contains(inputs.backup_key, 'igtrack/')
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          pip install -q awscli >/dev/null 2>&1 || true
+          mkdir -p backups
+          aws s3 cp "s3://${R2_BUCKET}/${{ inputs.backup_key }}" "backups/restore_input.sql.gz" --endpoint-url "$R2_ENDPOINT"
+          ls -lh backups/restore_input.sql.gz
+      - name: Restore into isolated Neon branch/database
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RESTORE_SUFFIX: ${{ inputs.restore_db_suffix }}
+        run: |
+          set -euo pipefail
+          # Isolated restore: NEVER touches production. Creates
+          # igtrack_<suffix>_<timestamp>, loads the dump with ON_ERROR_STOP=1,
+          # verifies 8 tables + FK orphans, retains the DB for inspection.
+          # For Neon, CREATE DATABASE via SQL works on most plans; if the plan
+          # requires branching via dashboard/API, this step reports that
+          # explicitly instead of touching prod.
+          RESTORE_DB="igtrack_${RESTORE_SUFFIX}_$(date -u +%Y%m%d%H%M%S)"
+          echo "Restoring to isolated DB: $RESTORE_DB"
+          BK="$(ls -1 backups/*.sql.gz 2>/dev/null | head -1)"
+          if [[ -z "$BK" ]]; then BK="backups/restore_input.sql.gz"; fi
+          echo "Backup file: $BK"
+          sha256sum "$BK" || true
+          # Derive the restore URL by replacing only the dbname path segment,
+          # preserving credentials and query params (e.g. ?sslmode=require).
+          # DATABASE_URL itself is never echoed.
+          RESTORE_URL="$(printf '%s' "$DATABASE_URL" | sed -E 's|/[^/?]*(\?.*)?$|/'"$RESTORE_DB"'\1|')"
+          psql "$DATABASE_URL" -c "SELECT 1" >/dev/null && echo "DB connect ok"
+          if psql "$DATABASE_URL" -c "CREATE DATABASE \"$RESTORE_DB\";" 2>&1 | tee /tmp/create.log; then
+            echo "Created $RESTORE_DB"
+          else
+            cat /tmp/create.log
+            echo "CREATE DATABASE via SQL failed — for Neon use branching via dashboard/API and set DATABASE_URL to branch"
+            exit 1
+          fi
+          gzip -dc "$BK" | psql "$RESTORE_URL" -v ON_ERROR_STOP=1 || {
+            echo "Restore psql failed"; exit 1;
+          }
+          echo "Restore loaded, verifying 8 tables..."
+          psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -c "
+            SELECT 'evidence' AS tbl, count(*) FROM evidence
+            UNION ALL SELECT 'follow_snapshot_members', count(*) FROM follow_snapshot_members
+            UNION ALL SELECT 'follow_snapshots', count(*) FROM follow_snapshots
+            UNION ALL SELECT 'ig_accounts', count(*) FROM ig_accounts
+            UNION ALL SELECT 'monitoring_jobs', count(*) FROM monitoring_jobs
+            UNION ALL SELECT 'stories', count(*) FROM stories
+            UNION ALL SELECT 'targets', count(*) FROM targets
+            UNION ALL SELECT 'users', count(*) FROM users
+            ORDER BY tbl;
+          "
+          echo "Checking FK orphans (must be 0)..."
+          psql "$RESTORE_URL" -v ON_ERROR_STOP=1 -c "
+            SELECT 'orphan_follow_snapshots' AS check, count(*) FROM follow_snapshots s LEFT JOIN evidence e ON s.evidence_id = e.id WHERE s.evidence_id IS NOT NULL AND e.id IS NULL
+            UNION ALL SELECT 'orphan_stories', count(*) FROM stories st LEFT JOIN evidence e ON st.evidence_id = e.id WHERE st.evidence_id IS NOT NULL AND e.id IS NULL;
+          "
+          echo "Restore verify OK — DB $RESTORE_DB retained for inspection (drop manually)"

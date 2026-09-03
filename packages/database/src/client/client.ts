@@ -30,6 +30,10 @@ export function resolveDatabaseUrl(options: CreateDbOptions = {}): string {
 
 export function createDb(options: CreateDbOptions = {}): DatabaseHandle {
   const url = resolveDatabaseUrl(options);
+  // Neon (and other managed PG) requires SSL via `sslmode=require` in the URL.
+  // postgres.js does not auto-enable SSL from the URL alone in all versions —
+  // set it explicitly when the URL signals it, preserving local non-SSL dev.
+  const needsSSL = url.includes("sslmode=require") || url.includes("neon.tech");
   const sql = postgres(url, {
     max: options.max ?? 10,
     // Operational hardening (Phase 10, P2 #6): bound every pool/wire wait so a
@@ -39,6 +43,7 @@ export function createDb(options: CreateDbOptions = {}): DatabaseHandle {
     connect_timeout: 10,
     idle_timeout: 30,
     max_lifetime: 60 * 30,
+    ...(needsSSL ? { ssl: "require" as const } : {}),
     onnotice: () => {},
   });
   const db = drizzle(sql, { schema });

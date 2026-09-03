@@ -1,0 +1,97 @@
+name: Backup (Neon → R2)
+
+on:
+  schedule:
+    - cron: "0 2 * * *" # daily 02:00 UTC, 24h RPO
+  workflow_dispatch:
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pg_dump (if needed)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Create backup directory
+        run: mkdir -p backups
+      - name: pg_dump + gzip + sha256
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -euo pipefail
+          TS="$(date -u +%Y-%m-%dT%H%M%SZ)"
+          FILE="backups/igtrack_${TS}.sql"
+          GZ="${FILE}.gz"
+          echo "pg_dump to ${FILE}"
+          pg_dump "$DATABASE_URL" --no-owner --no-privileges -F p -f "$FILE"
+          gzip -f "$FILE"
+          sha256sum "$GZ" | tee "${GZ}.sha256"
+          ls -lh "$GZ" "${GZ}.sha256"
+          echo "GZ=$GZ" >> $GITHUB_ENV
+          echo "TS=$TS" >> $GITHUB_ENV
+      - name: Upload to R2 (if configured)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${R2_BUCKET:-}" || -z "${R2_ENDPOINT:-}" ]]; then
+            echo "R2 not configured — keeping local artifact only (free local verification)"
+            exit 0
+          fi
+          # R2 is S3-compatible; use aws cli
+          pip install -q awscli >/dev/null 2>&1 || true
+          YEAR="$(date -u +%Y)"; MONTH="$(date -u +%m)"; DAY="$(date -u +%d)"; HM="$(date -u +%H%M%S)"
+          KEY="igtrack/${YEAR}/${MONTH}/${DAY}/${HM}.sql.gz"
+          echo "Uploading $GZ -> s3://${R2_BUCKET}/${KEY} via ${R2_ENDPOINT}"
+          aws s3 cp "$GZ" "s3://${R2_BUCKET}/${KEY}" --endpoint-url "$R2_ENDPOINT" --checksum-algorithm SHA256 || aws s3 cp "$GZ" "s3://${R2_BUCKET}/${KEY}" --endpoint-url "$R2_ENDPOINT"
+          aws s3 cp "${GZ}.sha256" "s3://${R2_BUCKET}/${KEY}.sha256" --endpoint-url "$R2_ENDPOINT" || true
+          echo "Uploaded to R2: ${KEY}"
+          echo "KEY=${KEY}" >> $GITHUB_ENV
+      - name: R2 retention (14 days, only after successful upload)
+        if: env.KEY != ''
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${R2_BUCKET:-}" || -z "${R2_ENDPOINT:-}" ]]; then
+            echo "R2 not configured — skipping R2 retention"
+            exit 0
+          fi
+          # Keys embed UTC date (igtrack/YYYY/MM/DD/HHMMSS.sql.gz) so lexical
+          # comparison against the 14-day cutoff is a date comparison. A failed
+          # backup never reaches this step, so the previous valid backup is
+          # never destroyed by a failure.
+          CUTOFF="$(date -u -d '14 days ago' +%Y/%m/%d 2>/dev/null || date -u -v-14d +%Y/%m/%d)"
+          echo "R2 retention cutoff (key date < ${CUTOFF} deleted)"
+          aws s3 ls "s3://${R2_BUCKET}/igtrack/" --endpoint-url "$R2_ENDPOINT" --recursive 2>&1 | awk '{print $4}' | grep -E '^igtrack/[0-9]{4}/[0-9]{2}/[0-9]{2}/' || true | while read -r key; do
+            keydate="$(echo "$key" | grep -oE '[0-9]{4}/[0-9]{2}/[0-9]{2}' | head -1)"
+            if [[ -n "$keydate" && "$keydate" < "$CUTOFF" ]]; then
+              echo "Deleting expired R2 object: $key"
+              aws s3 rm "s3://${R2_BUCKET}/${key}" --endpoint-url "$R2_ENDPOINT" || echo "WARN: failed to delete $key"
+            fi
+          done || true
+          echo "R2 retention check complete"
+      - name: Upload artifact (fallback / verification)
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-${{ env.TS }}
+          path: |
+            backups/igtrack_*.sql.gz
+            backups/igtrack_*.sql.gz.sha256
+          retention-days: 3
+      - name: Retention (local, 14 days)
+        run: |
+          find backups -type f -name "igtrack_*.sql.gz" -mtime +14 -print -delete || true
+          find backups -type f -name "igtrack_*.sql.gz.sha256" -mtime +14 -print -delete || true
+          ls -lh backups || true

@@ -1,0 +1,47 @@
+name: Monitoring Worker (ephemeral)
+
+on:
+  schedule:
+    # Every 15 minutes — minimum free-compute consistent with beta.
+    # For public repo: unlimited free. For private: ~2880 runs/mo * ~30s = ~1440 min, under 2000 free.
+    # Adjust to "*/5 * * * *" only if private allowance or public.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: monitoring-worker
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Run migrations (safe, idempotent)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: pnpm --filter @igtrack/database db:migrate
+      - name: Ephemeral worker --once
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          IGTRACK_PROVIDER: fixture
+          IGTRACK_FIXTURE_VERSION: v1
+          IGTRACK_WORKER_ONCE: "1"
+          # Bounded drain: up to 25 jobs per 15-min tick, then exit. Single-job
+          # drain (1) cannot keep up with 20 targets x 4 kinds per window; the
+          # 5-minute job timeout is the wall-clock bound and lease/ownership
+          # guards make a timeout kill safe (next tick reclaims).
+          IGTRACK_JOB_MAX_ITER: "25"
+          IGTRACK_JOB_POLL_MS: "100"
+          IGTRACK_JOB_LEASE_MS: "300000"
+          IGTRACK_PROVIDER_TIMEOUT_MS: "30000"
+          IGTRACK_SCHEDULER_BATCH: "200"
+        run: pnpm --filter @igtrack/monitoring start -- --once

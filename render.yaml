@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: igtrack-web
+    runtime: node
+    plan: free
+    region: singapore # or oregon — free tier available; choose closest
+    branch: master
+    buildCommand: pnpm install --frozen-lockfile && pnpm --filter @igtrack/web build
+    startCommand: pnpm --filter @igtrack/web start -- -p $PORT -H 0.0.0.0
+    # Render sets PORT automatically; our start respects IGTRACK_PORT via $PORT
+    healthCheckPath: /api/healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # set in Render dashboard from Neon (with ?sslmode=require)
+      - key: IGTRACK_PROVIDER
+        value: fixture
+      - key: IGTRACK_FIXTURE_VERSION
+        value: v1
+      - key: IGTRACK_JOB_POLL_MS
+        value: 5000
+      - key: IGTRACK_JOB_LEASE_MS
+        value: 300000
+      - key: IGTRACK_PROVIDER_TIMEOUT_MS
+        value: 30000
+      # IGTRACK_ALLOW_DEV_LOGIN must never be true in production — omit
