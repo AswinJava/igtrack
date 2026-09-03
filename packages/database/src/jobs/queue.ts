@@ -382,6 +382,36 @@ export async function queueDepth(db: Database): Promise<number> {
   return rows[0]?.count ?? 0;
 }
 
+// Production retention: terminal job rows (succeeded/failed/cancelled) grow
+// unbounded otherwise. Default 90 days via IGTRACK_JOBS_RETENTION_DAYS.
+// Only rows with completed_at older than the cutoff are removed; running or
+// retryable rows are never touched. Returns the deleted count for logging.
+export function resolveJobsRetentionDays(raw?: string): number {
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+  const fromEnv = Number(process.env.IGTRACK_JOBS_RETENTION_DAYS ?? Number.NaN);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return 90;
+}
+
+export async function purgeTerminalJobs(
+  db: Database,
+  retentionDays?: number,
+): Promise<number> {
+  const days = resolveJobsRetentionDays(
+    retentionDays === undefined ? undefined : String(retentionDays),
+  );
+  const rows = await db
+    .delete(monitoringJobs)
+    .where(
+      sql`${monitoringJobs.status} IN ('succeeded', 'failed', 'cancelled')
+        AND ${monitoringJobs.completedAt} IS NOT NULL
+        AND ${monitoringJobs.completedAt} < now() - make_interval(days => ${days})`,
+    )
+    .returning({ id: monitoringJobs.id });
+  return rows.length;
+}
+
 export interface CheckpointInput {
   targetId: string;
   kind: string;

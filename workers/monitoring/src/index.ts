@@ -8,6 +8,8 @@ import {
   failJob,
   getTarget,
   JobStateError,
+  purgeExpiredSessions,
+  purgeTerminalJobs,
   type Database,
   type FailJobInput,
   type JobRecord,
@@ -252,6 +254,31 @@ export function makeWorkerId(): string {
   return `worker-${process.pid}-${Date.now()}`;
 }
 
+function maintenanceTickMs(): number {
+  const parsed = Number(process.env.IGTRACK_MAINTENANCE_TICK_MS ?? 3_600_000);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3_600_000;
+}
+
+// Production retention (SES-001 + terminal jobs): expired sessions and
+// >90d terminal job rows would otherwise grow unbounded. Best-effort and
+// hourly: failures are logged and retried at the next maintenance window,
+// never fatal to the daemon. Purges only delete expired/completed-old rows.
+async function runMaintenanceTick(
+  db: Database,
+  onError?: (err: unknown) => void,
+): Promise<void> {
+  try {
+    const purgedSessions = await purgeExpiredSessions(db);
+    const purgedJobs = await purgeTerminalJobs(db);
+    if (purgedSessions > 0 || purgedJobs > 0) {
+      logWorker("info", "maintenance_purge", { purgedSessions, purgedJobs });
+    }
+  } catch (err) {
+    logWorker("warn", "maintenance_purge_error", { message: messageOf(err) });
+    onError?.(err);
+  }
+}
+
 // The daemon loop never terminates on recoverable errors: infrastructure
 // failures, malformed jobs, and ownership races are logged (never silently
 // swallowed) and polling resumes after a backoff sleep. Idle iterations sleep
@@ -277,10 +304,19 @@ export async function runWorkerLoop(opts: {
   const schedulerTickMs = opts.scheduler?.tickMs ?? schedulerTickIntervalMs();
   const workerId = makeWorkerId();
   let lastSchedulerTick = 0;
+  let lastMaintenanceTick = 0;
+  const maintenanceMs = maintenanceTickMs();
   let iterations = 0;
   for (;;) {
     if (maxIterations !== Infinity && iterations >= maxIterations) break;
     if (opts.shouldStop?.()) break;
+    // Hourly retention: expired sessions + old terminal jobs. Runs on the
+    // first iteration too, so ephemeral --once runners (GitHub Actions every
+    // 15 min) each perform a cheap maintenance pass.
+    if (Date.now() - lastMaintenanceTick >= maintenanceMs) {
+      lastMaintenanceTick = Date.now();
+      await runMaintenanceTick(db, opts.onError);
+    }
     // Scheduler cadence is independent of job polling: the tick only enqueues
     // due scans (orchestration), the poll loop claims and executes them.
     if (schedulerOn && Date.now() - lastSchedulerTick >= schedulerTickMs) {

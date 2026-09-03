@@ -69,6 +69,10 @@ export async function revokeSession(db: Database, token: string): Promise<void> 
   await db.delete(sessions).where(sql`${sessions.id} = ${tokenHash(token)}`);
 }
 
-export async function purgeExpiredSessions(db: Database): Promise<void> {
-  await db.delete(sessions).where(sql`${sessions.expiresAt} <= now()`);
+export async function purgeExpiredSessions(db: Database): Promise<number> {
+  const rows = await db
+    .delete(sessions)
+    .where(sql`${sessions.expiresAt} <= now()`)
+    .returning({ id: sessions.id });
+  return rows.length;
 }
