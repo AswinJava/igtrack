@@ -73,11 +73,11 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
       now: new Date(T0),
     });
     expect(result.targetsConsidered).toBe(1);
-    expect(result.enqueued).toBe(4);
+    expect(result.enqueued).toBe(5);
     expect(result.deduplicated).toBe(0);
-    expect(await countJobs(handle)).toBe(4);
+    expect(await countJobs(handle)).toBe(5);
 
-    for (const kind of ["PROFILE_SCAN", "FOLLOWER_SCAN", "FOLLOWING_SCAN"]) {
+    for (const kind of ["PROFILE_SCAN", "FOLLOWER_SCAN", "FOLLOWING_SCAN", "POSTS_SCAN"]) {
       const jobs = await jobsForKind(handle, kind);
       expect(jobs).toHaveLength(1);
       // The key must encode the scheduling window, never bare target+kind (S7).
@@ -92,8 +92,8 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
   it("a repeated tick inside the same window is idempotent (S1)", async () => {
     const result = await runSchedulerTick(handle.db, { now: new Date(T0_LATER) });
     expect(result.enqueued).toBe(0);
-    expect(result.deduplicated).toBe(4);
-    expect(await countJobs(handle)).toBe(4);
+    expect(result.deduplicated).toBe(5);
+    expect(await countJobs(handle)).toBe(5);
   });
 
   it("two concurrent scheduler instances do not duplicate logical jobs (S2)", async () => {
@@ -104,8 +104,8 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
         runSchedulerTick(other.db, { now: new Date(T1) }),
       ]);
       const totalEnqueued = results.reduce((sum, r) => sum + r.enqueued, 0);
-      expect(totalEnqueued).toBe(4);
-      expect(await countJobs(handle)).toBe(8);
+      expect(totalEnqueued).toBe(5);
+      expect(await countJobs(handle)).toBe(10);
     } finally {
       await other.close();
     }
@@ -121,8 +121,8 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
     const result = await runSchedulerTick(handle.db, {
       now: new Date(Date.parse("2026-08-28T16:10:00.000Z") + 6 * 60 * 60 * 1000),
     });
-    expect(result.enqueued).toBe(4);
-    expect(await countJobs(handle)).toBe(12);
+    expect(result.enqueued).toBe(5);
+    expect(await countJobs(handle)).toBe(15);
   });
 
   it("PAUSED targets never receive scheduled scans (S3)", async () => {

@@ -8,7 +8,7 @@ import { TargetControls } from "@/components/targets/target-controls";
 
 export const dynamic = "force-dynamic";
 
-const TABS = ["overview", "activity", "stories", "followers", "following", "relationships", "evidence"] as const;
+const TABS = ["overview", "activity", "stories", "highlights", "content", "followers", "following", "relationships", "evidence"] as const;
 type Tab = (typeof TABS)[number];
 
 // Visibility classifications describe synthetic fixture geometry and flags —
@@ -85,9 +85,10 @@ export default async function TargetDetailPage({
   const data = await getTargetById(id);
   if (!data) notFound();
 
-  const { target, account, snapshots, changes, health, stories, storyMentions, deltas, followFollowers, followFollowing, jobs } = data;
+  const { target, account, snapshots, changes, health, stories, storyMentions, posts, postComments, deltas, followFollowers, followFollowing, jobs } = data;
 
   const mentionsByStory = new Map(storyMentions.map((sm) => [sm.storyId, sm.mentions]));
+  const commentsByPost = new Map(postComments.map((pc) => [pc.postId, pc.comments]));
   const followerDeltas = deltas.filter((d) => d.direction === "FOLLOWERS");
   const followingDeltas = deltas.filter((d) => d.direction === "FOLLOWING");
   const mentionCount = storyMentions.reduce((n, sm) => n + sm.mentions.length, 0);
@@ -211,6 +212,7 @@ export default async function TargetDetailPage({
           <Card>
             <CardHeader><CardTitle>Stories</CardTitle><CardDescription>Observed story existence and mention metadata.</CardDescription></CardHeader>
             <CardContent>
+              <p className="mb-3 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-[11px] leading-relaxed text-zinc-500">Viewing here reads IGTrack&apos;s stored observations — it does not place a view under your identity on Instagram. Anonymity against Instagram itself cannot be guaranteed for any live provider; the active fixture source makes no network calls.</p>
               {stories.length === 0 ? (
                 <p className="py-6 text-center text-sm text-zinc-500">No stories observed — stories are ephemeral (24h) and depend on provider capability.</p>
               ) : (
@@ -244,6 +246,56 @@ export default async function TargetDetailPage({
                 </ul>
               )}
               <p className="mt-3 text-[11px] leading-relaxed text-zinc-600">Visibility classifications describe synthetic fixture geometry and flags — not proof that anyone intentionally hid a mention.</p>
+            </CardContent>
+          </Card>
+        )}
+
+        {tab === "highlights" && (
+          <Card>
+            <CardHeader><CardTitle>Highlights</CardTitle><CardDescription>Public story highlights for this account.</CardDescription></CardHeader>
+            <CardContent>
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs leading-relaxed text-amber-200">Highlights are unavailable — the configured provider exposes no highlight capability, so IGTrack shows UNAVAILABLE instead of an empty list. See docs/platform-limitations.md.</div>
+              <p className="mt-3 text-[11px] leading-relaxed text-zinc-600">UNAVAILABLE is not the same as “no highlights”. It means the data source cannot answer the question.</p>
+            </CardContent>
+          </Card>
+        )}
+
+        {tab === "content" && (
+          <Card>
+            <CardHeader><CardTitle>Posts · Reels · Reposts</CardTitle><CardDescription>Observed public posts and their publicly exposed comments.</CardDescription></CardHeader>
+            <CardContent className="space-y-3">
+              {posts.length === 0 ? (
+                <p className="py-6 text-center text-sm text-zinc-500">No posts observed yet — the POSTS_SCAN observation will populate this. A post with no exposed comment source stays comment-less; that gap is reported, never filled.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {posts.map((p) => {
+                    const comments = commentsByPost.get(p.postId) ?? [];
+                    return (
+                      <li key={p.id} className="rounded-lg border border-zinc-800 px-3 py-2 text-xs">
+                        <p className="text-zinc-300">{p.postId} <span className="text-zinc-500">· {formatDateTime(p.takenAt)}</span></p>
+                        {p.caption && <p className="mt-1 text-zinc-400">{p.caption}</p>}
+                        <p className="mt-1 text-zinc-500">
+                          likes {p.likeCount ?? "unavailable"} · comments {p.commentCount ?? comments.length} · observed {formatRelative(p.observedAt)}
+                        </p>
+                        {comments.length === 0 ? (
+                          <p className="mt-1 text-zinc-600">No publicly exposed comments observed for this post.</p>
+                        ) : (
+                          <ul className="mt-2 space-y-1">
+                            {comments.map((c) => (
+                              <li key={c.id} className="rounded bg-zinc-800/50 px-2 py-1.5 text-zinc-400">
+                                <span className="font-medium text-zinc-200">@{c.username}</span>
+                                <span className="text-zinc-500"> · {formatDateTime(c.commentedAt)}</span>
+                                <p className="mt-0.5 text-zinc-300">{c.body}</p>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              <p className="text-[11px] leading-relaxed text-zinc-600">Reels and reposts have no separate provider capability; where a lawful adapter exposes them they are typed as posts with explicit source metadata, never inferred. Instagram exposes no public likes feed — like counts shown are provider-supplied post metadata, never observed like activity.</p>
             </CardContent>
           </Card>
         )}

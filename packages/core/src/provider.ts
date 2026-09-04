@@ -42,16 +42,18 @@ export interface InstagramProvider {
     cursor?: Cursor,
   ): Promise<CapabilityResult<NormalizedFollowPage>>;
   /**
-   * PARKED (Phase 15): retained for a future lawful adapter, but no scan
-   * executor, persistence model, evidence path, query, or UI consumes these
-   * methods. They must not be presented as supported product features until
-   * the complete pipeline exists.
+   * PRODUCT STATUS: provider-level AVAILABLE in fixture:v1 (synthetic posts +
+   * comments for the fixture target), but no scan executor, persistence model,
+   * evidence path, query, or UI consumes these methods yet. They must not be
+   * presented as supported product features until the complete pipeline exists;
+   * see docs/platform-limitations.md capability matrix (PARTIAL at provider,
+   * UNAVAILABLE at product).
    */
   getPublicPosts(
     account: NormalizedAccountRef,
     cursor?: Cursor,
   ): Promise<CapabilityResult<NormalizedPost[]>>;
-  /** PARKED — see getPublicPosts. */
+  /** PRODUCT STATUS — see getPublicPosts. */
   getPublicComments(
     post: NormalizedPost,
     cursor?: Cursor,

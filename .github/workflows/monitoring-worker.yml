@@ -36,7 +36,7 @@ jobs:
           IGTRACK_FIXTURE_VERSION: v1
           IGTRACK_WORKER_ONCE: "1"
           # Bounded drain: up to 25 jobs per 15-min tick, then exit. Single-job
-          # drain (1) cannot keep up with 20 targets x 4 kinds per window; the
+          # drain (1) cannot keep up with 20 targets x 5 kinds per window; the
           # 5-minute job timeout is the wall-clock bound and lease/ownership
           # guards make a timeout kill safe (next tick reclaims).
           IGTRACK_JOB_MAX_ITER: "25"

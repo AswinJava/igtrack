@@ -43,6 +43,13 @@ export async function PATCH(
   ctx: { params: Promise<{ targetId: string }> },
 ) {
   try {
+    const { isSameOrigin } = await import("@/lib/csrf");
+    if (!isSameOrigin(req)) {
+      return NextResponse.json(
+        { error: { code: "FORBIDDEN", message: "Cross-origin request rejected." } },
+        { status: 403, headers: NO_STORE },
+      );
+    }
     const session = await requireApiSession();
     const { checkRateLimit, mutationRateLimitKey, MUTATION_LIMIT } = await import("@/lib/rate-limit");
     const mutationLimit = checkRateLimit(mutationRateLimitKey(session.userId), MUTATION_LIMIT);
@@ -73,10 +80,17 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   ctx: { params: Promise<{ targetId: string }> },
 ) {
   try {
+    const { isSameOrigin } = await import("@/lib/csrf");
+    if (!isSameOrigin(req)) {
+      return NextResponse.json(
+        { error: { code: "FORBIDDEN", message: "Cross-origin request rejected." } },
+        { status: 403, headers: NO_STORE },
+      );
+    }
     const session = await requireApiSession();
     const { checkRateLimit, mutationRateLimitKey, MUTATION_LIMIT } = await import("@/lib/rate-limit");
     const mutationLimit = checkRateLimit(mutationRateLimitKey(session.userId), MUTATION_LIMIT);

@@ -127,6 +127,7 @@ export const targets = pgTable(
   (table) => [
     uniqueIndex("targets_user_account_unique_idx").on(table.userId, table.igAccountId),
     index("targets_user_idx").on(table.userId),
+    index("targets_status_created_idx").on(table.status, table.createdAt, table.id),
   ],
 );
 
@@ -156,6 +157,7 @@ export const evidence = pgTable(
       table.observationId,
     ),
     index("evidence_source_idx").on(table.sourceId),
+    index("evidence_observed_idx").on(table.observedAt),
     check("evidence_raw_hash_length_chk", sql`char_length(${table.rawHash}) = 64`),
   ],
 );
@@ -183,6 +185,9 @@ export const profileSnapshots = pgTable(
     followingCount: integer("following_count"),
     postCount: integer("post_count"),
     isVerified: boolean("is_verified"),
+    // Privacy at observation time; NULL means the provider did not expose it
+    // for this snapshot (never defaulted to false).
+    isPrivate: boolean("is_private"),
     category: observationCategoryEnum("category").notNull().default("OBSERVED"),
     confidence: confidenceLevelEnum("confidence").notNull(),
     createdAt: createdAt(),
@@ -298,6 +303,72 @@ export const storyMentions = pgTable(
       table.mentionedAccountId,
     ),
     index("story_mentions_account_idx").on(table.mentionedAccountId),
+  ],
+);
+
+export const posts = pgTable(
+  "posts",
+  {
+    id: uuid(),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => targets.id, { onDelete: "cascade" }),
+    igAccountId: text("ig_account_id")
+      .notNull()
+      .references(() => igAccounts.id, { onDelete: "restrict" }),
+    postId: text("post_id").notNull(),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => sources.id, { onDelete: "restrict" }),
+    observedAt: timestamptz("observed_at").notNull(),
+    takenAt: timestamptz("taken_at").notNull(),
+    caption: text("caption"),
+    shortcode: text("shortcode"),
+    likeCount: integer("like_count"),
+    commentCount: integer("comment_count"),
+    category: observationCategoryEnum("category").notNull().default("OBSERVED"),
+    confidence: confidenceLevelEnum("confidence").notNull(),
+    evidenceId: text("evidence_id").references(() => evidence.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("posts_idempotency_idx").on(
+      table.igAccountId,
+      table.postId,
+      table.sourceId,
+    ),
+    index("posts_target_taken_idx").on(table.targetId, table.takenAt),
+  ],
+);
+
+export const postComments = pgTable(
+  "post_comments",
+  {
+    id: uuid(),
+    postDbId: text("post_db_id")
+      .notNull()
+      .references(() => posts.id, { onDelete: "cascade" }),
+    authorAccountId: text("author_account_id")
+      .notNull()
+      .references(() => igAccounts.id, { onDelete: "restrict" }),
+    commentId: text("comment_id").notNull(),
+    body: text("body").notNull(),
+    commentedAt: timestamptz("commented_at").notNull(),
+    observedAt: timestamptz("observed_at").notNull(),
+    confidence: confidenceLevelEnum("confidence").notNull(),
+    evidenceId: text("evidence_id").references(() => evidence.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("post_comments_idempotency_idx").on(
+      table.postDbId,
+      table.commentId,
+    ),
+    index("post_comments_author_idx").on(table.authorAccountId),
   ],
 );
 
@@ -497,7 +568,10 @@ export const jobCheckpoints = pgTable(
     progress: jsonb("progress"),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),
   },
-  (table) => [primaryKey({ columns: [table.targetId, table.kind] })],
+  (table) => [
+    primaryKey({ columns: [table.targetId, table.kind] }),
+    index("job_checkpoints_job_idx").on(table.jobId),
+  ],
 );
 
 // PC-T2 staging: acquired follow-scan members are appended here durably, one
@@ -510,7 +584,9 @@ export const followScanStaging = pgTable(
   "follow_scan_staging",
   {
     id: bigserial("id", { mode: "number" }).primaryKey(),
-    jobId: text("job_id").notNull(),
+    jobId: text("job_id")
+      .notNull()
+      .references(() => monitoringJobs.id, { onDelete: "cascade" }),
     targetId: text("target_id")
       .notNull()
       .references(() => targets.id, { onDelete: "cascade" }),

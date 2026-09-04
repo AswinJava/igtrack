@@ -15,6 +15,12 @@ export function expectCapabilityShape(provider: InstagramProvider): void {
   expect(caps.getFollowers).toBeDefined();
   expect(caps.getFollowing).toBeDefined();
   expect(caps.getStories).toBeDefined();
+  expect(caps.resolveAccount).toBeDefined();
+  expect(caps.getPublicPosts).toBeDefined();
+  expect(caps.getPublicComments).toBeDefined();
+  expect(typeof provider.resolveAccount).toBe("function");
+  expect(typeof provider.getPublicPosts).toBe("function");
+  expect(typeof provider.getPublicComments).toBe("function");
 }
 
 export interface ProvenanceShape {

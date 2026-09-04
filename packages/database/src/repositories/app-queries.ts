@@ -8,6 +8,7 @@ import {
   listProfileChanges,
 } from "./observations.js";
 import { listStories, listMentionsForStoryWithAccount } from "./stories.js";
+import { listPosts, listCommentsForPostWithAccount } from "./posts.js";
 import {
   latestFollowSnapshot,
   listRecentDeltas,
@@ -331,6 +332,8 @@ export interface TargetDetailBundle {
   health: SourceHealthRecord[];
   stories: Awaited<ReturnType<typeof listStories>>;
   storyMentions: Array<{ storyId: string; mentions: Awaited<ReturnType<typeof listMentionsForStoryWithAccount>> }>;
+  posts: Awaited<ReturnType<typeof listPosts>>;
+  postComments: Array<{ postId: string; comments: Awaited<ReturnType<typeof listCommentsForPostWithAccount>> }>;
   followFollowers: Awaited<ReturnType<typeof latestFollowSnapshot>>;
   followFollowing: Awaited<ReturnType<typeof latestFollowSnapshot>>;
   deltas: DeltaWithAccount[];
@@ -353,12 +356,13 @@ export async function getOwnedTargetDetail(
   const account = accountRows[0];
   if (account === undefined) return null;
 
-  const [snapshots, changes, health, storiesList, followFollowers, followFollowing, deltas, jobs] =
+  const [snapshots, changes, health, storiesList, postsList, followFollowers, followFollowing, deltas, jobs] =
     await Promise.all([
       listProfileSnapshots(db, account.id, { limit: 20 }).catch(() => []),
       listProfileChanges(db, account.id, { limit: 20 }).catch(() => []),
       getSourceHealth(db).catch(() => []),
       listStories(db, account.id, { limit: 10 }).catch(() => []),
+      listPosts(db, owned.id, { limit: 10 }).catch(() => []),
       latestFollowSnapshot(db, owned.id, "FOLLOWERS").catch(() => null),
       latestFollowSnapshot(db, owned.id, "FOLLOWING").catch(() => null),
       listRecentDeltas(db, owned.id, { limit: 20 }).catch(() => []),
@@ -371,6 +375,12 @@ export async function getOwnedTargetDetail(
     storyMentions.push({ storyId: s.storyId, mentions: ms });
   }
 
+  const postComments: TargetDetailBundle["postComments"] = [];
+  for (const p of postsList.slice(0, 5)) {
+    const cs = await listCommentsForPostWithAccount(db, p.id).catch(() => []);
+    postComments.push({ postId: p.postId, comments: cs });
+  }
+
   return {
     target: owned,
     account,
@@ -379,6 +389,8 @@ export async function getOwnedTargetDetail(
     health,
     stories: storiesList,
     storyMentions,
+    posts: postsList,
+    postComments,
     followFollowers,
     followFollowing,
     deltas,

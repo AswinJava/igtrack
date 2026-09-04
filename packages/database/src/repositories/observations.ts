@@ -28,6 +28,7 @@ function snapshotFieldSet(row: ProfileSnapshotRecord) {
     followingCount: row.followingCount ?? undefined,
     postCount: row.postCount ?? undefined,
     isVerified: row.isVerified ?? undefined,
+    isPrivate: row.isPrivate ?? undefined,
   };
 }
 
@@ -126,6 +127,9 @@ export async function recordProfileSnapshot(
           : {}),
         ...(profile.isVerified !== undefined
           ? { isVerified: profile.isVerified }
+          : {}),
+        ...(profile.account.isPrivate !== undefined
+          ? { isPrivate: profile.account.isPrivate }
           : {}),
         category: profile.meta.category,
         confidence: profile.meta.confidence,

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import {
   available,
   CapabilityErrorKind,
@@ -41,19 +42,60 @@ import {
   normalizePosts,
 } from "../normalize/collections.js";
 
-interface FixtureManifest {
-  version: string;
-  description?: string;
-  target_username: string;
-  captured_at: string;
-  files: {
-    profile: string;
-    stories: string;
-    followers: string[];
-    following: string[];
-    posts: string[];
-    comments: Record<string, string>;
-  };
+const fixtureManifestSchema = z.object({
+  version: z.string().min(1),
+  description: z.string().optional(),
+  target_username: z.string().min(1),
+  captured_at: z.string().datetime({ offset: true }),
+  files: z.object({
+    profile: z.string().min(1),
+    stories: z.string().min(1),
+    followers: z.array(z.string().min(1)),
+    following: z.array(z.string().min(1)),
+    posts: z.array(z.string().min(1)),
+    comments: z.record(z.string().min(1), z.string().min(1)),
+  }),
+});
+
+type FixtureManifest = z.infer<typeof fixtureManifestSchema>;
+
+class FixtureIoError extends Error {
+  readonly kind:
+    | typeof CapabilityErrorKind.SOURCE_NOT_FOUND
+    | typeof CapabilityErrorKind.SCHEMA_MISMATCH;
+  constructor(
+    kind:
+      | typeof CapabilityErrorKind.SOURCE_NOT_FOUND
+      | typeof CapabilityErrorKind.SCHEMA_MISMATCH,
+    message: string,
+  ) {
+    super(message);
+    this.name = "FixtureIoError";
+    this.kind = kind;
+  }
+}
+
+function toProviderError(
+  meta: { observedAt: string; source: SourceRef },
+  err: unknown,
+): CapabilityResult<never> {
+  if (err instanceof FixtureIoError) {
+    return errored(meta, {
+      kind: err.kind,
+      message: err.message.slice(0, 300),
+      retryable: false,
+    });
+  }
+  const message = err instanceof Error ? err.message : "Fixture read failed";
+  const isMissing =
+    message.includes("ENOENT") || message.includes("no such file");
+  return errored(meta, {
+    kind: isMissing
+      ? CapabilityErrorKind.SOURCE_NOT_FOUND
+      : CapabilityErrorKind.INTERNAL,
+    message: `Fixture source failure: ${message.slice(0, 200)}`,
+    retryable: false,
+  });
 }
 
 export interface FixtureProviderOptions {
@@ -95,106 +137,126 @@ export class FixtureProvider implements InstagramProvider {
     username: string,
   ): Promise<CapabilityResult<NormalizedAccountRef>> {
     const meta = this.meta();
-    const profile = await this.loadProfile();
-    const manifest = await this.loadManifest();
-    if (profile instanceof ErrorResult) return profile.asResult(meta);
+    try {
+      const profile = await this.loadProfile();
+      const manifest = await this.loadManifest();
+      if (profile instanceof ErrorResult) return profile.asResult(meta);
 
-    const raw = profile.value;
-    if (raw.profile.username.toLowerCase() !== username.toLowerCase()) {
-      return errored(meta, {
-        kind: CapabilityErrorKind.ACCOUNT_NOT_FOUND,
-        message: `Fixture set only contains @${raw.profile.username}, requested @${username}`,
-        retryable: false,
+      const raw = profile.value;
+      if (raw.profile.username.toLowerCase() !== username.toLowerCase()) {
+        return errored(meta, {
+          kind: CapabilityErrorKind.ACCOUNT_NOT_FOUND,
+          message: `Fixture set only contains @${raw.profile.username}, requested @${username}`,
+          retryable: false,
+        });
+      }
+
+      const ref: NormalizedAccountRef = {
+        username: raw.profile.username,
+        ...(raw.profile.id !== undefined ? { igId: raw.profile.id } : {}),
+        ...(raw.profile.full_name !== undefined
+          ? { displayName: raw.profile.full_name }
+          : {}),
+        ...(raw.profile.is_private !== undefined
+          ? { isPrivate: raw.profile.is_private }
+          : {}),
+      };
+      return available(ref, {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: Confidence.HIGH,
+        rawPayloadHash: sha256(profile.rawText),
+        rawReference: this.manifestRef(manifest.files.profile),
       });
+    } catch (err) {
+      return toProviderError(meta, err);
     }
-
-    const ref: NormalizedAccountRef = {
-      username: raw.profile.username,
-      ...(raw.profile.id !== undefined ? { igId: raw.profile.id } : {}),
-      ...(raw.profile.full_name !== undefined
-        ? { displayName: raw.profile.full_name }
-        : {}),
-      ...(raw.profile.is_private !== undefined
-        ? { isPrivate: raw.profile.is_private }
-        : {}),
-    };
-    return available(ref, {
-      ...meta,
-      observedAt: raw.captured_at,
-      confidence: Confidence.HIGH,
-      rawPayloadHash: sha256(profile.rawText),
-      rawReference: this.manifestRef(manifest.files.profile),
-    });
   }
 
   async getProfile(
     account: NormalizedAccountRef,
   ): Promise<CapabilityResult<NormalizedProfile>> {
     const meta = this.meta(account);
-    const loaded = await this.loadProfile();
-    const manifest = await this.loadManifest();
-    if (loaded instanceof ErrorResult) return loaded.asResult(meta);
+    try {
+      const loaded = await this.loadProfile();
+      const manifest = await this.loadManifest();
+      if (loaded instanceof ErrorResult) return loaded.asResult(meta);
 
-    const raw = loaded.value;
-    if (raw.profile.is_private === true) {
-      return errored(meta, {
-        kind: CapabilityErrorKind.ACCOUNT_PRIVATE,
-        message: "Account is private; public profile data unavailable",
-        retryable: false,
+      const raw = loaded.value;
+      if (raw.profile.is_private === true) {
+        return errored(meta, {
+          kind: CapabilityErrorKind.ACCOUNT_PRIVATE,
+          message: "Account is private; public profile data unavailable",
+          retryable: false,
+        });
+      }
+
+      const normalized = normalizeProfile(raw);
+      return available(normalized, {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: Confidence.HIGH,
+        rawPayloadHash: sha256(loaded.rawText),
+        rawReference: this.manifestRef(manifest.files.profile),
       });
+    } catch (err) {
+      return toProviderError(meta, err);
     }
-
-    const normalized = normalizeProfile(raw);
-    return available(normalized, {
-      ...meta,
-      observedAt: raw.captured_at,
-      confidence: Confidence.HIGH,
-      rawPayloadHash: sha256(loaded.rawText),
-      rawReference: this.manifestRef(manifest.files.profile),
-    });
   }
 
   async getStories(
     account: NormalizedAccountRef,
   ): Promise<CapabilityResult<NormalizedStory[]>> {
     const meta = this.meta(account);
-    const manifest = await this.loadManifest();
-    const rawText = await this.readFixture(manifest.files.stories);
-    const json = this.parseJson(rawText);
-    if (!("value" in json)) return json;
-    const parsed = rawStoriesV1.safeParse(json.value);
-    if (!parsed.success) return this.schemaError(meta, parsed.error.message);
+    try {
+      const manifest = await this.loadManifest();
+      const rawText = await this.readFixture(manifest.files.stories);
+      const json = this.parseJson(rawText);
+      if (!("value" in json)) return json;
+      const parsed = rawStoriesV1.safeParse(json.value);
+      if (!parsed.success) return this.schemaError(meta, parsed.error.message);
 
-    const raw: RawStoriesV1 = parsed.data;
-    const canvas = raw.canvas
-      ? { width: raw.canvas.width, height: raw.canvas.height }
-      : undefined;
+      const raw: RawStoriesV1 = parsed.data;
+      const canvas = raw.canvas
+        ? { width: raw.canvas.width, height: raw.canvas.height }
+        : undefined;
 
-    const stories = raw.stories.map((s) =>
-      normalizeStory(s, canvas, raw.captured_at),
-    );
+      const stories = raw.stories.map((s) =>
+        normalizeStory(s, canvas, raw.captured_at),
+      );
 
-    return available(stories, {
-      ...meta,
-      observedAt: raw.captured_at,
-      confidence: Confidence.HIGH,
-      rawPayloadHash: sha256(rawText),
-      rawReference: this.manifestRef(manifest.files.stories),
-    });
+      return available(stories, {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: Confidence.HIGH,
+        rawPayloadHash: sha256(rawText),
+        rawReference: this.manifestRef(manifest.files.stories),
+      });
+    } catch (err) {
+      return toProviderError(meta, err);
+    }
   }
 
   async getFollowers(
     account: NormalizedAccountRef,
     cursor?: Cursor,
   ): Promise<CapabilityResult<NormalizedFollowPage>> {
-    return this.getFollowPage("followers", account, cursor);
+    try {
+      return await this.getFollowPage("followers", account, cursor);
+    } catch (err) {
+      return toProviderError(this.meta(account), err);
+    }
   }
 
   async getFollowing(
     account: NormalizedAccountRef,
     cursor?: Cursor,
   ): Promise<CapabilityResult<NormalizedFollowPage>> {
-    return this.getFollowPage("following", account, cursor);
+    try {
+      return await this.getFollowPage("following", account, cursor);
+    } catch (err) {
+      return toProviderError(this.meta(account), err);
+    }
   }
 
   async getPublicPosts(
@@ -202,33 +264,37 @@ export class FixtureProvider implements InstagramProvider {
     cursor?: Cursor,
   ): Promise<CapabilityResult<NormalizedPost[]>> {
     const meta = this.meta(account);
-    const manifest = await this.loadManifest();
-    const files = manifest.files.posts;
-    const index = cursor === undefined ? 0 : files.indexOf(cursor.value);
-    if (index < 0 || index >= files.length) {
-      return errored(meta, {
-        kind: CapabilityErrorKind.INTERNAL,
-        message: `Unknown posts cursor: ${cursor?.value ?? "(none)"}`,
-        retryable: false,
+    try {
+      const manifest = await this.loadManifest();
+      const files = manifest.files.posts;
+      const index = cursor === undefined ? 0 : files.indexOf(cursor.value);
+      if (index < 0 || index >= files.length) {
+        return errored(meta, {
+          kind: CapabilityErrorKind.INTERNAL,
+          message: `Unknown posts cursor: ${cursor?.value ?? "(none)"}`,
+          retryable: false,
+        });
+      }
+
+      const rawText = await this.readFixture(files[index]!);
+      const json = this.parseJson(rawText);
+      if (!("value" in json)) return json;
+      const parsed = rawPostsPageV1.safeParse(json.value);
+      if (!parsed.success) return this.schemaError(meta, parsed.error.message);
+
+      const raw: RawPostsPageV1 = parsed.data;
+      const posts = normalizePosts(raw);
+
+      return available(posts, {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
+        rawPayloadHash: sha256(rawText),
+        rawReference: this.manifestRef(files[index]!),
       });
+    } catch (err) {
+      return toProviderError(meta, err);
     }
-
-    const rawText = await this.readFixture(files[index]!);
-    const json = this.parseJson(rawText);
-    if (!("value" in json)) return json;
-    const parsed = rawPostsPageV1.safeParse(json.value);
-    if (!parsed.success) return this.schemaError(meta, parsed.error.message);
-
-    const raw: RawPostsPageV1 = parsed.data;
-    const posts = normalizePosts(raw);
-
-    return available(posts, {
-      ...meta,
-      observedAt: raw.captured_at,
-      confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
-      rawPayloadHash: sha256(rawText),
-      rawReference: this.manifestRef(files[index]!),
-    });
   }
 
   async getPublicComments(
@@ -236,31 +302,42 @@ export class FixtureProvider implements InstagramProvider {
     cursor?: Cursor,
   ): Promise<CapabilityResult<NormalizedComment[]>> {
     const meta = this.meta();
-    const manifest = await this.loadManifest();
-    const file = manifest.files.comments[post.postId];
-    if (file === undefined) {
-      return unavailable(
-        meta,
-        `No comment source available for post ${post.postId} in this fixture set`,
-      );
+    try {
+      if (cursor !== undefined) {
+        return errored(meta, {
+          kind: CapabilityErrorKind.INTERNAL,
+          message: "Comment pagination is not supported by fixture:v1; request without a cursor",
+          retryable: false,
+        });
+      }
+      const manifest = await this.loadManifest();
+      const file = manifest.files.comments[post.postId];
+      if (file === undefined) {
+        return unavailable(
+          meta,
+          `No comment source available for post ${post.postId} in this fixture set`,
+        );
+      }
+
+      const rawText = await this.readFixture(file);
+      const json = this.parseJson(rawText);
+      if (!("value" in json)) return json;
+      const parsed = rawCommentsPageV1.safeParse(json.value);
+      if (!parsed.success) return this.schemaError(meta, parsed.error.message);
+
+      const raw: RawCommentsPageV1 = parsed.data;
+      const comments = normalizeComments(raw);
+
+      return available(comments, {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
+        rawPayloadHash: sha256(rawText),
+        rawReference: this.manifestRef(file),
+      });
+    } catch (err) {
+      return toProviderError(meta, err);
     }
-
-    const rawText = await this.readFixture(file);
-    const json = this.parseJson(rawText);
-    if (!("value" in json)) return json;
-    const parsed = rawCommentsPageV1.safeParse(json.value);
-    if (!parsed.success) return this.schemaError(meta, parsed.error.message);
-
-    const raw: RawCommentsPageV1 = parsed.data;
-    const comments = normalizeComments(raw);
-
-    return available(comments, {
-      ...meta,
-      observedAt: raw.captured_at,
-      confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
-      rawPayloadHash: sha256(rawText),
-      rawReference: this.manifestRef(file),
-    });
   }
 
   private async getFollowPage(
@@ -356,17 +433,48 @@ export class FixtureProvider implements InstagramProvider {
 
   private async loadManifest(): Promise<FixtureManifest> {
     if (this.manifestCache !== undefined) return this.manifestCache;
-    const text = await readFile(join(this.fixturesDir, "manifest.json"), "utf8");
-    this.manifestCache = JSON.parse(text) as FixtureManifest;
+    let text: string;
+    try {
+      text = await readFile(join(this.fixturesDir, "manifest.json"), "utf8");
+    } catch (err) {
+      throw new FixtureIoError(
+        CapabilityErrorKind.SOURCE_NOT_FOUND,
+        `Fixture manifest missing in ${this.fixturesDir}: ${err instanceof Error ? err.message : "read failed"}`,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      throw new FixtureIoError(
+        CapabilityErrorKind.SCHEMA_MISMATCH,
+        `Fixture manifest is not valid JSON: ${err instanceof Error ? err.message : "parse failure"}`,
+      );
+    }
+    const validated = fixtureManifestSchema.safeParse(parsed);
+    if (!validated.success) {
+      throw new FixtureIoError(
+        CapabilityErrorKind.SCHEMA_MISMATCH,
+        `Fixture manifest failed validation: ${validated.error.message.slice(0, 300)}`,
+      );
+    }
+    this.manifestCache = validated.data;
     return this.manifestCache;
   }
 
   private async readFixture(file: string): Promise<string> {
     const cached = this.fileCache.get(file);
     if (cached !== undefined) return cached;
-    const text = await readFile(join(this.fixturesDir, file), "utf8");
-    this.fileCache.set(file, text);
-    return text;
+    try {
+      const text = await readFile(join(this.fixturesDir, file), "utf8");
+      this.fileCache.set(file, text);
+      return text;
+    } catch (err) {
+      throw new FixtureIoError(
+        CapabilityErrorKind.SOURCE_NOT_FOUND,
+        `Fixture file missing: ${file} (${err instanceof Error ? err.message : "read failed"})`,
+      );
+    }
   }
 
   private async loadProfile(): Promise<

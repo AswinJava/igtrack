@@ -6,10 +6,15 @@ import { Badge } from "@/components/ui/badge";
 
 export const dynamic = "force-dynamic";
 
-export default async function RelationshipsPage() {
+export default async function RelationshipsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ targetId?: string }>;
+}) {
   await requirePageUser();
   const targets = await getTargets();
-  const primary = targets[0];
+  const { targetId } = await searchParams;
+  const primary = targets.find((t) => t.id === targetId) ?? targets[0];
   const relationships = primary ? await getRelationships(primary.id) : [];
 
   return (
@@ -25,6 +30,18 @@ export default async function RelationshipsPage() {
         activity in the collected data” — not “favourite person.” No recency decay, reciprocity, sentiment, or
         behavioral modeling is applied.
       </div>
+
+      {targets.length > 1 && (
+        <form method="get" className="mt-4 flex items-center gap-2 text-xs text-zinc-500">
+          <label htmlFor="rel-target">Account</label>
+          <select id="rel-target" name="targetId" defaultValue={primary?.id ?? ""} className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-200 outline-none focus:border-sky-500">
+            {targets.map((t) => (
+              <option key={t.id} value={t.id}>@{t.username}</option>
+            ))}
+          </select>
+          <button type="submit" className="rounded-lg bg-zinc-800 px-3 py-1.5 text-sm font-medium text-zinc-100 hover:bg-zinc-700">Show</button>
+        </form>
+      )}
 
       {!primary ? (
         <Card className="mt-6">
@@ -64,6 +81,7 @@ export default async function RelationshipsPage() {
               <p className="font-medium text-zinc-400">How the score works</p>
               <p className="mt-1">Heuristic score = mentions × 12 + follow signals × 8. The weights are arbitrary and transparent — they order accounts by raw signal volume only.</p>
               <p className="mt-1">All underlying data is synthetic fixture data. No recency decay, persistence weighting, or reciprocal-signal analysis is implemented.</p>
+              <p className="mt-1">Public likes are UNAVAILABLE — Instagram exposes no public likes feed, so they are never counted here. Frequently observed public associations are derived analytics, not “favourite people”.</p>
             </div>
           </CardContent>
         </Card>

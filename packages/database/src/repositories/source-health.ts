@@ -54,26 +54,18 @@ export async function recordCapabilityFailure(
   input: CapabilityFailureInput,
 ): Promise<SourceHealthRecord> {
   await ensureSource(db, input.source);
-  const existingRows = await db
-    .select()
-    .from(sourceHealth)
-    .where(
-      sql`${sourceHealth.sourceId} = ${input.source.id}
-        AND ${sourceHealth.capability} = ${input.capability}`,
-    )
-    .limit(1);
-  const existing = existingRows[0];
-  const nextFailures = (existing?.consecutiveFailures ?? 0) + 1;
-
+  // Atomic increment: the counter advances inside the upsert itself, so
+  // concurrent workers can never lose increments through read-modify-write.
+  const now = new Date();
   const rows = await db
     .insert(sourceHealth)
     .values({
       sourceId: input.source.id,
       capability: input.capability,
       status: "DEGRADED",
-      lastFailureAt: new Date(),
+      lastFailureAt: now,
       lastFailureReason: input.reason,
-      consecutiveFailures: nextFailures,
+      consecutiveFailures: 1,
       ...(input.errorCategory !== undefined
         ? { errorCategory: input.errorCategory }
         : {}),
@@ -83,14 +75,14 @@ export async function recordCapabilityFailure(
       target: [sourceHealth.sourceId, sourceHealth.capability],
       set: {
         status: "DEGRADED",
-        lastFailureAt: new Date(),
+        lastFailureAt: now,
         lastFailureReason: input.reason,
-        consecutiveFailures: nextFailures,
+        consecutiveFailures: sql`${sourceHealth.consecutiveFailures} + 1`,
         ...(input.errorCategory !== undefined
           ? { errorCategory: input.errorCategory }
           : {}),
         ...(input.latencyMs !== undefined ? { latencyMs: input.latencyMs } : {}),
-        updatedAt: new Date(),
+        updatedAt: now,
       },
     })
     .returning();

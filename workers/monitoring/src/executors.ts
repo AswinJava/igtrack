@@ -12,6 +12,8 @@ import {
   type NormalizedAccountRef,
   type NormalizedProfile,
   type NormalizedFollowEntry,
+  type NormalizedPost,
+  type NormalizedComment,
   type NormalizedStory,
 } from "@igtrack/core";
 import {
@@ -21,6 +23,8 @@ import {
   recordProfileSnapshot,
   recordFollowSnapshot,
   recordStory,
+  recordPost,
+  recordPostComment,
   latestFollowSnapshot,
   persistFollowDiff,
   loadCheckpoint,
@@ -752,5 +756,186 @@ export async function runStoryScan(
     return "succeeded-empty";
   }
   return completion === "PARTIAL" ? "succeeded-partial" : "succeeded";
+}
+
+// ---------------------------------------------------------------------------
+// POST_SCAN
+//
+// Persists provider posts plus their publicly exposed comments. The v1
+// normalized post shape carries no next-cursor, so multi-page post listings
+// cannot be resumed honestly: a MEDIUM-confidence (more-pages) first page
+// completes as succeeded-partial with a coverage note instead of pretending
+// the listing is complete. A post with no comment source (fixture post-2) is
+// recorded without comments — UNAVAILABLE comments are skipped, never
+// empty-faked and never a job failure.
+// ---------------------------------------------------------------------------
+
+export async function runPostScan(
+  db: Database,
+  job: JobRecord,
+  src: ExecutionSource,
+): Promise<JobResult> {
+  if (job.targetId === null) {
+    throw new JobExecutionError("POST_SCAN requires a target", { retryable: false });
+  }
+  const targetId = job.targetId;
+  const { account } = await loadAccountForTarget(db, job);
+  const source = src.source;
+
+  const caps = src.provider.capabilities();
+  if (caps.getPublicPosts !== true) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getPublicPosts",
+      coverageNote: "Provider declares the getPublicPosts capability unavailable.",
+    });
+    return "unavailable";
+  }
+  const commentsSupported = caps.getPublicComments === true;
+  if (!commentsSupported) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getPublicComments",
+      coverageNote: "Provider declares the getPublicComments capability unavailable.",
+    });
+  }
+
+  const ref = accountRef(account);
+  const result: CapabilityResult<NormalizedPost[]> = await providerCall(
+    db,
+    source,
+    "getPublicPosts",
+    () => src.provider.getPublicPosts(ref),
+  );
+
+  if (result.status === CapabilityStatus.UNAVAILABLE) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getPublicPosts",
+      coverageNote: result.note ?? "Posts unavailable from this source.",
+    });
+    return "unavailable";
+  }
+
+  if (result.status === CapabilityStatus.ERROR) {
+    const err = result.error;
+    await recordCapabilityFailure(db, {
+      source,
+      capability: "getPublicPosts",
+      reason: err?.message ?? "Provider error",
+      errorCategory: err?.kind ?? "INTERNAL",
+    });
+    throw new JobExecutionError(err?.message ?? "Provider error", {
+      kind: err?.kind ?? "INTERNAL",
+      retryable: resolvedRetryable(err),
+      ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+    });
+  }
+
+  if (result.data === undefined) {
+    throw new JobExecutionError("Provider returned no post data", { retryable: false });
+  }
+
+  const posts = result.data;
+  const partial =
+    result.status === CapabilityStatus.PARTIAL || result.confidence === Confidence.MEDIUM;
+
+  for (const post of posts) {
+    const postEvidence = evidenceFrom(
+      source,
+      "post",
+      `post:${account.username}:${post.postId}@${post.meta.observedAt}`,
+      {
+        observedAt: post.meta.observedAt,
+        confidence: post.meta.confidence,
+        ref: account.username,
+        ...(result.rawPayloadHash !== undefined
+          ? { rawPayloadHash: result.rawPayloadHash }
+          : {}),
+        ...(result.rawReference !== undefined
+          ? { rawReference: result.rawReference }
+          : {}),
+      },
+      post,
+      { completion: partial ? "PARTIAL" : "COMPLETE" },
+    );
+
+    const { post: postRow } = await recordPost(db, {
+      targetId,
+      owner: ref,
+      post,
+      sourceId: source.id,
+      evidence: postEvidence,
+    });
+
+    if (!commentsSupported) continue;
+
+    const comments: CapabilityResult<NormalizedComment[]> = await providerCall(
+      db,
+      source,
+      "getPublicComments",
+      () => src.provider.getPublicComments(post),
+    );
+
+    if (comments.status === CapabilityStatus.UNAVAILABLE) {
+      // A post with no exposed comment source stays comment-less. The gap is
+      // recorded in source health; the post itself is still a real observation.
+      await markCapabilityUnavailable(db, {
+        source,
+        capability: "getPublicComments",
+        coverageNote:
+          comments.note ?? `No comment source for post ${post.postId}.`,
+      });
+      continue;
+    }
+    if (comments.status === CapabilityStatus.ERROR) {
+      const err = comments.error;
+      await recordCapabilityFailure(db, {
+        source,
+        capability: "getPublicComments",
+        reason: err?.message ?? "Provider error",
+        errorCategory: err?.kind ?? "INTERNAL",
+      });
+      throw new JobExecutionError(err?.message ?? "Provider error", {
+        kind: err?.kind ?? "INTERNAL",
+        retryable: resolvedRetryable(err),
+        ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+      });
+    }
+    if (comments.data === undefined) continue;
+
+    for (const comment of comments.data) {
+      const commentEvidence = evidenceFrom(
+        source,
+        "post_comment",
+        `post_comment:${account.username}:${post.postId}:${comment.commentId}@${comment.meta.observedAt}`,
+        {
+          observedAt: comment.meta.observedAt,
+          confidence: comment.meta.confidence,
+          ...(comments.rawPayloadHash !== undefined
+            ? { rawPayloadHash: comments.rawPayloadHash }
+            : {}),
+          ...(comments.rawReference !== undefined
+            ? { rawReference: comments.rawReference }
+            : {}),
+        },
+        comment,
+        { postId: post.postId },
+      );
+      await recordPostComment(db, {
+        postDbId: postRow.id,
+        comment,
+        evidence: commentEvidence,
+      });
+    }
+  }
+
+  await recordCapabilitySuccess(db, {
+    source,
+    capability: "getPublicPosts",
+  });
+
+  if (posts.length === 0) return "succeeded-empty";
+  return partial ? "succeeded-partial" : "succeeded";
 }
 

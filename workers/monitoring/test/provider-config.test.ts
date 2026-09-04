@@ -4,9 +4,9 @@ import { providerFromEnv } from "../src/provider.js";
 describe("provider credential safety (Phase 10 §7)", () => {
   it("fails fast with a configuration error for an unknown provider — never UNAVAILABLE", () => {
     const prev = process.env.IGTRACK_PROVIDER;
-    process.env.IGTRACK_PROVIDER = "graph";
+    process.env.IGTRACK_PROVIDER = "scraper";
     try {
-      expect(() => providerFromEnv()).toThrow(/no provider implementation for "graph"/);
+      expect(() => providerFromEnv()).toThrow(/no provider implementation for "scraper"/);
       // Message must be actionable and must not claim UNAVAILABLE
       try {
         providerFromEnv();
@@ -18,6 +18,26 @@ describe("provider credential safety (Phase 10 §7)", () => {
     } finally {
       if (prev === undefined) delete process.env.IGTRACK_PROVIDER;
       else process.env.IGTRACK_PROVIDER = prev;
+    }
+  });
+
+  it("fails fast when graph is selected without credentials — never UNAVAILABLE", () => {
+    const prevProvider = process.env.IGTRACK_PROVIDER;
+    const prevToken = process.env.IGTRACK_GRAPH_ACCESS_TOKEN;
+    const prevId = process.env.IGTRACK_GRAPH_IG_USER_ID;
+    const prevUser = process.env.IGTRACK_GRAPH_USERNAME;
+    process.env.IGTRACK_PROVIDER = "graph";
+    delete process.env.IGTRACK_GRAPH_ACCESS_TOKEN;
+    delete process.env.IGTRACK_GRAPH_IG_USER_ID;
+    delete process.env.IGTRACK_GRAPH_USERNAME;
+    try {
+      expect(() => providerFromEnv()).toThrow(/missing required env/);
+    } finally {
+      if (prevProvider === undefined) delete process.env.IGTRACK_PROVIDER;
+      else process.env.IGTRACK_PROVIDER = prevProvider;
+      if (prevToken !== undefined) process.env.IGTRACK_GRAPH_ACCESS_TOKEN = prevToken;
+      if (prevId !== undefined) process.env.IGTRACK_GRAPH_IG_USER_ID = prevId;
+      if (prevUser !== undefined) process.env.IGTRACK_GRAPH_USERNAME = prevUser;
     }
   });
 

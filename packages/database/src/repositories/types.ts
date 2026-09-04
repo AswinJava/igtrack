@@ -28,6 +28,8 @@ export const ObservationKind = {
   STORY_MENTION: "story_mention",
   FOLLOW_SNAPSHOT: "follow_snapshot",
   INTERACTION: "interaction",
+  POST: "post",
+  POST_COMMENT: "post_comment",
 } as const;
 
 export type ObservationKind =

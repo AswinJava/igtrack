@@ -8,6 +8,7 @@ export interface ProfileFieldSet {
   followingCount?: number | undefined;
   postCount?: number | undefined;
   isVerified?: boolean | undefined;
+  isPrivate?: boolean | undefined;
 }
 
 export type ProfileField = keyof ProfileFieldSet;
@@ -30,6 +31,7 @@ const FIELD_ORDER: ProfileField[] = [
   "followingCount",
   "postCount",
   "isVerified",
+  "isPrivate",
 ];
 
 export function diffProfileFields(

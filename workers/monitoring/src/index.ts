@@ -18,6 +18,7 @@ import {
   JobExecutionError,
   runFollowerScan,
   runFollowingScan,
+  runPostScan,
   runProfileScan,
   runStoryScan,
   type ExecutionSource,
@@ -170,6 +171,8 @@ export async function executeOne(
       result = await runFollowingScan(db, job, src);
     } else if (job.kind === "STORY_SCAN") {
       result = await runStoryScan(db, job, src);
+    } else if (job.kind === "POSTS_SCAN") {
+      result = await runPostScan(db, job, src);
     } else {
       return await recordFailure(db, workerId, job, {
         message: `Unknown job kind ${job.kind}`,

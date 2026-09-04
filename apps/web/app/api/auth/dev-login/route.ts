@@ -11,6 +11,17 @@ async function devLogin(request: Request): Promise<NextResponse> {
       { status: 404 },
     );
   }
+  const { checkRateLimit } = await import("@/lib/rate-limit");
+  const forwarded = request.headers.get("x-forwarded-for");
+  const ip = forwarded?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
+  const devLimit = checkRateLimit(`dev-login:${ip}`, { windowMs: 15 * 60 * 1000, max: 20 });
+  if (!devLimit.allowed) {
+    const retryAfterSec = Math.ceil(((devLimit.retryAfterMs ?? 15 * 60 * 1000) / 1000));
+    return NextResponse.json(
+      { error: { code: "RATE_LIMITED", message: "Too many requests. Please try again shortly." } },
+      { status: 429, headers: { "Retry-After": String(retryAfterSec) } },
+    );
+  }
   const user = await findUserByEmailSafe("dev@igtrack.local");
   if (!user) {
     return NextResponse.json({ error: { code: "NOT_FOUND", message: "No dev user - run db:seed" } }, { status: 404 });

@@ -11,6 +11,8 @@ import {
   followDeltas,
   followSnapshots,
   interactions,
+  postComments,
+  posts,
   profileSnapshots,
   stories,
   storyMentions,
@@ -200,12 +202,24 @@ export async function deleteTargetWithObservations(
       .delete(followDeltas)
       .where(sql`${followDeltas.targetId} = ${targetId}`);
 
+    const deletedCommentIds = await tx
+      .select({ id: postComments.id })
+      .from(postComments)
+      .innerJoin(posts, sql`${posts.id} = ${postComments.postDbId}`)
+      .where(sql`${posts.targetId} = ${targetId}`);
+    const deletedPostIds = await tx
+      .delete(posts)
+      .where(sql`${posts.targetId} = ${targetId}`)
+      .returning({ id: posts.id });
+
     const observationIds = [
       ...deletedSnapshotIds.map((r) => r.id),
       ...deletedStoryIds.map((r) => r.id),
       ...deletedInteractionIds.map((r) => r.id),
       ...deletedFollowSnapshotIds.map((r) => r.id),
       ...mentionIds.map((r) => r.id),
+      ...deletedPostIds.map((r) => r.id),
+      ...deletedCommentIds.map((r) => r.id),
     ];
     if (observationIds.length > 0) {
       await tx

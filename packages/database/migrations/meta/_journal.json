@@ -43,6 +43,13 @@
       "when": 1787913168610,
       "tag": "0005_eager_white_queen",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788000000000,
+      "tag": "0006_posts_privacy_hardening",
+      "breakpoints": true
     }
   ]
 }

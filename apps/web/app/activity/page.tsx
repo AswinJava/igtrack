@@ -40,13 +40,15 @@ export default async function ActivityPage({
 
       <form method="get" className="mt-4 flex flex-wrap items-end gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
         <div>
-          <label htmlFor="activity-type" className="block text-[11px] font-medium uppercase tracking-wide text-zinc-500">Event type</label>
-          <select id="activity-type" name="type" defaultValue={activeTypes[0] ?? ""} className="mt-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-200 outline-none focus:border-sky-500">
-            <option value="">All types</option>
+          <span className="block text-[11px] font-medium uppercase tracking-wide text-zinc-500">Event types (multi-select)</span>
+          <div className="mt-1 flex flex-wrap gap-2">
             {ACTIVITY_TYPES.map((t) => (
-              <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>
+              <label key={t} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300">
+                <input type="checkbox" name="type" value={t} defaultChecked={activeTypes.includes(t)} className="accent-sky-500" />
+                {TYPE_LABELS[t] ?? t}
+              </label>
             ))}
-          </select>
+          </div>
         </div>
         <div className="min-w-0 flex-1">
           <label htmlFor="activity-q" className="block text-[11px] font-medium uppercase tracking-wide text-zinc-500">Account or text</label>

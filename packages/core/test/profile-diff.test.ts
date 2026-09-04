@@ -38,6 +38,16 @@ describe("diffProfileFields", () => {
     ]);
   });
 
+  it("reports privacy flips", () => {
+    const changes = diffProfileFields(
+      { username: "target_a", isPrivate: false },
+      { username: "target_a", isPrivate: true },
+    );
+    expect(changes).toEqual([
+      { field: "isPrivate", oldValue: false, newValue: true },
+    ]);
+  });
+
   it("emits fields in deterministic order", () => {
     const changes = diffProfileFields(
       { postCount: 1, bio: "a", username: "x" },

@@ -18,7 +18,7 @@ process.on("SIGTERM", () => requestShutdown("SIGTERM"));
 const once = process.argv.includes("--once") || process.env.IGTRACK_WORKER_ONCE === "1";
 // Ephemeral (GitHub Actions) bound: drain up to IGTRACK_JOB_MAX_ITER jobs
 // (default 25) then exit. A single-iteration drain (MAX_ITER=1) cannot keep up
-// with the beta envelope (20 targets x 4 kinds per window); the 5-minute
+// with the beta envelope (20 targets x 5 kinds per window); the 5-minute
 // Actions timeout is the wall-clock bound and lease/ownership guards make a
 // timeout kill safe (next tick reclaims). Long-running self-host keeps the
 // infinite loop by omitting --once.

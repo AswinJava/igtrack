@@ -12,6 +12,7 @@ export * from "./repositories/users.js";
 export * from "./repositories/targets.js";
 export * from "./repositories/observations.js";
 export * from "./repositories/stories.js";
+export * from "./repositories/posts.js";
 export * from "./repositories/follows.js";
 export * from "./repositories/follow-staging.js";
 export * from "./repositories/evidence.js";

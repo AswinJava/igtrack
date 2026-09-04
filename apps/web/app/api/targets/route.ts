@@ -30,6 +30,13 @@ const NO_STORE = { "Cache-Control": "no-store" } as const;
 // executed through the provider capability pipeline.
 export async function POST(req: NextRequest) {
   try {
+    const { isSameOrigin } = await import("@/lib/csrf");
+    if (!isSameOrigin(req)) {
+      return NextResponse.json(
+        { error: { code: "FORBIDDEN", message: "Cross-origin request rejected." } },
+        { status: 403, headers: NO_STORE },
+      );
+    }
     const session = await requireApiSession();
     // Lightweight per-user abuse protection (Phase 15). Single-process and
     // generous (60/min) — legitimate use never trips it.
@@ -55,7 +62,9 @@ export async function POST(req: NextRequest) {
 
     let jobsQueued = false;
     if (created) {
-      // Initial observation loop. Idempotency keys make re-runs safe.
+      // Initial observation loop: one job per scan executor so the first
+      // sync populates profile, followers, following, stories, and posts
+      // together. Idempotency keys make re-runs safe.
       await enqueueJob(db, {
         kind: "PROFILE_SCAN",
         targetId: target.id,
@@ -67,6 +76,27 @@ export async function POST(req: NextRequest) {
         targetId: target.id,
         priority: -1,
         idempotencyKey: `initial:${target.id}:FOLLOWER_SCAN`,
+        payload: { trigger: "initial" },
+      });
+      await enqueueJob(db, {
+        kind: "FOLLOWING_SCAN",
+        targetId: target.id,
+        priority: -1,
+        idempotencyKey: `initial:${target.id}:FOLLOWING_SCAN`,
+        payload: { trigger: "initial" },
+      });
+      await enqueueJob(db, {
+        kind: "STORY_SCAN",
+        targetId: target.id,
+        priority: -1,
+        idempotencyKey: `initial:${target.id}:STORY_SCAN`,
+        payload: { trigger: "initial" },
+      });
+      await enqueueJob(db, {
+        kind: "POSTS_SCAN",
+        targetId: target.id,
+        priority: -1,
+        idempotencyKey: `initial:${target.id}:POSTS_SCAN`,
         payload: { trigger: "initial" },
       });
       jobsQueued = true;
