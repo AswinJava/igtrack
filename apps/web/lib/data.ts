@@ -7,6 +7,8 @@
   listScopedEvidence,
   getEvidenceChain,
   getOperationsSnapshot,
+  ACTIVITY_TYPES,
+  type ActivityType,
   type TargetDetailBundle,
   type EvidenceChainDetail,
   type OperationsSnapshot,
@@ -35,9 +37,19 @@ export async function getTargetById(id: string): Promise<TargetDetailBundle | nu
   return getOwnedTargetDetail(getDatabase(), session.userId, id);
 }
 
-export async function getActivityFeed(limit = 30) {
+export async function getActivityFeed(
+  limit = 30,
+  options?: { types?: string[]; query?: string },
+) {
   const session = await requirePageUser();
-  return getUserActivityFeed(getDatabase(), session.userId, limit);
+  const allowed = new Set<string>(ACTIVITY_TYPES);
+  const types = options?.types?.filter((t): t is ActivityType => allowed.has(t));
+  return getUserActivityFeed(getDatabase(), session.userId, limit, {
+    ...(types !== undefined && types.length > 0 ? { types } : {}),
+    ...(options?.query !== undefined && options.query.trim().length > 0
+      ? { query: options.query }
+      : {}),
+  });
 }
 
 export async function getRelationships(targetId: string) {

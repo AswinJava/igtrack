@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, sql } from "drizzle-orm";
 import type { NormalizedAccountRef, NormalizedStory } from "@igtrack/core";
-import { stories, storyMentions } from "../schema/index.js";
+import { igAccounts, stories, storyMentions } from "../schema/index.js";
 import type { Database } from "../client/client.js";
 import { withTransaction } from "../transactions.js";
 import { upsertAccount } from "./accounts.js";
@@ -178,5 +178,40 @@ export async function listMentionsForStory(
   return db
     .select()
     .from(storyMentions)
+    .where(sql`${storyMentions.storyDbId} = ${storyDbId}`);
+}
+
+export interface StoryMentionWithAccount extends StoryMentionRecord {
+  username: string;
+  displayName: string | null;
+}
+
+// Username-enriched variant for ownership-scoped UI surfaces. Callers must
+// only pass story IDs that already passed an ownership check (e.g. stories
+// listed for an owned target); the join itself adds no new scope.
+export async function listMentionsForStoryWithAccount(
+  db: Database,
+  storyDbId: string,
+): Promise<StoryMentionWithAccount[]> {
+  return db
+    .select({
+      id: storyMentions.id,
+      storyDbId: storyMentions.storyDbId,
+      mentionedAccountId: storyMentions.mentionedAccountId,
+      positionX: storyMentions.positionX,
+      positionY: storyMentions.positionY,
+      width: storyMentions.width,
+      height: storyMentions.height,
+      rawVisibilityFlag: storyMentions.rawVisibilityFlag,
+      visibilityClass: storyMentions.visibilityClass,
+      observedAt: storyMentions.observedAt,
+      confidence: storyMentions.confidence,
+      evidenceId: storyMentions.evidenceId,
+      createdAt: storyMentions.createdAt,
+      username: igAccounts.username,
+      displayName: igAccounts.displayName,
+    })
+    .from(storyMentions)
+    .innerJoin(igAccounts, sql`${igAccounts.id} = ${storyMentions.mentionedAccountId}`)
     .where(sql`${storyMentions.storyDbId} = ${storyDbId}`);
 }

@@ -3,6 +3,8 @@ import {
   checkRateLimit,
   loginRateLimitKey,
   LOGIN_LIMIT,
+  mutationRateLimitKey,
+  MUTATION_LIMIT,
   resetRateLimitForTest,
 } from "../lib/rate-limit.js";
 
@@ -43,5 +45,30 @@ describe("login rate limiter (Phase 10 P2 #1)", () => {
     expect(checkRateLimit(k1, LOGIN_LIMIT).allowed).toBe(false);
     expect(checkRateLimit(k2, LOGIN_LIMIT).allowed).toBe(true);
     expect(checkRateLimit(k3, LOGIN_LIMIT).allowed).toBe(true);
+  });
+});
+
+describe("target mutation rate limiter (Phase 15)", () => {
+  beforeEach(() => resetRateLimitForTest());
+
+  it("is keyed per user and generous enough for legitimate flows", () => {
+    const key = mutationRateLimitKey("user-1");
+    // E2E-style burst (create + pause + resume + delete) stays allowed.
+    for (let i = 0; i < 10; i += 1) {
+      expect(checkRateLimit(key, MUTATION_LIMIT).allowed).toBe(true);
+    }
+  });
+
+  it("blocks runaway clients with Retry-After and isolates users", () => {
+    const k1 = mutationRateLimitKey("user-1");
+    const k2 = mutationRateLimitKey("user-2");
+    for (let i = 0; i < MUTATION_LIMIT.max; i += 1) {
+      checkRateLimit(k1, MUTATION_LIMIT);
+    }
+    const blocked = checkRateLimit(k1, MUTATION_LIMIT);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterMs).toBeGreaterThan(0);
+    expect(blocked.retryAfterMs).toBeLessThanOrEqual(MUTATION_LIMIT.windowMs);
+    expect(checkRateLimit(k2, MUTATION_LIMIT).allowed).toBe(true);
   });
 });

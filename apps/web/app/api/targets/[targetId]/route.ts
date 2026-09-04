@@ -44,6 +44,15 @@ export async function PATCH(
 ) {
   try {
     const session = await requireApiSession();
+    const { checkRateLimit, mutationRateLimitKey, MUTATION_LIMIT } = await import("@/lib/rate-limit");
+    const mutationLimit = checkRateLimit(mutationRateLimitKey(session.userId), MUTATION_LIMIT);
+    if (!mutationLimit.allowed) {
+      const retryAfterSec = Math.ceil((mutationLimit.retryAfterMs ?? MUTATION_LIMIT.windowMs) / 1000);
+      return NextResponse.json(
+        { error: { code: "RATE_LIMITED", message: "Too many requests. Please try again shortly." } },
+        { status: 429, headers: { ...NO_STORE, "Retry-After": String(retryAfterSec) } },
+      );
+    }
     const { targetId: raw } = await ctx.params;
     const parsed = metaBody.safeParse(await req.json());
     if (!parsed.success) {
@@ -69,6 +78,15 @@ export async function DELETE(
 ) {
   try {
     const session = await requireApiSession();
+    const { checkRateLimit, mutationRateLimitKey, MUTATION_LIMIT } = await import("@/lib/rate-limit");
+    const mutationLimit = checkRateLimit(mutationRateLimitKey(session.userId), MUTATION_LIMIT);
+    if (!mutationLimit.allowed) {
+      const retryAfterSec = Math.ceil((mutationLimit.retryAfterMs ?? MUTATION_LIMIT.windowMs) / 1000);
+      return NextResponse.json(
+        { error: { code: "RATE_LIMITED", message: "Too many requests. Please try again shortly." } },
+        { status: 429, headers: { ...NO_STORE, "Retry-After": String(retryAfterSec) } },
+      );
+    }
     const { targetId: raw } = await ctx.params;
     const deleted = await deleteOwnedTarget(getDatabase(), session.userId, raw);
     if (!deleted) {

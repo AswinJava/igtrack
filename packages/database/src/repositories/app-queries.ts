@@ -7,7 +7,7 @@ import {
   listProfileSnapshots,
   listProfileChanges,
 } from "./observations.js";
-import { listStories, listMentionsForStory } from "./stories.js";
+import { listStories, listMentionsForStoryWithAccount } from "./stories.js";
 import {
   latestFollowSnapshot,
   listRecentDeltas,
@@ -163,16 +163,50 @@ export interface ActivityItem {
   targetUsername: string;
   // Epistemic class of the underlying observation: follow/profile diffs are
   // DERIVED (snapshot comparisons), story sightings are OBSERVED events.
-  // Confidence stays unavailable until per-event provenance is joined here.
+  // Confidence is the originating observation's persisted confidence:
+  // profile changes inherit their to-snapshot's confidence, follow deltas
+  // carry their own persisted confidence, stories carry theirs. Nothing here
+  // is assigned or invented.
   category: string | null;
   confidence: string | null;
+}
+
+export const ACTIVITY_TYPES = [
+  "PROFILE_CHANGED",
+  "NEW_FOLLOWER",
+  "LOST_FOLLOWER",
+  "NEW_FOLLOWING",
+  "LOST_FOLLOWING",
+  "STORY_POSTED",
+] as const;
+
+export type ActivityType = (typeof ACTIVITY_TYPES)[number];
+
+export interface ActivityFeedOptions {
+  types?: ActivityType[];
+  // Case-insensitive substring match against username and summary.
+  query?: string;
+}
+
+function escapeLikePattern(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
 }
 
 export async function getUserActivityFeed(
   db: Database,
   userId: string,
   limit = 30,
+  options: ActivityFeedOptions = {},
 ): Promise<ActivityItem[]> {
+  const types =
+    options.types !== undefined && options.types.length > 0
+      ? options.types.filter((t): t is ActivityType =>
+          (ACTIVITY_TYPES as readonly string[]).includes(t),
+        )
+      : null;
+  const rawQuery = options.query?.trim().slice(0, 100) ?? "";
+  const like =
+    rawQuery.length > 0 ? `%${escapeLikePattern(rawQuery)}%` : null;
   const rows = await query<{
     id: string;
     type: string;
@@ -184,12 +218,14 @@ export async function getUserActivityFeed(
   }>(
     db,
     sql`
+    SELECT * FROM (
     (SELECT pc.id::text AS id, 'PROFILE_CHANGED'::text AS type,
             ia.username || ' — ' || pc.field || ' changed' AS summary,
             pc.detected_at AS occurred_at, ia.username,
-            'DERIVED'::text AS category, NULL::text AS confidence
+            'DERIVED'::text AS category, ps.confidence::text AS confidence
      FROM profile_changes pc
      JOIN ig_accounts ia ON ia.id = pc.ig_account_id
+     JOIN profile_snapshots ps ON ps.id = pc.to_snapshot_id
      WHERE EXISTS (SELECT 1 FROM targets t
        WHERE t.user_id = ${userId} AND t.ig_account_id = pc.ig_account_id)
      ORDER BY pc.detected_at DESC LIMIT ${limit})
@@ -197,7 +233,7 @@ export async function getUserActivityFeed(
     (SELECT fd.id::text AS id, fd.change::text AS type,
             ia.username || ' — ' || lower(replace(fd.change::text, '_', ' ')) AS summary,
             fd.first_seen_at AS occurred_at, ia.username,
-            'DERIVED'::text AS category, NULL::text AS confidence
+            'DERIVED'::text AS category, fd.confidence::text AS confidence
      FROM follow_deltas fd
      JOIN ig_accounts ia ON ia.id = fd.ig_account_id
      JOIN targets t ON t.id = fd.target_id
@@ -207,12 +243,26 @@ export async function getUserActivityFeed(
     (SELECT s.id::text AS id, 'STORY_POSTED'::text AS type,
             ia.username || ' — story observed' AS summary,
             s.taken_at AS occurred_at, ia.username,
-            'OBSERVED'::text AS category, NULL::text AS confidence
+            'OBSERVED'::text AS category, s.confidence::text AS confidence
      FROM stories s
      JOIN ig_accounts ia ON ia.id = s.ig_account_id
      WHERE EXISTS (SELECT 1 FROM targets t
        WHERE t.user_id = ${userId} AND t.ig_account_id = s.ig_account_id)
      ORDER BY s.taken_at DESC LIMIT ${limit})
+    ) AS feed
+    ${types !== null || like !== null
+      ? sql`WHERE ${sql.join(
+          [
+            ...(types !== null
+              ? [sql`feed.type IN (${sql.join(types.map((t) => sql`${t}`), sql`, `)})`]
+              : []),
+            ...(like !== null
+              ? [sql`(feed.username ILIKE ${like} OR feed.summary ILIKE ${like})`]
+              : []),
+          ],
+          sql` AND `,
+        )}`
+      : sql``}
     ORDER BY occurred_at DESC
     LIMIT ${limit}
   `,
@@ -280,7 +330,7 @@ export interface TargetDetailBundle {
   changes: Awaited<ReturnType<typeof listProfileChanges>>;
   health: SourceHealthRecord[];
   stories: Awaited<ReturnType<typeof listStories>>;
-  storyMentions: Array<{ storyId: string; mentions: Awaited<ReturnType<typeof listMentionsForStory>> }>;
+  storyMentions: Array<{ storyId: string; mentions: Awaited<ReturnType<typeof listMentionsForStoryWithAccount>> }>;
   followFollowers: Awaited<ReturnType<typeof latestFollowSnapshot>>;
   followFollowing: Awaited<ReturnType<typeof latestFollowSnapshot>>;
   deltas: DeltaWithAccount[];
@@ -317,7 +367,7 @@ export async function getOwnedTargetDetail(
 
   const storyMentions: TargetDetailBundle["storyMentions"] = [];
   for (const s of storiesList.slice(0, 3)) {
-    const ms = await listMentionsForStory(db, s.id).catch(() => []);
+    const ms = await listMentionsForStoryWithAccount(db, s.id).catch(() => []);
     storyMentions.push({ storyId: s.storyId, mentions: ms });
   }
 

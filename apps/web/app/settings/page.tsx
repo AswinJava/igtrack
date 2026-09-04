@@ -50,7 +50,7 @@ export default async function SettingsPage() {
             <CardDescription>What IGTrack can and cannot know.</CardDescription>
           </CardHeader>
           <CardContent className="text-sm text-zinc-400">
-            <p>See docs/platform-limitations.md for the honest capability map: public profile metadata, story existence while live, mention metadata where exposed, paginated follower/following lists, comments. No DMs, no private likes history, no private-account access without authorization.</p>
+            <p>See docs/platform-limitations.md for the honest capability map: public profile metadata, story existence while live, mention metadata where exposed, paginated follower/following lists. Comment monitoring is not currently active. No DMs, no private likes history, no private-account access without authorization.</p>
           </CardContent>
         </Card>
       </div>

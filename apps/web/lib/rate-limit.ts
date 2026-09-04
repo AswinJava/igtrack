@@ -1,10 +1,11 @@
-// Simple in-memory login rate limiter (Phase 10, P2 #1).
-// Single-instance, no extra infra — suitable for the modular monolith's
-// current deployment (one web process). A distributed limiter (Redis / DB)
-// would replace this only if the app scales to multiple web instances.
+// Simple in-memory rate limiters (Phase 10 login, Phase 15 target mutations).
+// Single-process, non-persistent: suitable for the modular monolith's current
+// deployment (one web process; state resets on restart). A distributed limiter
+// (Redis / DB) would replace this only if the app scales to multiple web
+// instances. Documented as single-process — never claim distributed protection.
 //
-// Contract: limit to N attempts per window per key (IP + email). Returns
-// 429 with Retry-After when exceeded. Never logs passwords or tokens.
+// Contract: limit to N attempts per window per key. Returns 429 with
+// Retry-After when exceeded. Never logs passwords or tokens.
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -76,4 +77,18 @@ export const LOGIN_LIMIT = {
   // protection while remaining usable for legitimate retries.
   windowMs: 15 * 60 * 1000,
   max: 5,
+} as const;
+
+// Lightweight abuse protection for authenticated target mutations
+// (Phase 15). Keyed per user, not per IP: every caller here is already
+// authenticated, so per-user buckets avoid punishing users behind shared IPs.
+// Generous by design (60/min) — legitimate UI flows and E2E (a handful of
+// mutations per minute) never trip it; only runaway clients do.
+export function mutationRateLimitKey(userId: string): string {
+  return `mutation:${userId}`;
+}
+
+export const MUTATION_LIMIT = {
+  windowMs: 60 * 1000,
+  max: 60,
 } as const;

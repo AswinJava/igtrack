@@ -14,8 +14,8 @@ IGTrack never fabricates observations to compensate for provider gaps.
 | `getStories(account)` | ref | `NormalizedStory[]` | AVAILABLE (may be empty) / PARTIAL / UNAVAILABLE / ERROR | — (single tray snapshot) | per-result hash+ref | Empty+AVAILABLE is an honest zero; UNAVAILABLE never becomes zero |
 | `getFollowers(account, cursor?)` | ref, `Cursor?` | `NormalizedFollowPage` (`entries`, `complete`, `nextCursor?`) | AVAILABLE / PARTIAL / UNAVAILABLE / ERROR | cursor-based | per-page hash+ref | `complete` must be honest; PARTIAL persists as PARTIAL forever |
 | `getFollowing(account, cursor?)` | ref, `Cursor?` | `NormalizedFollowPage` | same as getFollowers | cursor-based | per-page hash+ref | same contract |
-| `getPublicPosts(account, cursor?)` | ref, `Cursor?` | `NormalizedPost[]` | same | cursor-based | per-page hash+ref | Not yet consumed by a scan executor |
-| `getPublicComments(post, cursor?)` | post, `Cursor?` | `NormalizedComment[]` | same | cursor-based | per-page hash+ref | Not yet consumed by a scan executor |
+| `getPublicPosts(account, cursor?)` | ref, `Cursor?` | `NormalizedPost[]` | same | cursor-based | per-page hash+ref | PARKED (Phase 15) — not consumed by any scan executor; no persistence, evidence, query, or UI |
+| `getPublicComments(post, cursor?)` | post, `Cursor?` | `NormalizedComment[]` | same | cursor-based | per-page hash+ref | PARKED (Phase 15) — not consumed by any scan executor; no persistence, evidence, query, or UI |
 
 Every result carries: `status`, `observedAt` (provider-declared capture instant),
 `source` (`sourceId`, `SourceKind`, optional `reference`), `confidence`
@@ -107,6 +107,20 @@ provider-specific type unless the contract itself genuinely requires an extensio
 - `rawPayloadHash` never derived from normalized data; absent raw → `NULL`.
 - Raw payload bytes and tokens never persisted, logged, or returned to the browser; evidence carries only hashes/references/usernames/timestamps.
 - Retryability governed by `effectiveRetryability` + `retryAfterMs` verbatim; rate-limits honored, not bypassed.
+
+## 1f. Parked capabilities (Phase 15)
+
+`getPublicPosts` / `getPublicComments` exist on the `InstagramProvider`
+interface and on the fixture provider, but nothing else in the system consumes
+them: there is no interaction scan job type, no posts/comments persistence
+model, no evidence path, no query, and no UI. They are retained only so a
+future lawful adapter has a typed slot to implement against.
+
+Deliberate decision (Option A — park, do not half-build): until persistence,
+executor, evidence, query, UI, and tests all exist for the complete synthetic
+pipeline, product copy and docs must not imply that comments are currently
+monitored. A provider method that looks supported while the pipeline silently
+does nothing is worse than an explicitly parked one.
 
 ## 2. Requirements for any real provider (gate before integration)
 

@@ -11,6 +11,23 @@ export const dynamic = "force-dynamic";
 const TABS = ["overview", "activity", "stories", "followers", "following", "relationships", "evidence"] as const;
 type Tab = (typeof TABS)[number];
 
+// Visibility classifications describe synthetic fixture geometry and flags —
+// never proof that anyone intentionally hid a mention.
+const VISIBILITY_LABELS: Record<string, string> = {
+  VISIBLE: "Visible",
+  POSSIBLY_HIDDEN: "Possibly hidden",
+  OFF_CANVAS: "Off canvas",
+  METADATA_ONLY: "Metadata only",
+  UNKNOWN: "Unknown",
+};
+
+const FOLLOW_CHANGE_LABELS: Record<string, string> = {
+  NEW_FOLLOWER: "New follower",
+  LOST_FOLLOWER: "Lost follower",
+  NEW_FOLLOWING: "New following",
+  LOST_FOLLOWING: "Lost following",
+};
+
 function JobsPanel({ jobs }: { jobs: JobQueueSummary[] }) {
   const queuedOrWait = jobs.filter((j) => j.status === "queued" || j.status === "retry_wait");
   const latestByKind = new Map<string, JobQueueSummary>();
@@ -69,6 +86,12 @@ export default async function TargetDetailPage({
   if (!data) notFound();
 
   const { target, account, snapshots, changes, health, stories, storyMentions, deltas, followFollowers, followFollowing, jobs } = data;
+
+  const mentionsByStory = new Map(storyMentions.map((sm) => [sm.storyId, sm.mentions]));
+  const followerDeltas = deltas.filter((d) => d.direction === "FOLLOWERS");
+  const followingDeltas = deltas.filter((d) => d.direction === "FOLLOWING");
+  const mentionCount = storyMentions.reduce((n, sm) => n + sm.mentions.length, 0);
+  const mentionedUsers = new Set(storyMentions.flatMap((sm) => sm.mentions.map((m) => m.username))).size;
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-6">
@@ -192,14 +215,35 @@ export default async function TargetDetailPage({
                 <p className="py-6 text-center text-sm text-zinc-500">No stories observed — stories are ephemeral (24h) and depend on provider capability.</p>
               ) : (
                 <ul className="space-y-2">
-                  {stories.map((s) => (
-                    <li key={s.id} className="rounded-lg border border-zinc-800 px-3 py-2 text-xs">
-                      <p className="text-zinc-300">{s.storyId} <span className="text-zinc-500">· {formatDateTime(s.takenAt)}</span></p>
-                      <p className="mt-1 text-zinc-500">Sticker kinds: {s.stickerKinds.length > 0 ? s.stickerKinds.join(", ") : "none"}</p>
-                    </li>
-                  ))}
+                  {stories.map((s) => {
+                    const mentions = mentionsByStory.get(s.storyId) ?? [];
+                    return (
+                      <li key={s.id} className="rounded-lg border border-zinc-800 px-3 py-2 text-xs">
+                        <p className="text-zinc-300">{s.storyId} <span className="text-zinc-500">· {formatDateTime(s.takenAt)}</span></p>
+                        <p className="mt-1 text-zinc-500">Sticker kinds: {s.stickerKinds.length > 0 ? s.stickerKinds.join(", ") : "none"}</p>
+                        {mentions.length === 0 ? (
+                          <p className="mt-1 text-zinc-600">No mentions observed in this story.</p>
+                        ) : (
+                          <ul className="mt-2 space-y-1">
+                            {mentions.map((m) => (
+                              <li key={m.id} className="flex flex-wrap items-center gap-1.5 rounded bg-zinc-800/50 px-2 py-1.5 text-zinc-400">
+                                <span className="font-medium text-zinc-200">@{m.username}</span>
+                                <span className="text-zinc-500">· Visibility classification: {VISIBILITY_LABELS[m.visibilityClass] ?? m.visibilityClass}</span>
+                                <ConfidenceBadge confidence={m.confidence} />
+                                <span className="text-zinc-600">{formatDateTime(m.observedAt)}</span>
+                                {m.evidenceId !== null && (
+                                  <Link href={`/evidence/${m.evidenceId}`} className="font-medium text-sky-400 hover:underline">Evidence →</Link>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
+              <p className="mt-3 text-[11px] leading-relaxed text-zinc-600">Visibility classifications describe synthetic fixture geometry and flags — not proof that anyone intentionally hid a mention.</p>
             </CardContent>
           </Card>
         )}
@@ -213,8 +257,24 @@ export default async function TargetDetailPage({
               ) : (
                 <div className="rounded-lg border border-zinc-800 px-4 py-3 text-xs">
                   <p className="text-zinc-300">Snapshot {formatDateTime(followFollowers.takenAt)}</p>
-                  <p className="mt-1 text-zinc-500">Completeness {followFollowers.completeness} · {followFollowers.totalObserved} observed · source {followFollowers.sourceId}</p>
+                  <p className="mt-1 text-zinc-500">Completeness {followFollowers.completeness} · {followFollowers.totalObserved} observed · source {followFollowers.sourceId} · Last observed {formatRelative(followFollowers.takenAt)}</p>
                 </div>
+              )}
+              {followFollowers !== null && (
+                followerDeltas.length === 0 ? (
+                  <p className="py-3 text-center text-xs text-zinc-500">No follower changes derived yet — a second snapshot is needed before new or lost followers can be detected.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {followerDeltas.map((d) => (
+                      <li key={d.id} className="flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+                        <span className="font-medium text-zinc-200">{FOLLOW_CHANGE_LABELS[d.change] ?? d.change}</span>
+                        <span>@{d.username}</span>
+                        <CategoryBadge category="DERIVED" />
+                        <span className="text-zinc-600">{formatDateTime(d.firstSeenAt)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )
               )}
             </CardContent>
           </Card>
@@ -229,7 +289,42 @@ export default async function TargetDetailPage({
               ) : (
                 <div className="rounded-lg border border-zinc-800 px-4 py-3 text-xs">
                   <p className="text-zinc-300">Snapshot: {formatDateTime(followFollowing.takenAt)}</p>
-                  <p className="mt-1 text-zinc-500">Completeness {followFollowing.completeness} · {followFollowing.totalObserved} observed</p>
+                  <p className="mt-1 text-zinc-500">Completeness {followFollowing.completeness} · {followFollowing.totalObserved} observed · Last observed {formatRelative(followFollowing.takenAt)}</p>
+                </div>
+              )}
+              {followFollowing !== null && (
+                followingDeltas.length === 0 ? (
+                  <p className="py-3 text-center text-xs text-zinc-500">No following changes derived yet — a second snapshot is needed before new or removed follows can be detected.</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {followingDeltas.map((d) => (
+                      <li key={d.id} className="flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-2 text-xs text-zinc-400">
+                        <span className="font-medium text-zinc-200">{FOLLOW_CHANGE_LABELS[d.change] ?? d.change}</span>
+                        <span>@{d.username}</span>
+                        <CategoryBadge category="DERIVED" />
+                        <span className="text-zinc-600">{formatDateTime(d.firstSeenAt)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {tab === "relationships" && (
+          <Card>
+            <CardHeader><CardTitle>Relationship signals</CardTitle><CardDescription>Observed signals for this target — mention observations and follow changes.</CardDescription></CardHeader>
+            <CardContent>
+              {mentionCount === 0 && deltas.length === 0 ? (
+                <p className="py-6 text-center text-sm text-zinc-500">Not enough signals yet — story mentions and follow changes will appear here once observed.</p>
+              ) : (
+                <div className="space-y-2 text-xs">
+                  <p className="rounded-lg border border-zinc-800 px-3 py-2 text-zinc-400">
+                    <span className="font-medium text-zinc-200">{mentionCount}</span> mention observations across <span className="font-medium text-zinc-200">{storyMentions.length}</span> stor{storyMentions.length === 1 ? "y" : "ies"} · <span className="font-medium text-zinc-200">{mentionedUsers}</span> distinct mentioned accounts · <span className="font-medium text-zinc-200">{deltas.length}</span> follow changes
+                  </p>
+                  <p className="rounded-lg bg-zinc-800/50 px-3 py-2 text-zinc-500">These are raw observed counts, not a ranking. The ranked heuristic view lives on the Relationships page.</p>
+                  <Link href="/relationships" className="inline-block text-sm font-medium text-sky-400 hover:underline">Open Relationships →</Link>
                 </div>
               )}
             </CardContent>
