@@ -95,8 +95,8 @@ a window; backward jumps re-enter an already-keyed window (deduplicated no-op).
 
 | Data | Cleanup | Notes |
 |---|---|---|
-| Expired sessions | `purgeExpiredSessions` exists, **not scheduled yet** | unbounded growth |
-| Terminal `monitoring_jobs` | none yet | unbounded growth; recommend 90d policy |
+| Expired sessions | `purgeExpiredSessions` on the worker maintenance tick (hourly, `IGTRACK_MAINTENANCE_TICK_MS`, first iteration included so ephemeral `--once` runners also purge) | bounded |
+| Terminal `monitoring_jobs` | `purgeTerminalJobs` on the same tick (`IGTRACK_JOBS_RETENTION_DAYS`, default 90d; only `succeeded/failed/cancelled` with `completed_at` older than the cutoff) | bounded; running/retryable rows never touched |
 | Checkpoints | overwritten per (target,kind); cascade-deleted with target | bounded |
 | Target deletion | `deleteTargetWithObservations` removes snapshots/stories/mentions/interactions/deltas + evidence atomically | `ig_accounts` survives by design as shared registry |
 | Story media | `media_assets.retention_state` column exists; no reaper yet | — |

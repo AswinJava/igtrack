@@ -1,0 +1,27 @@
+# IGTrack Docker build context — keep prod images lean and secret-free.
+node_modules/
+.next/
+out/
+dist/
+build/
+coverage/
+playwright-report/
+test-results/
+data/
+storage/
+backups/
+*.sql.gz
+*.log
+logs/
+.git/
+.github/
+docs/
+e2e/
+scripts/bench-staging.ts
+.env
+.env.*
+!.env.example
+*.out.txt
+.opencode/
+.muse/
+.playwright-cli/
