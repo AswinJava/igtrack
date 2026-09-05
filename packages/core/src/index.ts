@@ -1,5 +1,6 @@
 export * from "./epistemics.js";
 export * from "./capability.js";
+export * from "./capabilities.js";
 export * from "./models.js";
 export * from "./provider.js";
 export * from "./evidence.js";

@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, sql } from "drizzle-orm";
+import { and, asc, desc, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import type { NormalizedAccountRef, NormalizedComment, NormalizedPost } from "@igtrack/core";
-import { igAccounts, postComments, posts } from "../schema/index.js";
+import type {
+  NormalizedAccountRef,
+  NormalizedComment,
+  NormalizedPost,
+  NormalizedPostChild,
+} from "@igtrack/core";
+import { igAccounts, postChildren, postComments, posts } from "../schema/index.js";
 import type { Database } from "../client/client.js";
 import { withTransaction } from "../transactions.js";
 import { upsertAccount } from "./accounts.js";
@@ -12,6 +17,7 @@ import { upsertEvidence } from "./evidence.js";
 
 export type PostRecord = typeof posts.$inferSelect;
 export type PostCommentRecord = typeof postComments.$inferSelect;
+export type PostChildRecord = typeof postChildren.$inferSelect;
 
 export type PostCommentState = "OBSERVED" | "UNAVAILABLE" | "NOT_SCANNED";
 
@@ -177,6 +183,7 @@ export async function recordPostComment(
         commentedAt: new Date(comment.createdAt),
         observedAt: new Date(comment.meta.observedAt),
         confidence: comment.meta.confidence,
+        ...(comment.likeCount !== undefined ? { likeCount: comment.likeCount } : {}),
         ...(comment.inReplyToCommentId !== undefined
           ? { inReplyToCommentId: comment.inReplyToCommentId }
           : {}),
@@ -221,6 +228,65 @@ export async function listPosts(
     .limit(options.limit ?? 20);
 }
 
+export interface RecordPostChildrenInput {
+  postDbId: string;
+  children: NormalizedPostChild[];
+}
+
+export interface RecordPostChildrenResult {
+  inserted: number;
+  deduplicated: number;
+}
+
+// Persists one album's items in provider order. Idempotent per
+// (post, child_media_id): re-scans and reclaimed scans collapse instead of
+// duplicating. No separate evidence rows — children are covered by the
+// parent post's evidence (they arrive in the same observation).
+export async function recordPostChildren(
+  db: Database,
+  input: RecordPostChildrenInput,
+): Promise<RecordPostChildrenResult> {
+  if (input.children.length === 0) return { inserted: 0, deduplicated: 0 };
+  return withTransaction(db, async (tx) => {
+    let inserted = 0;
+    let deduplicated = 0;
+    let position = 0;
+    for (const child of input.children) {
+      position += 1;
+      const rows = await tx
+        .insert(postChildren)
+        .values({
+          id: randomUUID(),
+          postDbId: input.postDbId,
+          position,
+          childMediaId: child.childId,
+          ...(child.mediaType !== undefined ? { mediaType: child.mediaType } : {}),
+          ...(child.shortcode !== undefined ? { shortcode: child.shortcode } : {}),
+          ...(child.permalink !== undefined ? { permalink: child.permalink } : {}),
+          ...(child.takenAt !== undefined ? { takenAt: new Date(child.takenAt) } : {}),
+        })
+        .onConflictDoNothing({
+          target: [postChildren.postDbId, postChildren.childMediaId],
+        })
+        .returning({ id: postChildren.id });
+      if (rows[0] !== undefined) inserted += 1;
+      else deduplicated += 1;
+    }
+    return { inserted, deduplicated };
+  });
+}
+
+export async function listChildrenForPost(
+  db: Database,
+  postDbId: string,
+): Promise<PostChildRecord[]> {
+  return db
+    .select()
+    .from(postChildren)
+    .where(sql`${postChildren.postDbId} = ${postDbId}`)
+    .orderBy(asc(postChildren.position));
+}
+
 export interface PostCommentWithAccount extends PostCommentRecord {
   username: string;
   // Username of the parent comment's author when this comment is a reply and
@@ -245,6 +311,7 @@ export async function listCommentsForPostWithAccount(
       commentedAt: postComments.commentedAt,
       observedAt: postComments.observedAt,
       confidence: postComments.confidence,
+      likeCount: postComments.likeCount,
       inReplyToCommentId: postComments.inReplyToCommentId,
       evidenceId: postComments.evidenceId,
       createdAt: postComments.createdAt,

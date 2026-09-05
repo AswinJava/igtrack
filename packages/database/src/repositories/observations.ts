@@ -65,6 +65,11 @@ export async function recordProfileSnapshot(
       ...(profile.isVerified !== undefined
         ? { isVerified: profile.isVerified }
         : {}),
+      // accountType lives on the account row (no per-snapshot column):
+      // forward it so a future provider that exposes it persists.
+      ...(profile.accountType !== undefined
+        ? { accountType: profile.accountType }
+        : {}),
       ...(profile.profilePicUrl !== undefined
         ? { profilePicUrl: profile.profilePicUrl }
         : {}),

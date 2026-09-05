@@ -24,7 +24,9 @@ import {
   recordProfileSnapshot,
   recordFollowSnapshot,
   recordStory,
+  recordStorySighting,
   recordPost,
+  recordPostChildren,
   recordPostComment,
   latestFollowSnapshot,
   persistFollowDiff,
@@ -793,12 +795,21 @@ export async function runStoryScan(
       );
     }
 
-    await recordStory(db, {
+    const recorded = await recordStory(db, {
       owner: accountRef(account),
       story,
       sourceId: source.id,
       evidence,
       mentionEvidence,
+    });
+    // Re-observation mark on EVERY scan that sees the story, including
+    // deduplicated re-hits: this is what turns "first seen once" into an
+    // observable lifetime (first/last seen, sighting count). Wall-clock scan
+    // time — provider timestamps are static across scans and would collapse.
+    await recordStorySighting(db, {
+      storyDbId: recorded.story.id,
+      observedAt: new Date(),
+      jobId: job.id,
     });
   }
 
@@ -931,6 +942,14 @@ export async function runPostScan(
       coverageNote: "Provider declares the getPublicComments capability unavailable.",
     });
   }
+  const childrenSupported = caps.getPostChildren === true;
+  if (!childrenSupported) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getPostChildren",
+      coverageNote: "Provider declares the getPostChildren capability unavailable.",
+    });
+  }
 
   // Resume an owned multi-page listing; a foreign checkpoint starts fresh.
   const postCheckpoint = await loadCheckpoint(db, targetId, POSTS_CHECKPOINT_KIND);
@@ -1058,6 +1077,42 @@ export async function runPostScan(
           comment,
           evidence: commentEvidence,
         });
+      }
+
+      // Album expansion runs only for provider-declared CAROUSEL posts through
+      // its own edge, so a children failure can never endanger the parent
+      // post (already persisted above). UNAVAILABLE or ERROR both skip with
+      // the scan marked truncated; failures stay visible in source health.
+      if (childrenSupported && post.mediaType === "CAROUSEL") {
+        const childResult = await providerCall(
+          db,
+          source,
+          "getPostChildren",
+          () => src.provider.getPostChildren(post),
+        );
+        if (childResult.status === CapabilityStatus.UNAVAILABLE) {
+          await markCapabilityUnavailable(db, {
+            source,
+            capability: "getPostChildren",
+            coverageNote:
+              childResult.note ?? `No child-media source for post ${post.postId}.`,
+          });
+          truncated = true;
+        } else if (childResult.status === CapabilityStatus.ERROR) {
+          const childErr = childResult.error;
+          await recordCapabilityFailure(db, {
+            source,
+            capability: "getPostChildren",
+            reason: childErr?.message ?? "Provider error",
+            errorCategory: childErr?.kind ?? "INTERNAL",
+          });
+          truncated = true;
+        } else if (childResult.data !== undefined) {
+          await recordPostChildren(db, {
+            postDbId: postRow.id,
+            children: childResult.data,
+          });
+        }
       }
 
       postsObserved += 1;

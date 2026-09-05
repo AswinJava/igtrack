@@ -75,6 +75,7 @@ function stubSource(config: StubConfig = {}): ExecutionSource {
       getFollowing: true,
       getPublicPosts: true,
       getPublicComments: true,
+      getPostChildren: false,
       ...config.capabilities,
     }),
     resolveAccount: async () => {
@@ -102,6 +103,9 @@ function stubSource(config: StubConfig = {}): ExecutionSource {
     },
     getPublicComments: async () => {
       throw new Error("stub: getPublicComments not wired");
+    },
+    getPostChildren: async () => {
+      throw new Error("stub: getPostChildren not wired");
     },
   };
   return {

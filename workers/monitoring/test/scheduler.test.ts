@@ -9,6 +9,7 @@ import {
   getJob,
   monitoringJobs,
   transitionTargetStatus,
+  updateOwnedTargetMeta,
   users,
   type DatabaseHandle,
 } from "@igtrack/database";
@@ -168,6 +169,33 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
     expect(row.last_tick_at).not.toBeNull();
     expect(row.last_success_at).not.toBeNull();
     expect(row.last_error).toBeNull();
+  });
+
+  it("honors per-target kind filters and cadence windows (prefs)", async () => {
+    // Restrict the target to STORY_SCAN only: one tick must enqueue exactly
+    // one job, and the window key must reflect the target's own cadence.
+    await updateOwnedTargetMeta(handle.db, {
+      userId,
+      targetId,
+      scanCadenceMult: 2,
+      scanKinds: ["STORY_SCAN"],
+    });
+    const before = await countJobs(handle);
+    const result = await runSchedulerTick(handle.db, {
+      now: new Date(Date.parse("2026-09-04T10:10:00.000Z")),
+    });
+    expect(result.targetsConsidered).toBe(1);
+    expect(result.enqueued).toBe(1);
+    expect(result.perKind.STORY_SCAN.enqueued).toBe(1);
+    expect(result.perKind.PROFILE_SCAN.enqueued).toBe(0);
+    expect(await countJobs(handle)).toBe(before + 1);
+    // Restore defaults so later describes see a standard target.
+    await updateOwnedTargetMeta(handle.db, {
+      userId,
+      targetId,
+      scanCadenceMult: null,
+      scanKinds: null,
+    });
   });
 });
 

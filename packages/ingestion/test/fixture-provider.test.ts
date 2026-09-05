@@ -29,9 +29,26 @@ beforeAll(async () => {
 });
 
 describe("FixtureProvider", () => {
-  it("declares all capabilities", () => {
+  it("declares capabilities honestly, including no child-media source", () => {
     const caps = provider.capabilities();
-    expect(Object.values(caps).every(Boolean)).toBe(true);
+    expect(caps.getPostChildren).toBe(false);
+    for (const [name, on] of Object.entries(caps)) {
+      if (name === "getPostChildren") continue;
+      expect(on).toBe(true);
+    }
+  });
+
+  it("reports children UNAVAILABLE instead of an empty album", async () => {
+    const result = await provider.getPostChildren({
+      postId: "post-1",
+      takenAt: "2026-08-25T12:00:00.000Z",
+      meta: {
+        category: ObservationCategory.OBSERVED,
+        confidence: Confidence.HIGH,
+        observedAt: "2026-08-27T12:00:00.000Z",
+      },
+    });
+    expect(result.status).toBe(CapabilityStatus.UNAVAILABLE);
   });
 
   it("resolves the fixture target case-insensitively", async () => {

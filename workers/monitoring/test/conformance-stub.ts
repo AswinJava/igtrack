@@ -6,6 +6,7 @@ import {
   type CapabilityResult,
   type InstagramProvider,
   type NormalizedFollowPage,
+  type NormalizedPostChild,
   type NormalizedProfile,
   type NormalizedStory,
   type ProviderCapabilities,
@@ -19,6 +20,7 @@ export interface StubConfig {
   getStories?: () => Promise<CapabilityResult<NormalizedStory[]>>;
   getFollowers?: () => Promise<CapabilityResult<NormalizedFollowPage>>;
   getFollowing?: () => Promise<CapabilityResult<NormalizedFollowPage>>;
+  getPostChildren?: () => Promise<CapabilityResult<NormalizedPostChild[]>>;
 }
 
 export const STUB_PROFILE: NormalizedProfile = {
@@ -43,6 +45,7 @@ export function stubSource(config: StubConfig = {}): ExecutionSource {
       getFollowing: true,
       getPublicPosts: true,
       getPublicComments: true,
+      getPostChildren: true,
       ...config.capabilities,
     }),
     resolveAccount: async () => {
@@ -77,6 +80,11 @@ export function stubSource(config: StubConfig = {}): ExecutionSource {
     getPublicComments: async () => {
       throw new Error("stub: getPublicComments not wired");
     },
+    getPostChildren:
+      config.getPostChildren ??
+      (async () => {
+        throw new Error("stub: getPostChildren not wired");
+      }),
   };
   return {
     provider,

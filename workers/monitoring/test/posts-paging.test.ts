@@ -10,6 +10,7 @@ import {
   type InstagramProvider,
   type NormalizedComment,
   type NormalizedPost,
+  type NormalizedPostChild,
 } from "@igtrack/core";
 import {
   claimJob,
@@ -74,6 +75,8 @@ interface PostsStubConfig {
   commentPages?: Record<string, { comments: NormalizedComment[]; nextCursor?: string }>;
   commentsUnavailableFor?: string[];
   commentsCap?: boolean;
+  childrenCap?: boolean;
+  childrenByPost?: Record<string, { children?: NormalizedPostChild[]; unavailable?: boolean }>;
   seenPostCursors?: string[];
 }
 
@@ -90,6 +93,7 @@ function postsStub(config: PostsStubConfig): ExecutionSource {
       getFollowing: true,
       getPublicPosts: true,
       getPublicComments: config.commentsCap ?? true,
+      getPostChildren: config.childrenCap ?? true,
     }),
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
@@ -146,6 +150,20 @@ function postsStub(config: PostsStubConfig): ExecutionSource {
       if (page.nextCursor === undefined) return available(page.comments, base);
       return partial(page.comments, { ...base, note: "more", nextCursor: page.nextCursor });
     },
+    getPostChildren: async (
+      p: NormalizedPost,
+    ): Promise<CapabilityResult<NormalizedPostChild[]>> => {
+      const entry = config.childrenByPost?.[p.postId];
+      if (entry?.unavailable === true) {
+        return unavailable({ observedAt: OBSERVED_AT, source: sourceRef }, "no child source");
+      }
+      const { available } = await import("@igtrack/core");
+      return available(entry?.children ?? [], {
+        observedAt: OBSERVED_AT,
+        source: sourceRef,
+        confidence: Confidence.MEDIUM,
+      });
+    },
   };
   return { provider, source: { id: sourceId, kind: SourceKind.FIXTURE, name: "stub" } };
 }
@@ -163,6 +181,7 @@ function followerStub(pages: { usernames: string[]; complete: boolean; nextCurso
       getFollowing: true,
       getPublicPosts: true,
       getPublicComments: true,
+      getPostChildren: false,
     }),
     resolveAccount: async () => {
       throw new Error("not wired");
@@ -206,6 +225,9 @@ function followerStub(pages: { usernames: string[]; complete: boolean; nextCurso
       throw new Error("not wired");
     },
     getPublicComments: async () => {
+      throw new Error("not wired");
+    },
+    getPostChildren: async () => {
       throw new Error("not wired");
     },
   };

@@ -116,6 +116,17 @@ export interface NormalizedFollowPage {
   meta: ObservationMeta;
 }
 
+export interface NormalizedPostChild {
+  /** Provider media id of the album item (source-scoped). */
+  childId: string;
+  /** Provider-declared type of the item; absent when undeclared. */
+  mediaType?: MediaType;
+  shortcode?: string;
+  /** Full provider-supplied item URL; never reconstructed. */
+  permalink?: string;
+  takenAt?: string;
+}
+
 export interface NormalizedPost {
   postId: string;
   shortcode?: string;
@@ -132,6 +143,14 @@ export interface NormalizedPost {
   // inferred from appearance — absent means the provider did not say.
   mediaType?: MediaType;
   mediaProductType?: string;
+  /**
+   * Album items, in provider order, present ONLY when the provider returned
+   * them for this post. Absent on non-carousels AND on carousels whose
+   * children were unavailable or not retrieved — callers must not read
+   * absence as "single-item post"; the CAROUSEL mediaType carries that
+   * distinction.
+   */
+  children?: NormalizedPostChild[];
   meta: ObservationMeta;
 }
 
@@ -153,5 +172,8 @@ export interface NormalizedComment {
   text: string;
   createdAt: string;
   inReplyToCommentId?: string;
+  // Provider-supplied like count on the comment (IG Comment like_count).
+  // Absent when the provider omits it (hidden counts, no permission) — never zero-filled.
+  likeCount?: number;
   meta: ObservationMeta;
 }

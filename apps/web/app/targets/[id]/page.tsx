@@ -1,6 +1,7 @@
 ﻿import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getTargetById, type JobQueueSummary } from "@/lib/data";
+import { resolveScanIntervals, upcomingScansForTarget } from "@igtrack/database";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge, ConfidenceBadge, CategoryBadge } from "@/components/ui/badge";
 import { formatDateTime, formatRelative } from "@/lib/format";
@@ -176,10 +177,11 @@ export default async function TargetDetailPage({
   const data = await getTargetById(id);
   if (!data) notFound();
 
-  const { target, account, snapshots, changes, health, stories, storyMentions, posts, postComments, deltas, followFollowers, followFollowing, followFollowerRoster, followFollowingRoster, jobs } = data;
+  const { target, account, snapshots, changes, health, stories, storyMentions, storySightings, posts, postComments, postChildren, deltas, followFollowers, followFollowing, followFollowerRoster, followFollowingRoster, jobs } = data;
 
   const mentionsByStory = new Map(storyMentions.map((sm) => [sm.storyId, sm.mentions]));
   const commentsByPost = new Map(postComments.map((pc) => [pc.postId, pc.comments]));
+  const childrenByPost = new Map(postChildren.map((pc) => [pc.postId, pc.children]));
   const followerDeltas = deltas.filter((d) => d.direction === "FOLLOWERS");
   const followingDeltas = deltas.filter((d) => d.direction === "FOLLOWING");
   const mentionCount = storyMentions.reduce((n, sm) => n + sm.mentions.length, 0);
@@ -203,6 +205,18 @@ export default async function TargetDetailPage({
     latestJobCompletedAt: latestJob?.completedAt ?? null,
     lastObserved: snapshots[0]?.observedAt ?? null,
   });
+  // Forecast with the exact inputs the scheduler tick uses, so "next scans"
+  // always agree with what the worker will enqueue. Paused targets show no
+  // forecast — nothing will be scheduled until resume.
+  const upcomingScans =
+    target.status === "ACTIVE"
+      ? upcomingScansForTarget(
+          target.id,
+          { scanCadenceMult: target.scanCadenceMult, scanKinds: target.scanKinds },
+          Date.now(),
+          resolveScanIntervals(process.env),
+        )
+      : [];
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-6">
@@ -241,7 +255,7 @@ export default async function TargetDetailPage({
             </span>
             {target.tags.length > 0 && (<><span>·</span>{target.tags.map((t) => (<span key={t} className="rounded bg-zinc-800 px-1.5 py-0.5 text-[11px]">{t}</span>))}</>)}
           </p>
-          <div className="mt-3"><TargetControls targetId={target.id} status={target.status} localName={target.localName} notes={target.notes} tags={target.tags} /></div>
+          <div className="mt-3"><TargetControls targetId={target.id} status={target.status} localName={target.localName} notes={target.notes} tags={target.tags} scanCadenceMult={target.scanCadenceMult} scanKinds={target.scanKinds} upcomingScans={upcomingScans} /></div>
         </div>
       </div>
 
@@ -360,6 +374,7 @@ export default async function TargetDetailPage({
                 <ul className="space-y-2">
                   {stories.map((s) => {
                     const mentions = mentionsByStory.get(s.storyId) ?? [];
+                    const sighting = storySightings[s.id];
                     return (
                       <li key={s.id} className="rounded-lg border border-zinc-800 px-3 py-2 text-xs">
                         <p className="text-zinc-300">{s.storyId} <span className="text-zinc-500">· {formatDateTime(s.takenAt)}{s.expiresAt ? ` · expires ${formatDateTime(s.expiresAt)}` : ""}</span>{" "}
@@ -374,6 +389,11 @@ export default async function TargetDetailPage({
                             <Link href={`/evidence/${s.evidenceId}`} className="ml-1 font-medium text-sky-400 hover:underline">Evidence →</Link>
                           )}
                         </p>
+                        {sighting !== undefined && sighting.count > 1 && (
+                          <p className="mt-1 text-zinc-600">
+                            Observed {sighting.count}× · first seen {sighting.firstSeenAt ? formatDateTime(sighting.firstSeenAt) : "—"} · last seen {sighting.lastSeenAt ? formatDateTime(sighting.lastSeenAt) : "—"}
+                          </p>
+                        )}
                         <p className="mt-1 text-zinc-500">
                           Type {s.mediaType}{s.durationMs ? ` · ${Math.round(s.durationMs / 1000)}s` : ""} · Stickers: {s.stickerKinds.length > 0 ? s.stickerKinds.join(", ") : "none"}{s.hasLink ? " · has link" : ""}
                         </p>
@@ -470,10 +490,23 @@ export default async function TargetDetailPage({
                 <ul className="space-y-2">
                   {posts.map((p) => {
                     const comments = commentsByPost.get(p.postId) ?? [];
+                    const children = childrenByPost.get(p.postId) ?? [];
                     return (
                       <li key={p.id} className="rounded-lg border border-zinc-800 px-3 py-2 text-xs">
                         <p className="text-zinc-300">{postTypeLabel(p)} · {p.postId}{p.shortcode ? ` · /p/${p.shortcode}/` : ""}{p.permalink && isSafeExternalUrl(p.permalink) ? (<>{` · `}<a href={p.permalink} target="_blank" rel="noreferrer noopener" className="font-medium text-sky-400 hover:underline">Open on Instagram</a></>) : null} <span className="text-zinc-500">· {formatDateTime(p.takenAt)}</span></p>
                         {p.caption && <p className="mt-1 text-zinc-400">{p.caption}</p>}
+                        {children.length > 0 && (
+                          <ul className="mt-2 space-y-1">
+                            {children.map((ch) => (
+                              <li key={ch.id} className="rounded bg-zinc-800/50 px-2 py-1 text-zinc-400">
+                                <span className="font-medium text-zinc-200">{ch.mediaType ?? "Untyped"} item · {ch.childMediaId}</span>
+                                {ch.shortcode ? <span className="text-zinc-500">{` · /p/${ch.shortcode}/`}</span> : null}
+                                {ch.permalink && isSafeExternalUrl(ch.permalink) ? (<>{` · `}<a href={ch.permalink} target="_blank" rel="noreferrer noopener" className="font-medium text-sky-400 hover:underline">Open item</a></>) : null}
+                                {ch.takenAt !== null && <span className="text-zinc-500"> · {formatDateTime(ch.takenAt)}</span>}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
                         <p className="mt-1 text-zinc-500">
                           likes {p.likeCount ?? "unavailable"} · comments {p.commentCount ?? comments.length} · observed {formatRelative(p.observedAt)}
                           {p.evidenceId !== null && (
@@ -496,6 +529,9 @@ export default async function TargetDetailPage({
                                   <span className="text-zinc-500"> · reply</span>
                                 ) : null}
                                 <span className="text-zinc-500"> · {formatDateTime(c.commentedAt)}</span>
+                                {c.likeCount !== null && (
+                                  <span className="text-zinc-500"> · {c.likeCount} like{c.likeCount === 1 ? "" : "s"} (provider metadata)</span>
+                                )}
                                 {c.evidenceId !== null && (
                                   <>{` · `}<Link href={`/evidence/${c.evidenceId}`} className="font-medium text-sky-400 hover:underline">Evidence →</Link></>
                                 )}

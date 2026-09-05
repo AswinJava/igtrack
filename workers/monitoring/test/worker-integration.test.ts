@@ -125,6 +125,7 @@ describe.runIf(dbAvailable)("scheduler + worker integration", () => {
           getFollowing: true,
           getPublicPosts: true,
           getPublicComments: true,
+          getPostChildren: false,
         }),
         resolveAccount: async () => {
           throw new Error("stub");
@@ -149,6 +150,9 @@ describe.runIf(dbAvailable)("scheduler + worker integration", () => {
           throw new Error("stub");
         },
         getPublicComments: async () => {
+          throw new Error("stub");
+        },
+        getPostChildren: async () => {
           throw new Error("stub");
         },
       },

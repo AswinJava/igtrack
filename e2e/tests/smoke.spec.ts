@@ -80,6 +80,63 @@ test.describe.serial("IGTrack smoke", () => {
     await expect(page.getByRole("button", { name: "Pause monitoring" })).toBeVisible();
   });
 
+  test("manual sync queues scans; paused targets refuse with 409", async ({ page }) => {
+    await login(page);
+    await page.goto("/targets");
+    await page.getByRole("link", { name: /@aurora\.wilde/ }).first().click();
+    await expect(page).toHaveURL(/\/targets\/[0-9a-f-]+/);
+    const targetId = page.url().split("/targets/")[1]!;
+    // UI: Sync now reports what it queued.
+    await page.getByRole("button", { name: "Sync now" }).click();
+    await expect(page.getByText(/Queued:/)).toBeVisible();
+    // API: subset + idempotent double-click within the minute bucket.
+    const api = await page.evaluate(async (id) => {
+      const post = async (body: unknown) => {
+        const res = await fetch(`/api/targets/${id}/sync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        return { status: res.status, body: await res.json() };
+      };
+      return {
+        subset: await post({ kinds: ["STORY_SCAN"] }),
+        bogus: await post({ kinds: ["NOPE"] }),
+      };
+    }, targetId);
+    expect(api.subset.status).toBe(202);
+    expect(api.bogus.status).toBe(400);
+    // Paused targets refuse manual sync honestly instead of silently skipping.
+    await page.getByRole("button", { name: "Pause monitoring" }).click();
+    await expect(page.getByRole("button", { name: "Resume" })).toBeVisible();
+    const refused = await page.evaluate(async (id) => {
+      const res = await fetch(`/api/targets/${id}/sync`, { method: "POST" });
+      return { status: res.status, body: await res.json() };
+    }, targetId);
+    expect(refused.status).toBe(409);
+    await page.getByRole("button", { name: "Resume" }).click();
+    await expect(page.getByRole("button", { name: "Pause monitoring" })).toBeVisible();
+  });
+
+  test("scan settings persist cadence and kind filters", async ({ page }) => {
+    await login(page);
+    await page.goto("/targets");
+    await page.getByRole("link", { name: /@aurora\.wilde/ }).first().click();
+    await page.getByRole("button", { name: "Scan settings" }).click();
+    await page.getByLabel("Scan frequency").selectOption("0.5");
+    await page.getByRole("checkbox", { name: "Posts" }).uncheck();
+    await page.getByRole("button", { name: "Save scan settings" }).click();
+    // Save closes the form on success (first PATCH compiles server-side; allow it).
+    await expect(page.getByRole("button", { name: "Save scan settings" })).toHaveCount(0, { timeout: 30_000 });
+    // Reopen: the persisted prefs render back.
+    await page.getByRole("button", { name: "Scan settings" }).click();
+    await expect(page.getByRole("checkbox", { name: "Posts" })).not.toBeChecked();
+    // Restore defaults for later tests.
+    await page.getByLabel("Scan frequency").selectOption("default");
+    await page.getByRole("checkbox", { name: "Posts" }).check();
+    await page.getByRole("button", { name: "Save scan settings" }).click();
+  });
+
   test("evidence page renders and links to a chain", async ({ page }) => {
     await login(page);
     await page.getByRole("link", { name: "Evidence", exact: true }).click();
@@ -106,6 +163,10 @@ test.describe.serial("IGTrack smoke", () => {
     const body = await page.locator("body").innerText();
     expect(body.toLowerCase()).not.toContain("password");
     expect(body.toLowerCase()).not.toContain("cookie");
+    // Educational capability reference renders with reasons.
+    await expect(page.getByText("How each capability works")).toBeVisible();
+    await expect(page.getByText("Story highlights")).toHaveCount(1);
+    await expect(page.getByText(/To unlock:/).first()).toBeAttached();
   });
 
   test("deletes the created target", async ({ page }) => {

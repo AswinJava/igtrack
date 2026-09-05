@@ -121,6 +121,14 @@ export const targets = pgTable(
     notes: text("notes"),
     tags: text("tags").array().notNull().default([]),
     status: targetStatusEnum("status").notNull().default("ACTIVE"),
+    // Per-target scan cadence multiplier applied to every global per-kind
+    // interval (NULL = default 1x). Validated 0.25–8 on write; NULL keeps the
+    // deployment defaults so existing targets are unaffected.
+    scanCadenceMult: real("scan_cadence_mult"),
+    // Explicit subset of schedulable scan kinds for this target
+    // (NULL = all kinds). Empty arrays are normalized to NULL on write —
+    // "no scans at all" is expressed with PAUSED, not with an empty set.
+    scanKinds: text("scan_kinds").array(),
     createdAt: createdAt(),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),
   },
@@ -310,6 +318,34 @@ export const storyMentions = pgTable(
   ],
 );
 
+// Append-only re-observation log for stories. The stories row itself is
+// immutable (no-UPDATE trigger) and records FIRST observation only; every
+// subsequent scan that still sees the story appends a sighting here. This
+// answers "how long was it observable" and "when last seen" without ever
+// rewriting history. Sightings are keyed (story, observed_at) so retried or
+// reclaimed scans collapse instead of duplicating.
+export const storySightings = pgTable(
+  "story_sightings",
+  {
+    id: uuid(),
+    storyDbId: text("story_db_id")
+      .notNull()
+      .references(() => stories.id, { onDelete: "cascade" }),
+    observedAt: timestamptz("observed_at").notNull(),
+    jobId: text("job_id").references(() => monitoringJobs.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("story_sightings_story_observed_idx").on(
+      table.storyDbId,
+      table.observedAt,
+    ),
+    index("story_sightings_observed_idx").on(table.observedAt),
+  ],
+);
+
 export const posts = pgTable(
   "posts",
   {
@@ -360,8 +396,7 @@ export const posts = pgTable(
   ],
 );
 
-export const postComments = pgTable(
-  "post_comments",
+export const postComments = pgTable(  "post_comments",
   {
     id: uuid(),
     postDbId: text("post_db_id")
@@ -375,6 +410,10 @@ export const postComments = pgTable(
     commentedAt: timestamptz("commented_at").notNull(),
     observedAt: timestamptz("observed_at").notNull(),
     confidence: confidenceLevelEnum("confidence").notNull(),
+    // Provider-supplied like count on the comment; null when the provider
+    // omits it (owner hid counts, no permission). Never zero-filled: null is
+    // "not exposed", 0 is "exposed as zero".
+    likeCount: integer("like_count"),
     // Source-scoped id of the parent comment when the provider exposes reply
     // threading; null when flat or unexposed.
     inReplyToCommentId: text("in_reply_to_comment_id"),
@@ -389,6 +428,34 @@ export const postComments = pgTable(
       table.commentId,
     ),
     index("post_comments_author_idx").on(table.authorAccountId),
+  ],
+);
+
+// Album items of carousel posts, in provider order. Written only from
+// provider-returned children (never inferred); a CAROUSEL post without rows
+// here means children were unavailable or not retrieved, never "single
+// item". Covered by the parent post's evidence; cascade deletes with it.
+export const postChildren = pgTable(
+  "post_children",
+  {
+    id: uuid(),
+    postDbId: text("post_db_id")
+      .notNull()
+      .references(() => posts.id, { onDelete: "cascade" }),
+    position: integer("position").notNull(),
+    childMediaId: text("child_media_id").notNull(),
+    mediaType: text("media_type"),
+    shortcode: text("shortcode"),
+    permalink: text("permalink"),
+    takenAt: timestamptz("taken_at"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("post_children_post_child_idx").on(
+      table.postDbId,
+      table.childMediaId,
+    ),
+    index("post_children_post_idx").on(table.postDbId),
   ],
 );
 

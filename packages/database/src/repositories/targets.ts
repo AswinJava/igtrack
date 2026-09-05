@@ -6,6 +6,7 @@ import {
   isLegalTargetTransition,
   type TargetStatus,
 } from "@igtrack/core";
+import { SCHEDULABLE_KINDS, type SchedulableScanKind } from "../jobs/schedule.js";
 import {
   evidence,
   followDeltas,
@@ -36,12 +37,25 @@ const updateTargetMetaSchema = z
     localName: z.string().max(200).nullable().optional(),
     notes: z.string().max(5000).nullable().optional(),
     tags: z.array(z.string().min(1).max(50)).max(20).optional(),
+    // Per-target scan cadence multiplier (0.25 = 4x as often … 8 = 8x rarer,
+    // NULL = deployment default 1x). Bounded so a typo cannot schedule a
+    // 1ms storm or a century gap.
+    scanCadenceMult: z.number().min(0.25).max(8).nullable().optional(),
+    // Explicit subset of schedulable scan kinds (NULL = all kinds). An empty
+    // array normalizes to NULL — "no scans at all" is PAUSED, not a set.
+    scanKinds: z
+      .array(z.enum(SCHEDULABLE_KINDS as unknown as [string, ...string[]]))
+      .max(SCHEDULABLE_KINDS.length)
+      .nullable()
+      .optional(),
   })
   .refine(
     (v) =>
       v.localName !== undefined ||
       v.notes !== undefined ||
-      v.tags !== undefined,
+      v.tags !== undefined ||
+      v.scanCadenceMult !== undefined ||
+      v.scanKinds !== undefined,
     { message: "no changes provided" },
   );
 
@@ -59,6 +73,8 @@ export interface UpdateTargetMetaInput {
   localName?: string | null;
   notes?: string | null;
   tags?: string[];
+  scanCadenceMult?: number | null;
+  scanKinds?: string[] | null;
 }
 
 export type TargetRecord = typeof targets.$inferSelect;
@@ -284,6 +300,17 @@ export async function updateOwnedTargetMeta(
         ...(parsed.localName !== undefined ? { localName: parsed.localName } : {}),
         ...(parsed.notes !== undefined ? { notes: parsed.notes } : {}),
         ...(parsed.tags !== undefined ? { tags: parsed.tags } : {}),
+        ...(parsed.scanCadenceMult !== undefined
+          ? { scanCadenceMult: parsed.scanCadenceMult }
+          : {}),
+        ...(parsed.scanKinds !== undefined
+          ? {
+              scanKinds:
+                parsed.scanKinds === null || parsed.scanKinds.length === 0
+                  ? null
+                  : [...new Set(parsed.scanKinds)],
+            }
+          : {}),
         updatedAt: new Date(),
       })
       .where(sql`${targets.id} = ${owned.id}`)

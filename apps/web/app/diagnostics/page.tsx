@@ -1,6 +1,7 @@
 ﻿import { getDiagnostics } from "@/lib/data";
 import { requirePageUser } from "@/lib/auth";
 import { getCapabilityDiagnostic } from "@/lib/capability-diagnostic";
+import { CAPABILITY_REGISTRY } from "@igtrack/core";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatDateTime, formatRelative } from "@/lib/format";
@@ -107,6 +108,84 @@ export default async function DiagnosticsPage() {
               </ul>
             </div>
           )}
+        </CardContent>
+      </Card>
+
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle>How each capability works</CardTitle>
+          <CardDescription>
+            Developer reference: provider method → persistence → UI for every product capability,
+            with the exact reason when something is unavailable and what would unlock it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2 text-xs">
+          {CAPABILITY_REGISTRY.map((entry) => {
+            const flags =
+              caps.capabilities === null
+                ? null
+                : entry.providerMethods.map((m) => caps.capabilities?.[m] ?? false);
+            const state =
+              entry.providerMethods.length === 0
+                ? ("STRUCTURAL" as const)
+                : flags === null
+                  ? ("UNKNOWN" as const)
+                  : flags.every(Boolean)
+                    ? ("AVAILABLE" as const)
+                    : flags.some(Boolean)
+                      ? ("PARTIAL" as const)
+                      : ("UNAVAILABLE" as const);
+            return (
+              <details key={entry.id} className="rounded-lg border border-zinc-800 px-3 py-2">
+                <summary className="flex cursor-pointer flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium text-zinc-200">{entry.label}</span>
+                  <Badge
+                    tone={
+                      state === "AVAILABLE"
+                        ? "success"
+                        : state === "PARTIAL"
+                          ? "warning"
+                          : "muted"
+                    }
+                  >
+                    {state === "STRUCTURAL" ? "UNAVAILABLE" : state}
+                  </Badge>
+                </summary>
+                <div className="mt-2 space-y-1.5 text-zinc-400">
+                  <p>{entry.howItWorks}</p>
+                  <p>
+                    <span className="font-medium text-zinc-300">Provider: </span>
+                    {entry.providerMethods.length > 0 ? (
+                      <span className="font-mono">{entry.providerMethods.join(", ")}</span>
+                    ) : (
+                      "no provider method exists"
+                    )}{" "}
+                    <span className="text-zinc-500">· {entry.permissions}</span>
+                  </p>
+                  {entry.persistence.length > 0 && (
+                    <p>
+                      <span className="font-medium text-zinc-300">Stored in: </span>
+                      <span className="font-mono">{entry.persistence.join(", ")}</span>
+                    </p>
+                  )}
+                  {entry.ui.length > 0 && <p><span className="font-medium text-zinc-300">Shown in: </span>{entry.ui.join(" · ")}</p>}
+                  {entry.whyUnavailable !== null && (
+                    <p className="rounded bg-amber-500/10 px-2 py-1.5 text-amber-200/90">
+                      Unavailable because: {entry.whyUnavailable}
+                    </p>
+                  )}
+                  {entry.unlock !== null && (
+                    <p className="text-zinc-500">To unlock: {entry.unlock}</p>
+                  )}
+                  <p className="text-zinc-500">
+                    <span className="font-medium text-zinc-300">Live verification: </span>
+                    {entry.liveState === "LIVE_VERIFIED" ? "verified against the real provider" : entry.liveState === "NOT_VERIFIED" ? "not yet verified live" : "absent by provider design (documented)"}
+                    {` — ${entry.liveEvidence}`}
+                  </p>
+                </div>
+              </details>
+            );
+          })}
         </CardContent>
       </Card>
 

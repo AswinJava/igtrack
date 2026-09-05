@@ -35,7 +35,7 @@ describe("capability self-diagnostic", () => {
     expect(diag.graph.configured).toBe(false);
     expect(diag.providerError).toBeNull();
     expect(diag.capabilities).not.toBeNull();
-    expect(Object.keys(diag.capabilities ?? {})).toHaveLength(7);
+    expect(Object.keys(diag.capabilities ?? {})).toHaveLength(8);
   });
 
   it("surfaces scheduler and worker bounds", async () => {

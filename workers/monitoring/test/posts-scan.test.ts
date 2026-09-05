@@ -10,6 +10,7 @@ import {
   type InstagramProvider,
   type NormalizedComment,
   type NormalizedPost,
+  type NormalizedPostChild,
 } from "@igtrack/core";
 import {
   claimJob,
@@ -17,6 +18,7 @@ import {
   createTarget,
   enqueueJob,
   getSourceHealth,
+  listChildrenForPost,
   listCommentsForPostWithAccount,
   listPosts,
   posts as postsTable,
@@ -67,6 +69,8 @@ function stubSource(config: {
   commentsStatus?: CapabilityStatus;
   postsCap?: boolean;
   commentsCap?: boolean;
+  childrenCap?: boolean;
+  childrenByPost?: Record<string, { children?: NormalizedPostChild[]; unavailable?: boolean; error?: boolean }>;
 } = {}): ExecutionSource {
   const sourceId = "stub:posts";
   const sourceRef = { sourceId, kind: SourceKind.FIXTURE };
@@ -80,6 +84,7 @@ function stubSource(config: {
       getFollowing: true,
       getPublicPosts: config.postsCap ?? true,
       getPublicComments: config.commentsCap ?? true,
+      getPostChildren: config.childrenCap ?? false,
     }),
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
@@ -123,6 +128,27 @@ function stubSource(config: {
         observedAt: OBSERVED_AT,
         source: sourceRef,
         confidence: Confidence.HIGH,
+      });
+    },
+    getPostChildren: async (
+      post: NormalizedPost,
+    ): Promise<CapabilityResult<NormalizedPostChild[]>> => {
+      const { available, unavailable } = await import("@igtrack/core");
+      const entry = config.childrenByPost?.[post.postId];
+      if (entry?.unavailable === true) {
+        return unavailable({ observedAt: OBSERVED_AT, source: sourceRef }, "No child source.");
+      }
+      if (entry?.error === true) {
+        const { errored, CapabilityErrorKind } = await import("@igtrack/core");
+        return errored(
+          { observedAt: OBSERVED_AT, source: sourceRef },
+          { kind: CapabilityErrorKind.PROVIDER_ERROR, message: "children boom", retryable: true },
+        );
+      }
+      return available(entry?.children ?? [], {
+        observedAt: OBSERVED_AT,
+        source: sourceRef,
+        confidence: Confidence.MEDIUM,
       });
     },
   };
@@ -268,5 +294,114 @@ describe.runIf(dbAvailable)("worker POSTS_SCAN", () => {
     const rows = await listPosts(handle.db, targetId);
     expect(rows).toHaveLength(1);
     expect(await listCommentsForPostWithAccount(handle.db, rows[0]!.id)).toHaveLength(1);
+  });
+
+  function carouselPost(postId: string): NormalizedPost {
+    return {
+      ...postStub(postId),
+      mediaType: "CAROUSEL",
+      mediaProductType: "FEED",
+    };
+  }
+
+  function albumChildren(): NormalizedPostChild[] {
+    return [
+      {
+        childId: "album-c1",
+        mediaType: "IMAGE",
+        shortcode: "Cc001",
+        permalink: "https://www.instagram.com/p/Cc001/",
+        takenAt: OBSERVED_AT,
+      },
+      { childId: "album-c2", mediaType: "VIDEO" },
+    ];
+  }
+
+  it("carousel posts persist provider-returned children in order (P9)", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const src = stubSource({
+      posts: [carouselPost("album-1")],
+      childrenCap: true,
+      childrenByPost: { "album-1": { children: albumChildren() } },
+    });
+    expect(await runPostScan(handle.db, job, src)).toBe("succeeded");
+    const rows = await listPosts(handle.db, targetId);
+    expect(rows).toHaveLength(1);
+    const children = await listChildrenForPost(handle.db, rows[0]!.id);
+    expect(children.map((c) => c.childMediaId)).toEqual(["album-c1", "album-c2"]);
+    expect(children.map((c) => c.position)).toEqual([1, 2]);
+    expect(children[0]?.mediaType).toBe("IMAGE");
+    // Raw DB rows carry null for absent nullable columns (drizzle read
+    // convention, same as listPosts): sparse child, nothing fabricated.
+    expect(children[1]?.shortcode).toBeNull();
+    expect(children[1]?.permalink).toBeNull();
+  });
+
+  it("non-carousel posts never trigger a children fetch (P10)", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    let calls = 0;
+    const src = stubSource({ posts: [postStub("plain-1")], childrenCap: true });
+    const counting: ExecutionSource = {
+      ...src,
+      provider: {
+        ...src.provider,
+        getPostChildren: async (...args: Parameters<InstagramProvider["getPostChildren"]>) => {
+          calls += 1;
+          return src.provider.getPostChildren(...args);
+        },
+      },
+    };
+    expect(await runPostScan(handle.db, job, counting)).toBe("succeeded");
+    expect(calls).toBe(0);
+    const rows = await listPosts(handle.db, targetId);
+    expect(await listChildrenForPost(handle.db, rows[0]!.id)).toHaveLength(0);
+  });
+
+  it("unavailable children keep the post and mark the scan partial (P11)", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const src = stubSource({
+      posts: [carouselPost("album-2")],
+      childrenCap: true,
+      childrenByPost: { "album-2": { unavailable: true } },
+    });
+    expect(await runPostScan(handle.db, job, src)).toBe("succeeded-partial");
+    const rows = await listPosts(handle.db, targetId);
+    expect(rows).toHaveLength(1);
+    expect(await listChildrenForPost(handle.db, rows[0]!.id)).toHaveLength(0);
+  });
+
+  it("erroring children degrade to partial without failing the scan (P12)", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const src = stubSource({
+      posts: [carouselPost("album-3")],
+      childrenCap: true,
+      childrenByPost: { "album-3": { error: true } },
+    });
+    expect(await runPostScan(handle.db, job, src)).toBe("succeeded-partial");
+    const rows = await listPosts(handle.db, targetId);
+    expect(rows).toHaveLength(1);
+    const health = await getSourceHealth(handle.db, "stub:posts");
+    expect(health.find((h) => h.capability === "getPostChildren")?.status).not.toBe("HEALTHY");
+  });
+
+  it("re-scans deduplicate children instead of duplicating rows (P13)", async () => {
+    const targetId = await makeTarget();
+    const src = stubSource({
+      posts: [carouselPost("album-4")],
+      childrenCap: true,
+      childrenByPost: { "album-4": { children: albumChildren() } },
+    });
+    const first = await makeJob(targetId);
+    expect(await runPostScan(handle.db, first, src)).toBe("succeeded");
+    await completeJob(handle.db, first.id, "worker-posts");
+    const second = await makeJob(targetId);
+    expect(await runPostScan(handle.db, second, src)).toBe("succeeded");
+    const rows = await listPosts(handle.db, targetId);
+    expect(rows).toHaveLength(1);
+    expect(await listChildrenForPost(handle.db, rows[0]!.id)).toHaveLength(2);
   });
 });

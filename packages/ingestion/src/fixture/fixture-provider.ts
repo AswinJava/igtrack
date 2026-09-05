@@ -17,6 +17,7 @@ import {
   type NormalizedComment,
   type NormalizedFollowPage,
   type NormalizedPost,
+  type NormalizedPostChild,
   type NormalizedProfile,
   type NormalizedStory,
   type ProviderCapabilities,
@@ -130,6 +131,10 @@ export class FixtureProvider implements InstagramProvider {
       [CapabilityName.GET_FOLLOWING]: true,
       [CapabilityName.GET_PUBLIC_POSTS]: true,
       [CapabilityName.GET_PUBLIC_COMMENTS]: true,
+      // No child-media source ships in the v1 fixture set: honest
+      // UNAVAILABLE from getPostChildren, never an empty album masquerading
+      // as observed structure.
+      [CapabilityName.GET_POST_CHILDREN]: false,
     };
   }
 
@@ -344,6 +349,15 @@ export class FixtureProvider implements InstagramProvider {
     } catch (err) {
       return toProviderError(meta, err);
     }
+  }
+
+  async getPostChildren(
+    post: NormalizedPost,
+  ): Promise<CapabilityResult<NormalizedPostChild[]>> {
+    return unavailable(
+      this.meta(),
+      `No child-media source for post ${post.postId} in this fixture set`,
+    );
   }
 
   private async getFollowPage(

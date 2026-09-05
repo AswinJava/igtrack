@@ -60,6 +60,7 @@ export async function upsertAccount(
         // Presence wins; absence never erodes a known fact.
         ...(input.isPrivate !== undefined ? { isPrivate: input.isPrivate } : {}),
         ...(input.isVerified !== undefined ? { isVerified: input.isVerified } : {}),
+        ...(input.accountType !== undefined ? { accountType: input.accountType } : {}),
         ...(input.profilePicUrl !== undefined
           ? { profilePicUrl: input.profilePicUrl }
           : {}),

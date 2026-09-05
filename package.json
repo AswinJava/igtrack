@@ -15,7 +15,8 @@
     "typecheck": "pnpm -r run typecheck",
     "lint": "pnpm -r run lint",
     "e2e": "playwright test",
-    "e2e:install": "playwright install chromium"
+    "e2e:install": "playwright install chromium",
+    "verify:graph": "pnpm exec tsx scripts/verify-graph-provider.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

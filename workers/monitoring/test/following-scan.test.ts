@@ -63,6 +63,7 @@ function paginatedFollowingSource(pages: StubPage[]): ExecutionSource {
       getFollowing: true,
       getPublicPosts: true,
       getPublicComments: true,
+      getPostChildren: false,
     }),
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
@@ -112,6 +113,9 @@ function paginatedFollowingSource(pages: StubPage[]): ExecutionSource {
     },
     getPublicComments: async () => {
       throw new Error("stub: getPublicComments not wired");
+    },
+    getPostChildren: async () => {
+      throw new Error("stub: getPostChildren not wired");
     },
   };
   return {

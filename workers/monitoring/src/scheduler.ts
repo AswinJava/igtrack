@@ -1,16 +1,24 @@
 import {
   countActiveTargets,
+  effectiveIntervalMs,
   enqueueScheduledScan,
-  listActiveTargetIds,
+  kindsForTarget,
+  listActiveTargetPrefs,
   recordSchedulerTickFailure,
   recordSchedulerTickStart,
   recordSchedulerTickSuccess,
   resolveScanIntervals,
   schedulingWindowStart,
+  staggerMs,
   SCHEDULABLE_KINDS,
   type SchedulableScanKind,
   type ScanIntervalConfig,
 } from "@igtrack/database";
+
+// Re-exported for compatibility: the canonical implementation lives in
+// @igtrack/database (schedule.ts) so the web layer can forecast the
+// identical schedule for "next scan" display.
+export { staggerMs };
 
 // Scheduler = orchestration only. It decides WHICH scans are due and enqueues
 // them; it never executes provider work and contains no provider logic.
@@ -40,21 +48,6 @@ function resolveBatchLimit(raw: string | undefined): number {
 
 export function schedulerEnabled(): boolean {
   return process.env.IGTRACK_SCHEDULER_ENABLED !== "false";
-}
-
-// Deterministic per-target stagger: without it every target in a tick shares
-// one windowStart AND one availableAt, so the whole fleet becomes claimable
-// in the same instant (thundering herd to the provider). Spreading each
-// target's availability across its window by a stable hash of its id keeps
-// single-tick bursts bounded while remaining fully deterministic and
-// observable via the job's available_at.
-export function staggerMs(targetId: string, intervalMs: number): number {
-  let hash = 2166136261;
-  for (let i = 0; i < targetId.length; i += 1) {
-    hash ^= targetId.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return Math.abs(hash) % intervalMs;
 }
 
 export function schedulerTickIntervalMs(): number {
@@ -91,17 +84,24 @@ export async function runSchedulerTick(
     const ROTATION_GRANULARITY_MS = 60_000;
     const rotationKey = Math.floor(now.getTime() / ROTATION_GRANULARITY_MS);
     const offset = (rotationKey % pageCount) * batchLimit;
-    const targetIds = await listActiveTargetIds(db, batchLimit, offset);
-    result.targetsConsidered = targetIds.length;
+    const prefs = await listActiveTargetPrefs(db, batchLimit, offset);
+    result.targetsConsidered = prefs.length;
 
-    for (const kind of SCHEDULABLE_KINDS) {
-      const windowStart = schedulingWindowStart(now.getTime(), intervals[kind]);
-      for (const targetId of targetIds) {
+    for (const target of prefs) {
+      // Per-target cadence: the window is computed against this target's
+      // effective interval, so a 2x target lands in half as many windows
+      // while a 0.5x target lands in twice as many. Kinds outside the
+      // target's enabled set are never enqueued here (manual sync can still
+      // run them explicitly).
+      const kinds = kindsForTarget(target.scanKinds);
+      for (const kind of kinds) {
+        const interval = effectiveIntervalMs(intervals[kind], target.scanCadenceMult);
+        const windowStart = schedulingWindowStart(now.getTime(), interval);
         const { enqueued } = await enqueueScheduledScan(db, {
           kind,
-          targetId,
+          targetId: target.id,
           windowStart,
-          availableAt: new Date(windowStart.getTime() + staggerMs(targetId, intervals[kind])),
+          availableAt: new Date(windowStart.getTime() + staggerMs(target.id, interval)),
         });
         if (enqueued) {
           result.enqueued += 1;

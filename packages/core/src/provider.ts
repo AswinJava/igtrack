@@ -4,6 +4,7 @@ import type {
   NormalizedComment,
   NormalizedFollowPage,
   NormalizedPost,
+  NormalizedPostChild,
   NormalizedProfile,
   NormalizedStory,
 } from "./models.js";
@@ -16,6 +17,7 @@ export const CapabilityName = {
   GET_FOLLOWING: "getFollowing",
   GET_PUBLIC_POSTS: "getPublicPosts",
   GET_PUBLIC_COMMENTS: "getPublicComments",
+  GET_POST_CHILDREN: "getPostChildren",
 } as const;
 
 export type CapabilityName =
@@ -59,4 +61,10 @@ export interface InstagramProvider {
     post: NormalizedPost,
     cursor?: Cursor,
   ): Promise<CapabilityResult<NormalizedComment[]>>;
+  /**
+   * Album children for one post. Called only for provider-declared CAROUSEL
+   * posts; providers without a child source honestly report UNAVAILABLE.
+   * No pagination: albums are bounded single responses.
+   */
+  getPostChildren(post: NormalizedPost): Promise<CapabilityResult<NormalizedPostChild[]>>;
 }

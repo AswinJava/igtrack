@@ -37,6 +37,7 @@ describe.runIf(available)("schema & migrations", () => {
       "story_mentions",
       "posts",
       "post_comments",
+      "post_children",
       "follow_snapshots",
       "follow_snapshot_members",
       "follow_deltas",
@@ -55,7 +56,7 @@ describe.runIf(available)("schema & migrations", () => {
       SELECT tgname AS name FROM pg_trigger
       WHERE tgname LIKE '%_no_update' ORDER BY tgname
     `;
-    expect(rows.length).toBe(11);
+    expect(rows.length).toBe(12);
   });
 
   it("rejects updates to append-only profile_snapshots", async () => {

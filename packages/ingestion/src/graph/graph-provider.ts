@@ -16,6 +16,7 @@ import {
   type NormalizedComment,
   type NormalizedFollowPage,
   type NormalizedPost,
+  type NormalizedPostChild,
   type NormalizedProfile,
   type NormalizedStory,
   type ProviderCapabilities,
@@ -28,6 +29,19 @@ export interface GraphProviderConfig {
   username: string;
   apiVersion?: string;
 }
+
+// Documented request shapes, exported so the field-coverage audit
+// (field-coverage.ts) can pin them without parsing source. Every name here
+// must exist in the Meta IG reference for this login type — an unknown field
+// fails the whole call, so additions need docs evidence, not guesses.
+export const GRAPH_PROFILE_FIELDS =
+  "id,username,name,biography,profile_picture_url,followers_count,follows_count,media_count,website";
+export const GRAPH_MEDIA_FIELDS =
+  "id,caption,timestamp,like_count,comments_count,permalink,shortcode,media_type,media_product_type";
+export const GRAPH_CHILD_FIELDS = "id,media_type,permalink,shortcode,timestamp";
+export const GRAPH_STORY_FIELDS = "id,timestamp,media_type,caption";
+export const GRAPH_COMMENT_FIELDS =
+  "id,text,username,timestamp,parent_id,like_count,from{id,username},replies{id,text,username,timestamp,parent_id,like_count,from{id,username}}";
 
 // Authorized Graph API provider: talks ONLY to Meta's official Instagram
 // Graph API, and ONLY about the owned Business/Creator account whose token
@@ -86,6 +100,19 @@ export function shortcodeFromPermalink(permalink: string | undefined): string | 
   return match?.[1];
 }
 
+/**
+ * Provider shortcode when the response carries one, else the permalink
+ * parse. Provider truth wins; the parse is a fallback, never a guess from
+ * any other signal.
+ */
+export function shortcodeFor(
+  shortcode: string | undefined,
+  permalink: string | undefined,
+): string | undefined {
+  if (typeof shortcode === "string" && shortcode.length > 0) return shortcode;
+  return shortcodeFromPermalink(permalink);
+}
+
 export class GraphProvider implements InstagramProvider {
   readonly sourceId = "graph:v1";
 
@@ -110,6 +137,7 @@ export class GraphProvider implements InstagramProvider {
       [CapabilityName.GET_FOLLOWING]: false,
       [CapabilityName.GET_PUBLIC_POSTS]: true,
       [CapabilityName.GET_PUBLIC_COMMENTS]: true,
+      [CapabilityName.GET_POST_CHILDREN]: true,
     };
   }
 
@@ -184,8 +212,13 @@ export class GraphProvider implements InstagramProvider {
         followers_count?: number;
         follows_count?: number;
         media_count?: number;
+        // Documented public IG User field (Meta IG User reference). The only
+        // external-link slot the provider exposes — mapped to externalUrl.
+        // No account_type / is_verified / category field exists on the node,
+        // so those stay absent rather than fabricated.
+        website?: string;
       }>(`/${this.igUserId}`, {
-        fields: "id,username,name,biography,profile_picture_url,followers_count,follows_count,media_count",
+        fields: GRAPH_PROFILE_FIELDS,
       });
       return available(
         {
@@ -201,6 +234,7 @@ export class GraphProvider implements InstagramProvider {
           ...(data.followers_count !== undefined ? { followerCount: data.followers_count } : {}),
           ...(data.follows_count !== undefined ? { followingCount: data.follows_count } : {}),
           ...(data.media_count !== undefined ? { postCount: data.media_count } : {}),
+          ...(data.website !== undefined ? { externalUrl: data.website } : {}),
           meta: {
             category: ObservationCategory.OBSERVED,
             confidence: Confidence.HIGH,
@@ -218,12 +252,15 @@ export class GraphProvider implements InstagramProvider {
     const meta = this.meta(account);
     try {
       const data = await this.get<{
-        data?: Array<{ id: string; timestamp?: string; media_type?: string }>;
-      }>(`/${this.igUserId}/stories`, { fields: "id,timestamp,media_type" });
+        data?: Array<{ id: string; timestamp?: string; media_type?: string; caption?: string }>;
+      }>(`/${this.igUserId}/stories`, { fields: GRAPH_STORY_FIELDS });
       const stories: NormalizedStory[] = (data.data ?? []).map((s) => ({
         storyId: s.id,
         mediaType: mapGraphMediaType(s.media_type),
         takenAt: s.timestamp ?? meta.observedAt,
+        // The provider returns at most one caption per story (documented
+        // limitation); absent means none exposed, never empty-faked.
+        ...(s.caption !== undefined ? { caption: s.caption } : {}),
         hasLink: false,
         stickerKinds: [],
         mentions: [],
@@ -278,6 +315,10 @@ export class GraphProvider implements InstagramProvider {
           like_count?: number;
           comments_count?: number;
           permalink?: string;
+          // Documented public IG Media field: provider truth for the
+          // shortcode, preferred over parsing the permalink (kept as
+          // fallback for responses that omit it).
+          shortcode?: string;
           media_type?: string;
           media_product_type?: string;
         }>;
@@ -285,7 +326,7 @@ export class GraphProvider implements InstagramProvider {
       }>(
         `/${this.igUserId}/media`,
         {
-          fields: "id,caption,timestamp,like_count,comments_count,permalink,media_type,media_product_type",
+          fields: GRAPH_MEDIA_FIELDS,
           limit: "25",
           ...(cursor !== undefined ? { after: cursor.value } : {}),
         },
@@ -293,8 +334,8 @@ export class GraphProvider implements InstagramProvider {
       const observedAt = meta.observedAt;
       const posts: NormalizedPost[] = (data.data ?? []).map((p) => ({
         postId: p.id,
-        ...(shortcodeFromPermalink(p.permalink) !== undefined
-          ? { shortcode: shortcodeFromPermalink(p.permalink) as string }
+        ...(shortcodeFor(p.shortcode, p.permalink) !== undefined
+          ? { shortcode: shortcodeFor(p.shortcode, p.permalink) as string }
           : {}),
         // Permalink kept verbatim alongside the derived shortcode: the URL
         // is provider data, the shortcode a parse of it. UI guards the
@@ -339,33 +380,30 @@ export class GraphProvider implements InstagramProvider {
     const meta = this.meta();
     try {
       const data = await this.get<{
-        data?: Array<{
-          id: string;
-          text?: string;
-          username?: string;
-          timestamp?: string;
-        }>;
+        data?: GraphRawComment[];
         paging?: { cursors?: { after?: string } };
       }>(
         `/${post.postId}/comments`,
         {
-          fields: "id,text,username,timestamp",
+          // parent_id + replies expansion are documented IG Comment reads:
+          // the listing edge returns top-level comments only, so threading
+          // arrives via the replies field (one level, same call). like_count
+          // is provider metadata (omitted when the owner hides counts);
+          // from carries the author IGSID when the token may see it.
+          fields: GRAPH_COMMENT_FIELDS,
           ...(cursor !== undefined ? { after: cursor.value } : {}),
         },
       );
       const observedAt = meta.observedAt;
-      const comments: NormalizedComment[] = (data.data ?? []).map((c) => ({
-        commentId: c.id,
-        postId: post.postId,
-        author: { username: c.username ?? "unknown" },
-        text: c.text ?? "",
-        createdAt: c.timestamp ?? observedAt,
-        meta: {
-          category: ObservationCategory.OBSERVED,
-          confidence: Confidence.MEDIUM,
-          observedAt,
-        },
-      }));
+      const comments: NormalizedComment[] = [];
+      for (const c of data.data ?? []) {
+        comments.push(mapGraphComment(c, post.postId, c.parent_id, observedAt));
+        for (const r of nestedReplies(c)) {
+          // The enclosing edge is the reply's parent: authoritative even
+          // when the nested parent_id is absent.
+          comments.push(mapGraphComment(r, post.postId, c.id, observedAt));
+        }
+      }
       const after = data.paging?.cursors?.after;
       if (after === undefined) {
         return available(comments, { ...meta, confidence: Confidence.MEDIUM });
@@ -385,6 +423,97 @@ export class GraphProvider implements InstagramProvider {
       return providerFailure(meta, err);
     }
   }
+
+  async getPostChildren(
+    post: NormalizedPost,
+  ): Promise<CapabilityResult<NormalizedPostChild[]>> {
+    const meta = this.meta();
+    try {
+      // Dedicated edge per album post (never folded into the /media listing):
+      // a failure here must not endanger the already-persisted parent post.
+      // Only documented album-child fields are requested; media_url is
+      // deliberately excluded (expiring CDN URLs with no archival policy).
+      const data = await this.get<{
+        data?: Array<{
+          id: string;
+          media_type?: string;
+          permalink?: string;
+          shortcode?: string;
+          timestamp?: string;
+        }>;
+      }>(`/${post.postId}/children`, {
+        fields: GRAPH_CHILD_FIELDS,
+      });
+      const children: NormalizedPostChild[] = (data.data ?? []).map((c) => ({
+        childId: c.id,
+        ...(c.media_type !== undefined ? { mediaType: mapGraphMediaType(c.media_type) } : {}),
+        ...(shortcodeFor(c.shortcode, c.permalink) !== undefined
+          ? { shortcode: shortcodeFor(c.shortcode, c.permalink) as string }
+          : {}),
+        ...(c.permalink !== undefined ? { permalink: c.permalink } : {}),
+        ...(c.timestamp !== undefined ? { takenAt: c.timestamp } : {}),
+      }));
+      return available(children, { ...meta, confidence: Confidence.MEDIUM });
+    } catch (err) {
+      if (err instanceof GraphFailure && err.unavailable) {
+        return unavailable(meta, err.message);
+      }
+      return providerFailure(meta, err);
+    }
+  }
+}
+
+interface GraphCommentAuthor {
+  id?: string;
+  username?: string;
+}
+
+interface GraphRawComment {
+  id: string;
+  text?: string;
+  username?: string;
+  timestamp?: string;
+  parent_id?: string;
+  like_count?: number;
+  from?: GraphCommentAuthor;
+  replies?: { data?: GraphRawComment[] } | GraphRawComment[];
+}
+
+/**
+ * Field-expansion replies arrive as {data:[...]}; tolerate a bare array so
+ * a shape change degrades to flat comments instead of throwing.
+ */
+function nestedReplies(raw: GraphRawComment): GraphRawComment[] {
+  const replies = raw.replies;
+  if (Array.isArray(replies)) return replies;
+  if (replies !== undefined && Array.isArray(replies.data)) return replies.data;
+  return [];
+}
+
+function mapGraphComment(
+  raw: GraphRawComment,
+  postId: string,
+  parentId: string | undefined,
+  observedAt: string,
+): NormalizedComment {
+  return {
+    commentId: raw.id,
+    postId,
+    author: {
+      username: raw.username ?? raw.from?.username ?? "unknown",
+      ...(raw.from?.id !== undefined ? { igId: raw.from.id } : {}),
+    },
+    text: raw.text ?? "",
+    createdAt: raw.timestamp ?? observedAt,
+    ...(parentId !== undefined ? { inReplyToCommentId: parentId } : {}),
+    // Omitted by the provider when counts are hidden — never zero-filled.
+    ...(typeof raw.like_count === "number" ? { likeCount: raw.like_count } : {}),
+    meta: {
+      category: ObservationCategory.OBSERVED,
+      confidence: Confidence.MEDIUM,
+      observedAt,
+    },
+  };
 }
 
 class GraphFailure extends Error {

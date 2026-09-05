@@ -15,6 +15,10 @@ const TYPE_LABELS: Record<string, string> = {
   NEW_FOLLOWING: "Newly observed following",
   LOST_FOLLOWING: "No longer observed following",
   STORY_POSTED: "Story posted",
+  STORY_EXPIRED: "Story expired",
+  POST_PUBLISHED: "Post published",
+  COMMENT_POSTED: "Comment posted",
+  MENTION_OBSERVED: "Mention observed",
 };
 
 export default async function ActivityPage({

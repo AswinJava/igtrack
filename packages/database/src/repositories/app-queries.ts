@@ -7,8 +7,8 @@ import {
   listProfileSnapshots,
   listProfileChanges,
 } from "./observations.js";
-import { listStories, listMentionsForStoryWithAccount } from "./stories.js";
-import { listPosts, listCommentsForPostWithAccount } from "./posts.js";
+import { listStories, listMentionsForStoryWithAccount, sightingSummariesForAccount } from "./stories.js";
+import { listPosts, listCommentsForPostWithAccount, listChildrenForPost } from "./posts.js";
 import {
   latestFollowSnapshot,
   listMembersForSnapshot,
@@ -214,6 +214,10 @@ export const ACTIVITY_TYPES = [
   "NEW_FOLLOWING",
   "LOST_FOLLOWING",
   "STORY_POSTED",
+  "STORY_EXPIRED",
+  "POST_PUBLISHED",
+  "COMMENT_POSTED",
+  "MENTION_OBSERVED",
 ] as const;
 
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
@@ -290,6 +294,55 @@ export async function getUserActivityFeed(
      WHERE EXISTS (SELECT 1 FROM targets t
        WHERE t.user_id = ${userId} AND t.ig_account_id = s.ig_account_id)
      ORDER BY s.taken_at DESC LIMIT ${limit})
+    UNION ALL
+    (SELECT s.id::text AS id, 'STORY_EXPIRED'::text AS type,
+            ia.username || ' — story expired' AS summary,
+            s.expires_at AS occurred_at, ia.username,
+            'DERIVED'::text AS category, s.confidence::text AS confidence,
+            s.evidence_id AS evidence_id
+     FROM stories s
+     JOIN ig_accounts ia ON ia.id = s.ig_account_id
+     WHERE s.expires_at IS NOT NULL AND s.expires_at < now()
+       AND EXISTS (SELECT 1 FROM targets t
+       WHERE t.user_id = ${userId} AND t.ig_account_id = s.ig_account_id)
+     ORDER BY s.expires_at DESC LIMIT ${limit})
+    UNION ALL
+    (SELECT p.id::text AS id, 'POST_PUBLISHED'::text AS type,
+            ia.username || ' — post observed' AS summary,
+            p.taken_at AS occurred_at, ia.username,
+            'OBSERVED'::text AS category, p.confidence::text AS confidence,
+            p.evidence_id AS evidence_id
+     FROM posts p
+     JOIN targets t ON t.id = p.target_id
+     JOIN ig_accounts ia ON ia.id = p.ig_account_id
+     WHERE t.user_id = ${userId}
+     ORDER BY p.taken_at DESC LIMIT ${limit})
+    UNION ALL
+    (SELECT pc.id::text AS id, 'COMMENT_POSTED'::text AS type,
+            author.username || ' — comment observed' AS summary,
+            pc.commented_at AS occurred_at, owner.username,
+            'OBSERVED'::text AS category, pc.confidence::text AS confidence,
+            pc.evidence_id AS evidence_id
+     FROM post_comments pc
+     JOIN posts p ON p.id = pc.post_db_id
+     JOIN targets t ON t.id = p.target_id
+     JOIN ig_accounts author ON author.id = pc.author_account_id
+     JOIN ig_accounts owner ON owner.id = p.ig_account_id
+     WHERE t.user_id = ${userId}
+     ORDER BY pc.commented_at DESC LIMIT ${limit})
+    UNION ALL
+    (SELECT sm.id::text AS id, 'MENTION_OBSERVED'::text AS type,
+            mentioned.username || ' — mentioned by ' || owner.username AS summary,
+            sm.observed_at AS occurred_at, owner.username,
+            'OBSERVED'::text AS category, sm.confidence::text AS confidence,
+            COALESCE(sm.evidence_id, s.evidence_id) AS evidence_id
+     FROM story_mentions sm
+     JOIN stories s ON s.id = sm.story_db_id
+     JOIN ig_accounts mentioned ON mentioned.id = sm.mentioned_account_id
+     JOIN ig_accounts owner ON owner.id = s.ig_account_id
+     WHERE EXISTS (SELECT 1 FROM targets t
+       WHERE t.user_id = ${userId} AND t.ig_account_id = s.ig_account_id)
+     ORDER BY sm.observed_at DESC LIMIT ${limit})
     ) AS feed
     ${types !== null || like !== null
       ? sql`WHERE ${sql.join(
@@ -378,8 +431,12 @@ export interface TargetDetailBundle {
   health: SourceHealthRecord[];
   stories: Awaited<ReturnType<typeof listStories>>;
   storyMentions: Array<{ storyId: string; mentions: Awaited<ReturnType<typeof listMentionsForStoryWithAccount>> }>;
+  // Per-story observation lifetimes (first/last seen, sighting count),
+  // keyed by stories.id. Absent keys mean a single observation so far.
+  storySightings: Record<string, { count: number; firstSeenAt: Date | null; lastSeenAt: Date | null }>;
   posts: Awaited<ReturnType<typeof listPosts>>;
   postComments: Array<{ postId: string; comments: Awaited<ReturnType<typeof listCommentsForPostWithAccount>> }>;
+  postChildren: Array<{ postId: string; children: Awaited<ReturnType<typeof listChildrenForPost>> }>;
   followFollowers: Awaited<ReturnType<typeof latestFollowSnapshot>>;
   followFollowing: Awaited<ReturnType<typeof latestFollowSnapshot>>;
   // Auditable member rosters for the latest snapshots (bounded at 50 each;
@@ -407,7 +464,7 @@ export async function getOwnedTargetDetail(
   const account = accountRows[0];
   if (account === undefined) return null;
 
-  const [snapshots, changes, health, storiesList, postsList, followFollowers, followFollowing, deltas, jobs] =
+  const [snapshots, changes, health, storiesList, postsList, followFollowers, followFollowing, deltas, jobs, sightings] =
     await Promise.all([
       listProfileSnapshots(db, account.id, { limit: 20 }).catch(() => []),
       listProfileChanges(db, account.id, { limit: 20 }).catch(() => []),
@@ -418,6 +475,7 @@ export async function getOwnedTargetDetail(
       latestFollowSnapshot(db, owned.id, "FOLLOWING").catch(() => null),
       listRecentDeltas(db, owned.id, { limit: 20 }).catch(() => []),
       listJobsForTarget(db, owned.id, 8).catch(() => []),
+      sightingSummariesForAccount(db, account.id).catch(() => ({})),
     ]);
 
   const storyMentions: TargetDetailBundle["storyMentions"] = [];
@@ -438,6 +496,15 @@ export async function getOwnedTargetDetail(
   );
   postComments.push(...commentResults);
 
+  const postChildren: TargetDetailBundle["postChildren"] = [];
+  const childrenResults = await Promise.all(
+    postsList.slice(0, 5).map(async (p) => ({
+      postId: p.postId,
+      children: await listChildrenForPost(db, p.id).catch(() => []),
+    })),
+  );
+  postChildren.push(...childrenResults);
+
   const [followerRosterRows, followingRosterRows] = await Promise.all([
     followFollowers !== null
       ? listMembersForSnapshot(db, followFollowers.id, 50).catch(() => [])
@@ -455,8 +522,10 @@ export async function getOwnedTargetDetail(
     health,
     stories: storiesList,
     storyMentions,
+    storySightings: sightings,
     posts: postsList,
     postComments,
+    postChildren,
     followFollowers,
     followFollowing,
     followFollowerRoster:
@@ -488,6 +557,18 @@ export interface RelationshipRank {
   score: number;
   signals: { mentions: number; deltas: number };
   confidence: string;
+  // Structural relationship state, derived from the latest COMPLETE-agnostic
+  // snapshots (membership is a fact about the latest observation, not a
+  // claim about exact follow times — see follow_deltas for event wording).
+  mutual: boolean;
+  currentlyObserved: boolean;
+  // First observation evidence: "delta" pins it to a change event,
+  // "snapshot" means present since the earliest snapshot on record (weaker).
+  firstSeenAt: string | null;
+  firstSeenBasis: "delta" | "snapshot" | null;
+  // Latest snapshot in which the account was a member; null when no longer
+  // observed (never fabricate a departure timestamp).
+  lastSeenAt: string | null;
 }
 
 export async function getRelationshipsForUser(
@@ -526,7 +607,52 @@ export async function getRelationshipsForUser(
     map.set(d.username, cur);
   }
 
-  return [...map.entries()]
+  // Stable members: accounts present in BOTH the earliest and latest
+  // snapshot of a direction have an observed relationship duration even with
+  // zero signal events (no mentions, no deltas — nothing ever changed). They
+  // rank last with honest weak provenance instead of being invisible.
+  // Bounded per direction; ranking stays signal-ordered.
+  const STABLE_MEMBER_CAP = 100;
+  const stableRows = await query<{ username: string }>(
+    db,
+    sql`(SELECT ia.username FROM follow_snapshot_members m
+         JOIN follow_snapshot_members m0 ON m0.ig_account_id = m.ig_account_id
+         JOIN ig_accounts ia ON ia.id = m.ig_account_id
+         WHERE m.snapshot_id IN (
+           SELECT id FROM follow_snapshots
+           WHERE target_id = ${owned.id} AND direction = 'FOLLOWERS'
+           ORDER BY taken_at DESC LIMIT 1)
+           AND m0.snapshot_id IN (
+           SELECT id FROM follow_snapshots
+           WHERE target_id = ${owned.id} AND direction = 'FOLLOWERS'
+           ORDER BY taken_at ASC LIMIT 1)
+           AND m.snapshot_id <> m0.snapshot_id
+         LIMIT ${STABLE_MEMBER_CAP})
+        UNION
+        (SELECT ia.username FROM follow_snapshot_members m
+         JOIN follow_snapshot_members m0 ON m0.ig_account_id = m.ig_account_id
+         JOIN ig_accounts ia ON ia.id = m.ig_account_id
+         WHERE m.snapshot_id IN (
+           SELECT id FROM follow_snapshots
+           WHERE target_id = ${owned.id} AND direction = 'FOLLOWING'
+           ORDER BY taken_at DESC LIMIT 1)
+           AND m0.snapshot_id IN (
+           SELECT id FROM follow_snapshots
+           WHERE target_id = ${owned.id} AND direction = 'FOLLOWING'
+           ORDER BY taken_at ASC LIMIT 1)
+           AND m.snapshot_id <> m0.snapshot_id
+         LIMIT ${STABLE_MEMBER_CAP})`,
+  ).catch(() => [] as Array<{ username: string }>);
+  for (const row of stableRows) {
+    if (!map.has(row.username)) {
+      map.set(row.username, { mentions: 0, deltas: 0 });
+    }
+  }
+
+  // Structural enrichment, bounded to ranked candidates with indexed EXISTS
+  // probes (no full-roster loads). Everything here describes snapshot
+  // membership — observed facts, never inferred follow/unfollow timestamps.
+  const ranked = [...map.entries()]
     .map(([username, v]) => ({
       username,
       score: v.mentions * 12 + v.deltas * 8,
@@ -535,6 +661,89 @@ export async function getRelationshipsForUser(
         v.mentions + v.deltas > 2 ? "MEDIUM" : v.mentions + v.deltas > 0 ? "LOW" : "UNKNOWN",
     }))
     .sort((a, b) => b.score - a.score);
+
+  const [latestFollowers, latestFollowing, earliestTaken, firstSeenRows] = await Promise.all([
+    latestFollowSnapshot(db, owned.id, "FOLLOWERS").catch(() => null),
+    latestFollowSnapshot(db, owned.id, "FOLLOWING").catch(() => null),
+    query<{ direction: string; earliest: Date | string }>(
+      db,
+      sql`SELECT direction::text AS direction, min(taken_at) AS earliest
+           FROM follow_snapshots WHERE target_id = ${owned.id} GROUP BY direction`,
+    ).catch(() => [] as Array<{ direction: string; earliest: Date | string }>),
+    ranked.length === 0
+      ? Promise.resolve([])
+      : query<{ username: string; first_seen: Date | string }>(
+          db,
+          sql`SELECT ia.username, min(fd.first_seen_at) AS first_seen
+               FROM follow_deltas fd
+               JOIN ig_accounts ia ON ia.id = fd.ig_account_id
+               WHERE fd.target_id = ${owned.id}
+                 AND ia.username IN (${sql.join(
+                   ranked.map((r) => sql`${r.username}`),
+                   sql`, `,
+                 )})
+               GROUP BY ia.username`,
+        ).catch(() => [] as Array<{ username: string; first_seen: Date | string }>),
+  ]);
+  const firstSeenByUser = new Map(
+    firstSeenRows.map((r) => [r.username, asDate(r.first_seen).toISOString()] as const),
+  );
+  const earliestByDirection = new Map(
+    earliestTaken.map((r) => [r.direction, asDate(r.earliest).toISOString()] as const),
+  );
+  const earliestOverall =
+    [...earliestByDirection.values()].sort()[0] ?? null;
+
+  async function isMember(
+    snapshotId: string | null,
+    username: string,
+  ): Promise<boolean> {
+    if (snapshotId === null) return false;
+    const rows = await query<{ one: number }>(
+      db,
+      sql`SELECT 1 AS one FROM follow_snapshot_members fsm
+           JOIN ig_accounts ia ON ia.id = fsm.ig_account_id
+           WHERE fsm.snapshot_id = ${snapshotId} AND ia.username = ${username}
+           LIMIT 1`,
+    ).catch(() => [] as Array<{ one: number }>);
+    return rows.length > 0;
+  }
+
+  const enriched = [];
+  for (const r of ranked) {
+    const [inFollowers, inFollowing] = await Promise.all([
+      isMember(latestFollowers?.id ?? null, r.username),
+      isMember(latestFollowing?.id ?? null, r.username),
+    ]);
+    const followerTaken =
+      latestFollowers !== null ? asDate(latestFollowers.takenAt).toISOString() : null;
+    const followingTaken =
+      latestFollowing !== null ? asDate(latestFollowing.takenAt).toISOString() : null;
+    const lastSeenAt = inFollowers
+      ? followerTaken
+      : inFollowing
+        ? followingTaken
+        : null;
+    const deltaFirst = firstSeenByUser.get(r.username) ?? null;
+    const observed = inFollowers || inFollowing;
+    enriched.push({
+      ...r,
+      mutual: inFollowers && inFollowing,
+      currentlyObserved: observed,
+      // Stable members (zero signals, present across snapshots) carry
+      // structural evidence: observed presence upgrades vacuous UNKNOWN to
+      // LOW, never higher — the ranking stays signal-ordered.
+      confidence:
+        r.confidence === "UNKNOWN" && observed ? "LOW" : r.confidence,
+      firstSeenAt: deltaFirst ?? earliestOverall,
+      firstSeenBasis: (deltaFirst !== null ? "delta" : earliestOverall !== null ? "snapshot" : null) as
+        | "delta"
+        | "snapshot"
+        | null,
+      lastSeenAt,
+    });
+  }
+  return enriched;
 }
 
 // ---------------------------------------------------------------------------

@@ -126,6 +126,50 @@ export async function enqueueScheduledScan(
   return { enqueued: Array.from(result).length > 0 };
 }
 
+// Deterministic per-target stagger: without it every target in a tick shares
+// one windowStart AND one availableAt, so the whole fleet becomes claimable
+// in the same instant (thundering herd to the provider). Spreading each
+// target's availability across its window by a stable hash of its id keeps
+// single-tick bursts bounded while remaining fully deterministic and
+// observable via the job's available_at. Lives here (not the worker) so the
+// web layer can forecast the identical schedule for "next scan" display.
+export function staggerMs(targetId: string, intervalMs: number): number {
+  let hash = 2166136261;
+  for (let i = 0; i < targetId.length; i += 1) {
+    hash ^= targetId.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash) % intervalMs;
+}
+
+export interface UpcomingScan {
+  kind: SchedulableScanKind;
+  intervalMs: number;
+  nextWindowStart: Date;
+  nextAvailableAt: Date;
+}
+
+/** Forecast per-kind upcoming scans for one target. Pure and deterministic:
+ * the same inputs the scheduler tick uses, so the UI shows exactly what the
+ * scheduler will do. Paused targets are the caller's concern (no jobs). */
+export function upcomingScansForTarget(
+  targetId: string,
+  prefs: { scanCadenceMult: number | null; scanKinds: string[] | null } | null,
+  nowMs: number,
+  intervals: ScanIntervalConfig,
+): UpcomingScan[] {
+  const mult = prefs?.scanCadenceMult ?? null;
+  return kindsForTarget(prefs?.scanKinds ?? null).map((kind) => {
+    const interval = effectiveIntervalMs(intervals[kind], mult);
+    const nextWindowStart = upcomingWindowStart(nowMs, interval);
+    return {
+      kind,
+      intervalMs: interval,
+      nextWindowStart,
+      nextAvailableAt: new Date(nextWindowStart.getTime() + staggerMs(targetId, interval)),
+    };
+  });
+}
 // Bounded consideration set for one scheduler tick (S10). The scheduler never
 // loads every target into memory; large fleets are handled across ticks.
 // `offset` supports fleet rotation (S11): consecutive ticks page through the
@@ -143,6 +187,68 @@ export async function listActiveTargetIds(
     LIMIT ${limit} OFFSET ${offset}
   `);
   return Array.from(rows as unknown as Array<{ id: string }>).map((row) => row.id);
+}
+
+export interface TargetScanPrefs {
+  id: string;
+  /** Effective cadence multiplier (>= 0.25); NULL/1 = deployment default. */
+  scanCadenceMult: number | null;
+  /** Explicit enabled scan kinds; NULL = all schedulable kinds. */
+  scanKinds: string[] | null;
+}
+
+function normalizeCadenceMult(raw: number | null): number {
+  if (raw === null || !Number.isFinite(raw)) return 1;
+  return Math.min(8, Math.max(0.25, raw));
+}
+
+/** Effective per-kind interval for one target: global base × target multiplier. */
+export function effectiveIntervalMs(
+  baseMs: number,
+  scanCadenceMult: number | null,
+): number {
+  return Math.max(1, Math.floor(baseMs * normalizeCadenceMult(scanCadenceMult)));
+}
+
+/** Schedulable kinds enabled for one target (unknown entries dropped). */
+export function kindsForTarget(scanKinds: string[] | null): SchedulableScanKind[] {
+  if (scanKinds === null) return [...SCHEDULABLE_KINDS];
+  const allowed = new Set<string>(SCHEDULABLE_KINDS);
+  return SCHEDULABLE_KINDS.filter((k) => scanKinds.includes(k) && allowed.has(k));
+}
+
+/** Next window start strictly after now for a per-target effective interval. */
+export function upcomingWindowStart(nowMs: number, intervalMs: number): Date {
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error("igtrack: scan interval must be a positive number");
+  }
+  return new Date((Math.floor(nowMs / intervalMs) + 1) * intervalMs);
+}
+
+export async function listActiveTargetPrefs(
+  db: Database,
+  limit: number,
+  offset = 0,
+): Promise<TargetScanPrefs[]> {
+  const rows = await db.execute(sql`
+    SELECT id::text AS id, scan_cadence_mult, scan_kinds
+    FROM targets
+    WHERE status = 'ACTIVE'
+    ORDER BY created_at ASC, id ASC
+    LIMIT ${limit} OFFSET ${offset}
+  `);
+  return Array.from(
+    rows as unknown as Array<{
+      id: string;
+      scan_cadence_mult: string | number | null;
+      scan_kinds: string[] | null;
+    }>,
+  ).map((row) => ({
+    id: row.id,
+    scanCadenceMult:
+      row.scan_cadence_mult === null ? null : Number(row.scan_cadence_mult),
+    scanKinds: row.scan_kinds,
+  }));
 }
 
 export async function countActiveTargets(db: Database): Promise<number> {

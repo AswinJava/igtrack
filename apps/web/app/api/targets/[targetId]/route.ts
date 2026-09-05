@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
+import { SCHEDULABLE_KINDS } from "@igtrack/database";
 import {
   getOwnedTargetDetail,
   updateOwnedTargetMeta,
@@ -17,6 +18,12 @@ const metaBody = z.object({
   localName: z.string().trim().max(200).nullable().optional(),
   notes: z.string().trim().max(5000).nullable().optional(),
   tags: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
+  scanCadenceMult: z.number().min(0.25).max(8).nullable().optional(),
+  scanKinds: z
+    .array(z.enum(SCHEDULABLE_KINDS as unknown as [string, ...string[]]))
+    .max(SCHEDULABLE_KINDS.length)
+    .nullable()
+    .optional(),
 });
 
 export async function GET(
@@ -65,13 +72,15 @@ export async function PATCH(
     if (!parsed.success) {
       return NextResponse.json({ error: { code: "VALIDATION_ERROR", message: "Invalid metadata payload", details: parsed.error.flatten().fieldErrors } }, { status: 400, headers: NO_STORE });
     }
-    const { localName, notes, tags } = parsed.data;
+    const { localName, notes, tags, scanCadenceMult, scanKinds } = parsed.data;
     const updated = await updateOwnedTargetMeta(getDatabase(), {
       userId: session.userId,
       targetId: raw,
       ...(localName !== undefined ? { localName } : {}),
       ...(notes !== undefined ? { notes } : {}),
       ...(tags !== undefined ? { tags } : {}),
+      ...(scanCadenceMult !== undefined ? { scanCadenceMult } : {}),
+      ...(scanKinds !== undefined ? { scanKinds } : {}),
     });
     return NextResponse.json({ target: updated satisfies object }, { headers: NO_STORE });
   } catch (err) {

@@ -64,9 +64,26 @@ export default async function RelationshipsPage({
                     <li key={r.username} className="flex items-center gap-4 rounded-xl border border-zinc-800 px-4 py-3">
                       <span className="font-mono text-sm text-zinc-500">#{idx + 1}</span>
                       <div className="flex-1">
-                        <p className="text-sm font-medium text-zinc-200">{r.username}</p>
+                        <p className="text-sm font-medium text-zinc-200">
+                          {r.username}
+                          {r.mutual && (
+                            <span className="ml-2 rounded-full bg-sky-500/10 px-2 py-0.5 text-[11px] font-medium text-sky-400" title="Present in both the latest follower and following snapshots">
+                              mutual
+                            </span>
+                          )}
+                        </p>
                         <p className="text-xs text-zinc-500">
                           {describeRelationshipSignals(r.signals)} · Heuristic score {r.score} · Confidence {r.confidence}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-zinc-600">
+                          {r.currentlyObserved
+                            ? `Currently observed${r.lastSeenAt ? ` · last seen ${r.lastSeenAt.slice(0, 10)}` : ""}`
+                            : "No longer observed"}
+                          {r.firstSeenAt
+                            ? r.firstSeenBasis === "delta"
+                              ? ` · first observed ${r.firstSeenAt.slice(0, 10)}`
+                              : ` · present since earliest snapshot ${r.firstSeenAt.slice(0, 10)}`
+                            : ""}
                         </p>
                       </div>
                       <Badge tone={band.tone}>

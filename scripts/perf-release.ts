@@ -56,6 +56,7 @@ function baseProvider(overrides: Partial<InstagramProvider>): InstagramProvider 
       getFollowing: true,
       getPublicPosts: true,
       getPublicComments: true,
+      getPostChildren: false,
     }),
     resolveAccount: notWired("resolveAccount"),
     getProfile: notWired("getProfile"),
@@ -64,6 +65,7 @@ function baseProvider(overrides: Partial<InstagramProvider>): InstagramProvider 
     getFollowing: notWired("getFollowing"),
     getPublicPosts: notWired("getPublicPosts"),
     getPublicComments: notWired("getPublicComments"),
+    getPostChildren: notWired("getPostChildren"),
     ...overrides,
   };
 }
@@ -160,7 +162,7 @@ async function main(): Promise<void> {
   const userId = userRows[0]!.id;
   const results: Record<string, unknown> = { scales: [] as unknown[] };
 
-  for (const n of [1, 10, 50, 100]) {
+  for (const n of [1, 10, 50, 100, 500, 1000]) {
     for (let i = 0; i < n; i += 1) {
       await createTarget(db, { userId, username: `perf_scale_${n}_${i}` });
     }

@@ -24,7 +24,9 @@ import {
   enqueueJob,
   evidence as evidenceTable,
   getSourceHealth,
+  getTarget,
   igAccounts,
+  sightingSummariesForAccount,
   stories as storiesTable,
   storyMentions,
   targets,
@@ -86,6 +88,7 @@ function storySource(config: StorySourceConfig = {}): ExecutionSource {
       getFollowing: true,
       getPublicPosts: true,
       getPublicComments: true,
+      getPostChildren: false,
     }),
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
@@ -134,6 +137,9 @@ function storySource(config: StorySourceConfig = {}): ExecutionSource {
     },
     getPublicComments: async () => {
       throw new Error("stub: getPublicComments not wired");
+    },
+    getPostChildren: async () => {
+      throw new Error("stub: getPostChildren not wired");
     },
   };
   return {
@@ -471,5 +477,28 @@ describe.runIf(dbAvailable)("worker STORY_SCAN", () => {
     expect(
       byStory.get("story-1003")?.find((m) => m.username === "ivy.cast")?.visibilityClass,
     ).toBe("METADATA_ONLY");
+  });
+
+  it("re-observed stories append sightings without duplicating story rows", async () => {
+    const targetId = await makeTarget();
+    const src = storySource({ stories: [storyFixture("story-sight", [])] });
+
+    const first = await makeJob(targetId);
+    expect(await runStoryScan(handle.db, first, src)).toBe("succeeded");
+    await completeJob(handle.db, first.id, "worker-story");
+    const second = await makeJob(targetId);
+    expect(await runStoryScan(handle.db, second, src)).toBe("succeeded");
+    await completeJob(handle.db, second.id, "worker-story");
+
+    const rows = await storyRows(targetId);
+    expect(rows.filter((r) => r.storyId === "story-sight")).toHaveLength(1);
+    const target = await getTarget(handle.db, targetId);
+    const summaries = await sightingSummariesForAccount(handle.db, target!.igAccountId);
+    const found = rows.find((r) => r.storyId === "story-sight")!;
+    const summary = summaries[found.id];
+    // Two scans observed the same story: one immutable row, two sightings.
+    expect(summary?.count).toBe(2);
+    expect(summary?.firstSeenAt).not.toBeNull();
+    expect(summary?.lastSeenAt).not.toBeNull();
   });
 });

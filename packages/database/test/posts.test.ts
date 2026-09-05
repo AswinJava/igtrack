@@ -4,12 +4,14 @@ import { Confidence, ObservationCategory, SourceKind } from "@igtrack/core";
 import {
   createTarget,
   enqueueJob,
+  listChildrenForPost,
   listCommentsForPostWithAccount,
   listPosts,
   loadStagedFollowScanMembers,
   monitoringJobs,
   recordCapabilityFailure,
   recordPost,
+  recordPostChildren,
   recordPostComment,
   recordProfileSnapshot,
   listProfileChanges,
@@ -154,6 +156,80 @@ describe.runIf(available)("posts & comments", () => {
       handle.sql.unsafe(`UPDATE post_comments SET body = 'tampered'`),
     ).rejects.toThrow(/append-only/);
   });
+
+  it("records comment like counts and resolves reply parents in one join", async () => {
+    const listed = await listPosts(handle.db, targetId);
+    const post1 = listed.find((p) => p.postId === "post-1")!;
+    const at = new Date(Date.UTC(2026, 7, 20, 11));
+    await recordPostComment(handle.db, {
+      postDbId: post1.id,
+      ...commentInput("c-2", at),
+      comment: {
+        ...commentInput("c-2", at).comment,
+        author: { username: "commenter_b" },
+        // Provider metadata: a real zero stays zero, absence stays null.
+        likeCount: 0,
+        inReplyToCommentId: "c-1",
+      },
+    });
+    await recordPostComment(handle.db, {
+      postDbId: post1.id,
+      ...commentInput("c-3", at),
+      comment: {
+        ...commentInput("c-3", at).comment,
+        author: { username: "commenter_c" },
+        likeCount: 12,
+      },
+    });
+
+    const comments = await listCommentsForPostWithAccount(handle.db, post1.id);
+    const byId = new Map(comments.map((c) => [c.commentId, c]));
+    // Absence (c-1) reads as null, never zero-filled.
+    expect(byId.get("c-1")?.likeCount).toBeNull();
+    expect(byId.get("c-2")?.likeCount).toBe(0);
+    expect(byId.get("c-3")?.likeCount).toBe(12);
+    expect(byId.get("c-2")?.inReplyToCommentId).toBe("c-1");
+    expect(byId.get("c-2")?.replyToUsername).toBe("commenter_a");
+    expect(byId.get("c-3")?.replyToUsername).toBeNull();
+  });
+
+  it("records album children in provider order, idempotently", async () => {
+    const listed = await listPosts(handle.db, targetId);
+    const post1 = listed.find((p) => p.postId === "post-1")!;
+    const children = [
+      { childId: "album-a", mediaType: "IMAGE" as const, takenAt: new Date(Date.UTC(2026, 7, 20, 9)).toISOString() },
+      {
+        childId: "album-b",
+        mediaType: "VIDEO" as const,
+        shortcode: "BbCc002",
+        permalink: "https://www.instagram.com/reel/BbCc002/",
+        takenAt: new Date(Date.UTC(2026, 7, 20, 10)).toISOString(),
+      },
+    ];
+    const first = await recordPostChildren(handle.db, { postDbId: post1.id, children });
+    expect(first).toEqual({ inserted: 2, deduplicated: 0 });
+    const retry = await recordPostChildren(handle.db, { postDbId: post1.id, children });
+    expect(retry).toEqual({ inserted: 0, deduplicated: 2 });
+
+    const rows = await listChildrenForPost(handle.db, post1.id);
+    expect(rows.map((r) => r.childMediaId)).toEqual(["album-a", "album-b"]);
+    expect(rows.map((r) => r.position)).toEqual([1, 2]);
+    expect(rows[1]?.shortcode).toBe("BbCc002");
+    expect(rows[1]?.permalink).toBe("https://www.instagram.com/reel/BbCc002/");
+
+    await expect(
+      handle.sql.unsafe(`UPDATE post_children SET position = 9`),
+    ).rejects.toThrow(/append-only/);
+  });
+
+  it("records nothing for an empty album listing", async () => {
+    const listed = await listPosts(handle.db, targetId);
+    const post1 = listed.find((p) => p.postId === "post-1")!;
+    expect(await recordPostChildren(handle.db, { postDbId: post1.id, children: [] })).toEqual({
+      inserted: 0,
+      deduplicated: 0,
+    });
+  });
 });
 
 describe.runIf(available)("profile privacy snapshots", () => {
@@ -206,6 +282,32 @@ describe.runIf(available)("profile privacy snapshots", () => {
     const flip = changes.find((c) => c.field === "isPrivate");
     expect(flip?.oldValue).toBe("false");
     expect(flip?.newValue).toBe("true");
+  });
+
+  it("forwards accountType to the account row on insert and refresh", async () => {
+    const at = (day: number) => new Date(Date.UTC(2026, 7, 20 + day, 9));
+    const withType = (type: string, day: number) => ({
+      profile: {
+        ...snap(day, false).profile,
+        account: { username: "target_priv", isPrivate: false },
+        accountType: type,
+      },
+      evidence: {
+        observationKind: "profile_snapshot",
+        source: SOURCE,
+        observedAt: at(day),
+        capturedAt: at(day),
+        confidence: Confidence.HIGH,
+        rawHash: hash(`type-${day}`),
+        normalizedHash: hash(`type-norm-${day}`),
+      },
+    });
+    await recordProfileSnapshot(handle.db, withType("BUSINESS", 2));
+    const { getAccountByUsername } = await import("../src/index.js");
+    expect((await getAccountByUsername(handle.db, "target_priv"))?.accountType).toBe("BUSINESS");
+    // Presence wins on refresh too: the update path must not drop the field.
+    await recordProfileSnapshot(handle.db, withType("CREATOR", 3));
+    expect((await getAccountByUsername(handle.db, "target_priv"))?.accountType).toBe("CREATOR");
   });
 });
 

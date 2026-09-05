@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, sql } from "drizzle-orm";
 import type { NormalizedAccountRef, NormalizedStory } from "@igtrack/core";
-import { igAccounts, stories, storyMentions } from "../schema/index.js";
+import { igAccounts, stories, storyMentions, storySightings } from "../schema/index.js";
 import type { Database } from "../client/client.js";
 import { withTransaction } from "../transactions.js";
 import { upsertAccount } from "./accounts.js";
@@ -243,4 +243,69 @@ export async function listMentionsForStoryWithAccount(
     .from(storyMentions)
     .innerJoin(igAccounts, sql`${igAccounts.id} = ${storyMentions.mentionedAccountId}`)
     .where(sql`${storyMentions.storyDbId} = ${storyDbId}`);
+}
+
+export interface StorySightingRecord {
+  id: string;
+  observedAt: Date;
+  jobId: string | null;
+}
+
+// Append-only re-observation mark. Called for EVERY story a scan observes,
+// including deduplicated re-hits — that is the entire point: the stories row
+// stays immutable (first observation), sightings record the ongoing presence.
+// Idempotent per (story, observed_at): retried or reclaimed scans collapse.
+export async function recordStorySighting(
+  db: Database,
+  input: { storyDbId: string; observedAt: Date; jobId?: string },
+): Promise<void> {
+  await db
+    .insert(storySightings)
+    .values({
+      id: randomUUID(),
+      storyDbId: input.storyDbId,
+      observedAt: input.observedAt,
+      ...(input.jobId !== undefined ? { jobId: input.jobId } : {}),
+    })
+    .onConflictDoNothing({
+      target: [storySightings.storyDbId, storySightings.observedAt],
+    });
+}
+
+export interface StorySightingsSummary {
+  count: number;
+  firstSeenAt: Date | null;
+  lastSeenAt: Date | null;
+}
+
+// Bounded per-story observation history for UI. One aggregate query over the
+// account's stories — no per-story round trips.
+export async function sightingSummariesForAccount(
+  db: Database,
+  igAccountId: string,
+): Promise<Record<string, StorySightingsSummary>> {
+  const rows = await db.execute(sql`
+    SELECT sg.story_db_id AS "storyDbId",
+           count(*)::int AS "count",
+           min(sg.observed_at) AS "firstSeenAt",
+           max(sg.observed_at) AS "lastSeenAt"
+    FROM story_sightings sg
+    JOIN stories s ON s.id = sg.story_db_id
+    WHERE s.ig_account_id = ${igAccountId}
+    GROUP BY sg.story_db_id
+  `);
+  const out: Record<string, StorySightingsSummary> = {};
+  for (const row of rows as unknown as Array<{
+    storyDbId: string;
+    count: number;
+    firstSeenAt: Date | string | null;
+    lastSeenAt: Date | string | null;
+  }>) {
+    out[row.storyDbId] = {
+      count: Number(row.count),
+      firstSeenAt: row.firstSeenAt === null ? null : new Date(row.firstSeenAt),
+      lastSeenAt: row.lastSeenAt === null ? null : new Date(row.lastSeenAt),
+    };
+  }
+  return out;
 }
