@@ -25,11 +25,21 @@ jobs:
           cache: pnpm
       - name: Install
         run: pnpm install --frozen-lockfile
+      - name: Check DATABASE_URL configured
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::warning::DATABASE_URL secret not configured — skipping ephemeral worker run. Set repo secret DATABASE_URL (Neon URL with ?sslmode=require) to enable."
+            echo "SKIP_WORKER=1" >> $GITHUB_ENV
+          fi
       - name: Run migrations (safe, idempotent)
+        if: env.SKIP_WORKER != '1'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: pnpm --filter @igtrack/database db:migrate
       - name: Ephemeral worker --once
+        if: env.SKIP_WORKER != '1'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           IGTRACK_PROVIDER: fixture

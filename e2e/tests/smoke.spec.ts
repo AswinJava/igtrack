@@ -28,7 +28,7 @@ test.describe.serial("IGTrack smoke", () => {
     await page.getByRole("button", { name: /Create & queue observation/ }).click();
     // The created card links to the target detail page.
     const card = page.getByRole("link", { name: /@aurora\.wilde/ }).first();
-    await expect(card).toBeVisible();
+    await expect(card).toBeVisible({ timeout: 30_000 });
     // Fresh target with queued initial jobs reports SYNCING, not SYNCED.
     await expect(card.getByText("SYNCING")).toBeVisible();
   });

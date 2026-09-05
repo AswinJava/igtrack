@@ -126,7 +126,7 @@ test.describe.serial("IGTrack release gate", () => {
     await page.getByRole("link", { name: "stories" }).click();
     await expect(page.getByText("story-", { exact: false }).first()).toBeVisible();
     await page.getByRole("link", { name: "followers" }).click();
-    await expect(page.getByText("Snapshot", { exact: false }).first()).toBeVisible();
+    await expect(page.getByText("Completeness", { exact: false })).toBeVisible();
 
     // Every observation is source-labeled: the list card carries the same
     // derived fixture badge as the detail header.

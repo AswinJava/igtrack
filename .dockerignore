@@ -17,7 +17,6 @@ logs/
 .github/
 docs/
 e2e/
-scripts/bench-staging.ts
 .env
 .env.*
 !.env.example

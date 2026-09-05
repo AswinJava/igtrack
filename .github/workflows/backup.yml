@@ -24,6 +24,10 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           set -euo pipefail
+          if [[ -z "${DATABASE_URL:-}" ]]; then
+            echo "::warning::DATABASE_URL secret not configured — skipping backup. Set repo secret DATABASE_URL (Neon URL) to enable."
+            exit 0
+          fi
           TS="$(date -u +%Y-%m-%dT%H%M%SZ)"
           FILE="backups/igtrack_${TS}.sql"
           GZ="${FILE}.gz"

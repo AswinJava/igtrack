@@ -87,9 +87,11 @@ async function pgSize(db: any, table: string): Promise<number> {
   const rows: any = await db.execute(sql.raw(`SELECT pg_total_relation_size('${table}') as s`));
   // drizzle execute returns different shapes; fallback to sql
   try {
-    const r = await db.execute(sql`SELECT pg_total_relation_size(${table}) as s`);
-    // @ts-ignore
-    return Number(r.rows?.[0]?.s ?? r[0]?.s ?? 0);
+    const r: unknown = await db.execute(sql`SELECT pg_total_relation_size(${table}) as s`);
+    if (Array.isArray(r)) return Number((r[0] as { s?: unknown } | undefined)?.s ?? 0);
+    const nested = (r as { rows?: unknown }).rows;
+    if (Array.isArray(nested)) return Number((nested[0] as { s?: unknown } | undefined)?.s ?? 0);
+    return 0;
   } catch {
     return 0;
   }
