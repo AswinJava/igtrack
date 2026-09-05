@@ -89,6 +89,7 @@ export async function recordStory(
         ...(story.durationMs !== undefined ? { durationMs: story.durationMs } : {}),
         ...(story.caption !== undefined ? { caption: story.caption } : {}),
         hasLink: story.hasLink,
+        ...(story.linkUrl !== undefined ? { linkUrl: story.linkUrl } : {}),
         stickerKinds: story.stickerKinds,
         ...(story.poll !== undefined ? { poll: story.poll } : {}),
         ...(story.question !== undefined ? { question: story.question } : {}),
@@ -98,10 +99,34 @@ export async function recordStory(
         confidence: story.meta.confidence,
         ...(evidenceId !== undefined ? { evidenceId } : {}),
       })
+      .onConflictDoNothing({
+        target: [stories.igAccountId, stories.storyId, stories.sourceId],
+      })
       .returning();
     const storyRow = storyRows[0];
     if (storyRow === undefined) {
-      throw new Error("igtrack: failed to insert story");
+      // Lost the insert race after the pre-select missed: re-read the winner
+      // with its mentions instead of failing the scan.
+      const raced = await tx
+        .select()
+        .from(stories)
+        .where(
+          and(
+            sql`${stories.igAccountId} = ${owner.id}`,
+            sql`${stories.storyId} = ${story.storyId}`,
+            sql`${stories.sourceId} = ${input.sourceId}`,
+          ),
+        )
+        .limit(1);
+      const racedRow = raced[0];
+      if (racedRow === undefined) {
+        throw new Error("igtrack: failed to insert story");
+      }
+      const racedMentions = await tx
+        .select()
+        .from(storyMentions)
+        .where(sql`${storyMentions.storyDbId} = ${racedRow.id}`);
+      return { story: racedRow, mentions: racedMentions, deduplicated: true };
     }
 
     const mentions: StoryMentionRecord[] = [];
@@ -184,6 +209,9 @@ export async function listMentionsForStory(
 export interface StoryMentionWithAccount extends StoryMentionRecord {
   username: string;
   displayName: string | null;
+  // Provider-supplied platform id of the mentioned account, when the source
+  // exposes it. Rendered as hover detail, never as identity proof alone.
+  mentionedIgId: string | null;
 }
 
 // Username-enriched variant for ownership-scoped UI surfaces. Callers must
@@ -210,6 +238,7 @@ export async function listMentionsForStoryWithAccount(
       createdAt: storyMentions.createdAt,
       username: igAccounts.username,
       displayName: igAccounts.displayName,
+      mentionedIgId: igAccounts.igId,
     })
     .from(storyMentions)
     .innerJoin(igAccounts, sql`${igAccounts.id} = ${storyMentions.mentionedAccountId}`)

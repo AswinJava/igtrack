@@ -285,12 +285,18 @@ export class FixtureProvider implements InstagramProvider {
       const raw: RawPostsPageV1 = parsed.data;
       const posts = normalizePosts(raw);
 
+      // Continuation: the v1 cursor is the next file in manifest order. When
+      // the page declares more data (next_cursor non-null), expose the next
+      // file so executors can resume instead of truncating. Single-file sets
+      // (next_cursor null) return no cursor — a complete listing.
+      const nextFile = raw.next_cursor !== null ? files[index + 1] : undefined;
       return available(posts, {
         ...meta,
         observedAt: raw.captured_at,
         confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
         rawPayloadHash: sha256(rawText),
         rawReference: this.manifestRef(files[index]!),
+        ...(nextFile !== undefined ? { nextCursor: nextFile } : {}),
       });
     } catch (err) {
       return toProviderError(meta, err);

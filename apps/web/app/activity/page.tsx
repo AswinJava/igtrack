@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { getActivityFeed } from "@/lib/data";
 import { requirePageUser } from "@/lib/auth";
 import { ACTIVITY_TYPES } from "@igtrack/database";
@@ -9,10 +10,10 @@ export const dynamic = "force-dynamic";
 
 const TYPE_LABELS: Record<string, string> = {
   PROFILE_CHANGED: "Profile changed",
-  NEW_FOLLOWER: "New follower",
-  LOST_FOLLOWER: "Lost follower",
-  NEW_FOLLOWING: "New following",
-  LOST_FOLLOWING: "Lost following",
+  NEW_FOLLOWER: "Newly observed follower",
+  LOST_FOLLOWER: "No longer observed follower",
+  NEW_FOLLOWING: "Newly observed following",
+  LOST_FOLLOWING: "No longer observed following",
   STORY_POSTED: "Story posted",
 };
 
@@ -36,7 +37,7 @@ export default async function ActivityPage({
   return (
     <div className="mx-auto max-w-4xl px-6 py-6">
       <h1 className="text-xl font-semibold tracking-tight">Activity</h1>
-      <p className="mt-1 text-sm text-zinc-500">Unified chronological feed — every event links to evidence and is typed as observed, derived, or inferred.</p>
+      <p className="mt-1 text-sm text-zinc-500">Unified chronological feed — every event links to evidence and is typed as observed, derived, or inferred. Showing the 30 most recent events.</p>
 
       <form method="get" className="mt-4 flex flex-wrap items-end gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3">
         <div>
@@ -92,6 +93,14 @@ export default async function ActivityPage({
                     </p>
                     <p className="mt-1 text-xs text-zinc-500">
                       {item.targetUsername} · {formatDateTime(item.timestamp)}
+                      {item.evidenceId !== null && (
+                        <>
+                          {" · "}
+                          <Link href={`/evidence/${item.evidenceId}`} className="font-medium text-sky-400 hover:underline">
+                            Evidence →
+                          </Link>
+                        </>
+                      )}
                     </p>
                   </div>
                 </li>

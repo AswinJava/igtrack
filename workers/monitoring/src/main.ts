@@ -1,5 +1,16 @@
 import { createDb } from "@igtrack/database";
 import { logWorker, providerFromEnv, runWorkerLoop } from "./index.js";
+import { validateWorkerEnv } from "./config.js";
+
+// Fail fast on dangerous configuration (e.g. IGTRACK_JOB_LEASE_MS=0) before
+// opening the database pool or claiming any work.
+const configErrors = validateWorkerEnv();
+if (configErrors.length > 0) {
+  for (const message of configErrors) {
+    logWorker("error", "worker_invalid_config", { message: message.slice(0, 300) });
+  }
+  process.exit(1);
+}
 
 // Worker daemon entry point: `pnpm --filter @igtrack/monitoring start`.
 // SIGINT/SIGTERM are cooperative: the loop stops claiming new work, the

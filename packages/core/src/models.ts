@@ -30,6 +30,7 @@ export interface NormalizedProfile {
 export const MediaType = {
   IMAGE: "IMAGE",
   VIDEO: "VIDEO",
+  CAROUSEL: "CAROUSEL",
   UNKNOWN: "UNKNOWN",
 } as const;
 
@@ -91,6 +92,9 @@ export interface NormalizedStory {
   durationMs?: number;
   caption?: string;
   hasLink: boolean;
+  // Provider-supplied link target when hasLink is true. Absent when the
+  // provider exposes no URL — never fabricated from the boolean.
+  linkUrl?: string;
   stickerKinds: string[];
   poll?: StoryPollMeta;
   question?: StoryQuestionMeta;
@@ -115,10 +119,19 @@ export interface NormalizedFollowPage {
 export interface NormalizedPost {
   postId: string;
   shortcode?: string;
+  // Full provider-supplied post URL. Independent of shortcode: only stored
+  // when the provider returns it, never reconstructed or guessed.
+  permalink?: string;
   takenAt: string;
   caption?: string;
   likeCount?: number;
   commentCount?: number;
+  // Provider-declared media typing. IMAGE/VIDEO/CAROUSEL only when the source
+  // explicitly identifies the type; mediaProductType preserves the raw product
+  // classifier (e.g. FEED, REELS) for reels-vs-post distinction. Never
+  // inferred from appearance — absent means the provider did not say.
+  mediaType?: MediaType;
+  mediaProductType?: string;
   meta: ObservationMeta;
 }
 

@@ -11,6 +11,7 @@ import { listStories, listMentionsForStoryWithAccount } from "./stories.js";
 import { listPosts, listCommentsForPostWithAccount } from "./posts.js";
 import {
   latestFollowSnapshot,
+  listMembersForSnapshot,
   listRecentDeltas,
   type DeltaWithAccount,
 } from "./follows.js";
@@ -46,6 +47,11 @@ interface TargetListRow {
   last_observed: Date | string | null;
   follower_count: number | null;
   following_count: number | null;
+  snapshot_source: string | null;
+  job_status: string | null;
+  job_outcome: string | null;
+  job_completed_at: Date | string | null;
+  job_available_at: Date | string | null;
 }
 
 export interface TargetListItem {
@@ -60,6 +66,15 @@ export interface TargetListItem {
   followerCount: number | null;
   followingCount: number | null;
   lastObserved: Date | null;
+  // Source of the latest profile snapshot. Null when no snapshot exists yet.
+  // Rendered per-card so fixture data is unmistakable at list level too.
+  snapshotSourceId: string | null;
+  // Latest scan job for sync-state display. Nulls mean no job has ever been
+  // recorded for this target (freshly created, worker hasn't picked it up).
+  latestJobStatus: string | null;
+  latestJobOutcome: string | null;
+  latestJobCompletedAt: Date | null;
+  latestJobAvailableAt: Date | null;
 }
 
 export async function listTargetsForUser(
@@ -77,16 +92,28 @@ export async function listTargetsForUser(
            ia.is_verified,
            ps.observed_at AS last_observed,
            ps.follower_count,
-           ps.following_count
+           ps.following_count,
+           ps.snapshot_source,
+           j.status::text AS job_status,
+           j.outcome::text AS job_outcome,
+           j.completed_at AS job_completed_at,
+           j.available_at AS job_available_at
     FROM targets t
     JOIN ig_accounts ia ON ia.id = t.ig_account_id
     LEFT JOIN LATERAL (
-      SELECT s.observed_at, s.follower_count, s.following_count
+      SELECT s.observed_at, s.follower_count, s.following_count, s.source_id AS snapshot_source
       FROM profile_snapshots s
       WHERE s.ig_account_id = t.ig_account_id
       ORDER BY s.observed_at DESC
       LIMIT 1
     ) ps ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT j2.status, j2.outcome, j2.completed_at, j2.available_at
+      FROM monitoring_jobs j2
+      WHERE j2.target_id = t.id
+      ORDER BY j2.created_at DESC
+      LIMIT 1
+    ) j ON TRUE
     WHERE t.user_id = ${userId}
     ORDER BY t.created_at DESC
   `);
@@ -102,6 +129,11 @@ export async function listTargetsForUser(
     followerCount: r.follower_count === null ? null : Number(r.follower_count),
     followingCount: r.following_count === null ? null : Number(r.following_count),
     lastObserved: r.last_observed === null ? null : asDate(r.last_observed),
+    snapshotSourceId: r.snapshot_source,
+    latestJobStatus: r.job_status,
+    latestJobOutcome: r.job_outcome,
+    latestJobCompletedAt: r.job_completed_at === null ? null : asDate(r.job_completed_at),
+    latestJobAvailableAt: r.job_available_at === null ? null : asDate(r.job_available_at),
   }));
 }
 
@@ -170,6 +202,9 @@ export interface ActivityItem {
   // is assigned or invented.
   category: string | null;
   confidence: string | null;
+  // Evidence row id backing this event, so every feed item links to
+  // provenance. Joined from the originating observation's evidence_id.
+  evidenceId: string | null;
 }
 
 export const ACTIVITY_TYPES = [
@@ -216,6 +251,7 @@ export async function getUserActivityFeed(
     username: string;
     category: string | null;
     confidence: string | null;
+    evidence_id: string | null;
   }>(
     db,
     sql`
@@ -223,7 +259,8 @@ export async function getUserActivityFeed(
     (SELECT pc.id::text AS id, 'PROFILE_CHANGED'::text AS type,
             ia.username || ' — ' || pc.field || ' changed' AS summary,
             pc.detected_at AS occurred_at, ia.username,
-            'DERIVED'::text AS category, ps.confidence::text AS confidence
+            'DERIVED'::text AS category, ps.confidence::text AS confidence,
+            ps.evidence_id AS evidence_id
      FROM profile_changes pc
      JOIN ig_accounts ia ON ia.id = pc.ig_account_id
      JOIN profile_snapshots ps ON ps.id = pc.to_snapshot_id
@@ -234,17 +271,20 @@ export async function getUserActivityFeed(
     (SELECT fd.id::text AS id, fd.change::text AS type,
             ia.username || ' — ' || lower(replace(fd.change::text, '_', ' ')) AS summary,
             fd.first_seen_at AS occurred_at, ia.username,
-            'DERIVED'::text AS category, fd.confidence::text AS confidence
+            'DERIVED'::text AS category, fd.confidence::text AS confidence,
+            fs.evidence_id AS evidence_id
      FROM follow_deltas fd
      JOIN ig_accounts ia ON ia.id = fd.ig_account_id
      JOIN targets t ON t.id = fd.target_id
+     JOIN follow_snapshots fs ON fs.id = fd.to_snapshot_id
      WHERE t.user_id = ${userId}
      ORDER BY fd.first_seen_at DESC LIMIT ${limit})
     UNION ALL
     (SELECT s.id::text AS id, 'STORY_POSTED'::text AS type,
             ia.username || ' — story observed' AS summary,
             s.taken_at AS occurred_at, ia.username,
-            'OBSERVED'::text AS category, s.confidence::text AS confidence
+            'OBSERVED'::text AS category, s.confidence::text AS confidence,
+            s.evidence_id AS evidence_id
      FROM stories s
      JOIN ig_accounts ia ON ia.id = s.ig_account_id
      WHERE EXISTS (SELECT 1 FROM targets t
@@ -276,6 +316,7 @@ export async function getUserActivityFeed(
     targetUsername: r.username,
     category: r.category,
     confidence: r.confidence,
+    evidenceId: r.evidence_id,
   }));
 }
 
@@ -324,6 +365,11 @@ export async function getDashboardOverview(
 // Target detail bundle (ownership-verified)
 // ---------------------------------------------------------------------------
 
+export interface FollowRoster {
+  usernames: string[];
+  totalObserved: number;
+}
+
 export interface TargetDetailBundle {
   target: NonNullable<Awaited<ReturnType<typeof getOwnedTarget>>>;
   account: typeof igAccounts.$inferSelect;
@@ -336,6 +382,11 @@ export interface TargetDetailBundle {
   postComments: Array<{ postId: string; comments: Awaited<ReturnType<typeof listCommentsForPostWithAccount>> }>;
   followFollowers: Awaited<ReturnType<typeof latestFollowSnapshot>>;
   followFollowing: Awaited<ReturnType<typeof latestFollowSnapshot>>;
+  // Auditable member rosters for the latest snapshots (bounded at 50 each;
+  // null when no snapshot exists yet). Lets the UI show WHO is in a
+  // snapshot, not just the count.
+  followFollowerRoster: FollowRoster | null;
+  followFollowingRoster: FollowRoster | null;
   deltas: DeltaWithAccount[];
   jobs: JobQueueSummary[];
 }
@@ -370,16 +421,31 @@ export async function getOwnedTargetDetail(
     ]);
 
   const storyMentions: TargetDetailBundle["storyMentions"] = [];
-  for (const s of storiesList.slice(0, 3)) {
-    const ms = await listMentionsForStoryWithAccount(db, s.id).catch(() => []);
-    storyMentions.push({ storyId: s.storyId, mentions: ms });
-  }
+  const mentionResults = await Promise.all(
+    storiesList.slice(0, 3).map(async (s) => ({
+      storyId: s.storyId,
+      mentions: await listMentionsForStoryWithAccount(db, s.id).catch(() => []),
+    })),
+  );
+  storyMentions.push(...mentionResults);
 
   const postComments: TargetDetailBundle["postComments"] = [];
-  for (const p of postsList.slice(0, 5)) {
-    const cs = await listCommentsForPostWithAccount(db, p.id).catch(() => []);
-    postComments.push({ postId: p.postId, comments: cs });
-  }
+  const commentResults = await Promise.all(
+    postsList.slice(0, 5).map(async (p) => ({
+      postId: p.postId,
+      comments: await listCommentsForPostWithAccount(db, p.id).catch(() => []),
+    })),
+  );
+  postComments.push(...commentResults);
+
+  const [followerRosterRows, followingRosterRows] = await Promise.all([
+    followFollowers !== null
+      ? listMembersForSnapshot(db, followFollowers.id, 50).catch(() => [])
+      : Promise.resolve([]),
+    followFollowing !== null
+      ? listMembersForSnapshot(db, followFollowing.id, 50).catch(() => [])
+      : Promise.resolve([]),
+  ]);
 
   return {
     target: owned,
@@ -393,6 +459,20 @@ export async function getOwnedTargetDetail(
     postComments,
     followFollowers,
     followFollowing,
+    followFollowerRoster:
+      followFollowers === null
+        ? null
+        : {
+            usernames: followerRosterRows.map((r) => r.username),
+            totalObserved: followFollowers.totalObserved,
+          },
+    followFollowingRoster:
+      followFollowing === null
+        ? null
+        : {
+            usernames: followingRosterRows.map((r) => r.username),
+            totalObserved: followFollowing.totalObserved,
+          },
     deltas,
     jobs,
   };
@@ -418,21 +498,23 @@ export async function getRelationshipsForUser(
   const owned = await getOwnedTarget(db, userId, targetId);
   if (owned === null) return [];
 
-  const deltas = await listRecentDeltas(db, owned.id, { limit: 50 }).catch(
-    () => [] as DeltaWithAccount[],
-  );
-  const mentionRows = await query<{ username: string; count: number }>(
-    db,
-    sql`
-      SELECT ia.username, count(*)::int AS count
-      FROM story_mentions sm
-      JOIN ig_accounts ia ON ia.id = sm.mentioned_account_id
-      JOIN stories s ON s.id = sm.story_db_id
-      WHERE s.ig_account_id = ${owned.igAccountId}
-      GROUP BY ia.username
-      ORDER BY count DESC
-    `,
-  ).catch(() => [] as Array<{ username: string; count: number }>);
+  const [deltas, mentionRows] = await Promise.all([
+    listRecentDeltas(db, owned.id, { limit: 50 }).catch(
+      () => [] as DeltaWithAccount[],
+    ),
+    query<{ username: string; count: number }>(
+      db,
+      sql`
+        SELECT ia.username, count(*)::int AS count
+        FROM story_mentions sm
+        JOIN ig_accounts ia ON ia.id = sm.mentioned_account_id
+        JOIN stories s ON s.id = sm.story_db_id
+        WHERE s.ig_account_id = ${owned.igAccountId}
+        GROUP BY ia.username
+        ORDER BY count DESC
+      `,
+    ).catch(() => [] as Array<{ username: string; count: number }>),
+  ]);
 
   const map = new Map<string, { mentions: number; deltas: number }>();
   for (const m of mentionRows) {
@@ -504,6 +586,7 @@ async function scopedEvidenceByKind(
   db: Database,
   userId: string,
   kind: string,
+  limit: number,
 ): Promise<ScopedEvidenceRow[]> {
   const rows = await query<ScopedEvidenceRow>(
     db,
@@ -526,6 +609,15 @@ async function scopedEvidenceByKind(
           SELECT 1 FROM interactions i
           JOIN targets t ON t.id = i.target_id AND t.user_id = ${userId}
           WHERE i.id = e.observation_id))
+        OR (e.observation_kind = 'post' AND EXISTS (
+          SELECT 1 FROM posts p
+          JOIN targets t ON t.id = p.target_id AND t.user_id = ${userId}
+          WHERE p.id = e.observation_id))
+        OR (e.observation_kind = 'post_comment' AND EXISTS (
+          SELECT 1 FROM post_comments pc
+          JOIN posts p ON p.id = pc.post_db_id
+          JOIN targets t ON t.id = p.target_id AND t.user_id = ${userId}
+          WHERE pc.id = e.observation_id))
         OR (e.observation_kind IN ('story', 'story_mention') AND EXISTS (
           SELECT 1 FROM stories st
           JOIN ig_accounts ia ON ia.id = st.ig_account_id
@@ -535,6 +627,7 @@ async function scopedEvidenceByKind(
                           WHERE sm.id = e.observation_id)))
       )
     ORDER BY e.observed_at DESC
+    LIMIT ${limit}
   `,
   );
   return rows.map(mapEvidenceRow);
@@ -545,9 +638,9 @@ export async function listScopedEvidence(
   userId: string,
   limit = 30,
 ): Promise<ScopedEvidenceRow[]> {
-  const kinds = ["profile_snapshot", "story", "story_mention", "follow_snapshot", "interaction"];
+  const kinds = ["profile_snapshot", "story", "story_mention", "follow_snapshot", "interaction", "post", "post_comment"];
   const buckets = await Promise.all(
-    kinds.map((k) => scopedEvidenceByKind(db, userId, k).catch(() => [])),
+    kinds.map((k) => scopedEvidenceByKind(db, userId, k, limit).catch(() => [])),
   );
   return buckets
     .flat()
@@ -559,6 +652,15 @@ export interface EvidenceChainDetail {
   evidence: ScopedEvidenceRow;
   claim: string;
   lineage: Array<{ label: string; value: string }>;
+}
+
+// Scan/job linkage for §15: worker-recorded evidence carries the producing
+// job id in metadata, so any chain can answer "which scan produced this".
+// Legacy rows (seed, pre-threading) simply omit the row.
+function jobLineage(metadata: Record<string, unknown> | null): Array<{ label: string; value: string }> {
+  const jobId = metadata !== null ? metadata.jobId : undefined;
+  if (typeof jobId !== "string" || jobId.length === 0) return [];
+  return [{ label: "Producing scan job", value: jobId }];
 }
 
 export async function getEvidenceChain(
@@ -639,6 +741,7 @@ export async function getEvidenceChain(
             : "Derived change — this snapshot was the prior state",
         value: `${c.field} · detected ${asDate(c.detected_at).toISOString()}`,
       })),
+      ...jobLineage(ev.metadata),
     ];
 
     return {
@@ -708,6 +811,7 @@ export async function getEvidenceChain(
           label: "Derived deltas referencing this snapshot",
           value: String(deltaCountRows[0] ? int(deltaCountRows[0].cnt) : 0),
         },
+        ...jobLineage(ev.metadata),
       ],
     };
   }
@@ -738,6 +842,99 @@ export async function getEvidenceChain(
         { label: "Story identifier (source-scoped)", value: s.story_id },
         { label: "Account", value: `@${s.username}` },
         { label: "Taken at", value: asDate(s.taken_at).toISOString() },
+        ...jobLineage(ev.metadata),
+      ],
+    };
+  }
+
+  if (kind === "post") {
+    const postRows = await query<{
+      post_id: string;
+      username: string;
+      taken_at: Date | string;
+      caption: string | null;
+      shortcode: string | null;
+      like_count: number | null;
+      comment_count: number | null;
+      media_type: string | null;
+      media_product_type: string | null;
+      comments_state: string | null;
+    }>(
+      db,
+      sql`
+      SELECT p.post_id, ia.username, p.taken_at, p.caption, p.shortcode,
+             p.like_count, p.comment_count, p.media_type, p.media_product_type,
+             p.comments_state
+      FROM posts p
+      JOIN targets t ON t.id = p.target_id
+      JOIN ig_accounts ia ON ia.id = t.ig_account_id
+      WHERE p.id = ${id} AND t.user_id = ${userId}
+      LIMIT 1
+    `,
+    );
+    const p = postRows[0];
+    if (p === undefined) return null;
+    return {
+      evidence: ev,
+      claim: `Post ${p.post_id} from @${p.username}, taken ${asDate(p.taken_at).toISOString()}`,
+      lineage: [
+        { label: "Post identifier (source-scoped)", value: p.post_id },
+        { label: "Account", value: `@${p.username}` },
+        { label: "Taken at", value: asDate(p.taken_at).toISOString() },
+        ...(p.shortcode !== null ? [{ label: "Shortcode", value: p.shortcode }] : []),
+        ...(p.media_type !== null || p.media_product_type !== null
+          ? [{
+              label: "Provider-declared media type",
+              value: [p.media_type, p.media_product_type].filter((v) => v !== null).join(" / "),
+            }]
+          : [{ label: "Provider-declared media type", value: "not declared by provider" }]),
+        { label: "Like count (provider metadata)", value: p.like_count === null ? "unavailable" : String(int(p.like_count)) },
+        { label: "Comment count (provider metadata)", value: p.comment_count === null ? "unavailable" : String(int(p.comment_count)) },
+        { label: "Comment observation state", value: p.comments_state ?? "unknown (recorded before state tracking)" },
+        ...(p.caption !== null ? [{ label: "Caption", value: p.caption }] : []),
+        ...jobLineage(ev.metadata),
+      ],
+    };
+  }
+
+  if (kind === "post_comment") {
+    const commentRows = await query<{
+      comment_id: string;
+      body: string;
+      commented_at: Date | string;
+      author: string;
+      post_id: string;
+      owner: string;
+      in_reply_to_comment_id: string | null;
+    }>(
+      db,
+      sql`
+      SELECT pc.comment_id, pc.body, pc.commented_at, ia.username AS author,
+             p.post_id, owner.username AS owner, pc.in_reply_to_comment_id
+      FROM post_comments pc
+      JOIN posts p ON p.id = pc.post_db_id
+      JOIN targets t ON t.id = p.target_id
+      JOIN ig_accounts ia ON ia.id = pc.author_account_id
+      JOIN ig_accounts owner ON owner.id = p.ig_account_id
+      WHERE pc.id = ${id} AND t.user_id = ${userId}
+      LIMIT 1
+    `,
+    );
+    const c = commentRows[0];
+    if (c === undefined) return null;
+    return {
+      evidence: ev,
+      claim: `Comment ${c.comment_id} by @${c.author} on post ${c.post_id} (@${c.owner})`,
+      lineage: [
+        { label: "Comment identifier (source-scoped)", value: c.comment_id },
+        { label: "Author (public account)", value: `@${c.author}` },
+        { label: "Post identifier (source-scoped)", value: c.post_id },
+        { label: "Commented at", value: asDate(c.commented_at).toISOString() },
+        ...(c.in_reply_to_comment_id !== null
+          ? [{ label: "Reply to comment", value: c.in_reply_to_comment_id }]
+          : []),
+        { label: "Text", value: c.body },
+        ...jobLineage(ev.metadata),
       ],
     };
   }
@@ -759,7 +956,10 @@ export async function getEvidenceChain(
     return {
       evidence: ev,
       claim: `Interaction observed relative to @${i.target_username}`,
-      lineage: [{ label: "Target account", value: `@${i.target_username}` }],
+      lineage: [
+        { label: "Target account", value: `@${i.target_username}` },
+        ...jobLineage(ev.metadata),
+      ],
     };
   }
 
@@ -777,6 +977,7 @@ export interface JobQueueSummary {
   id: string;
   kind: string;
   status: string;
+  outcome: string | null;
   attempts: number;
   maxAttempts: number;
   availableAt: Date | null;
@@ -790,6 +991,7 @@ interface JobSummaryRaw {
   id: string;
   kind: string;
   status: string;
+  outcome: string | null;
   attempts: number;
   max_attempts: number;
   available_at: Date | string | null;
@@ -804,6 +1006,7 @@ function mapJobSummary(r: JobSummaryRaw): JobQueueSummary {
     id: r.id,
     kind: r.kind,
     status: r.status,
+    outcome: r.outcome,
     attempts: int(r.attempts),
     maxAttempts: int(r.max_attempts),
     availableAt: r.available_at === null ? null : asDate(r.available_at),
@@ -816,7 +1019,7 @@ function mapJobSummary(r: JobSummaryRaw): JobQueueSummary {
 }
 
 const JOB_SUMMARY_SELECT = sql`
-  SELECT j.id::text AS id, j.kind, j.status::text AS status, j.attempts, j.max_attempts,
+  SELECT j.id::text AS id, j.kind, j.status::text AS status, j.outcome::text AS outcome, j.attempts, j.max_attempts,
          j.available_at, j.started_at, j.completed_at,
          (CASE WHEN j.error IS NULL THEN NULL
                ELSE left(coalesce(j.error->>'message', 'unknown failure'), 300) END) AS error_message,

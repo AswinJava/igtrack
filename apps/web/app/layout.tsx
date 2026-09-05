@@ -17,7 +17,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             <MobileNav />
             <main className="flex-1 bg-zinc-950">{children}</main>
             <footer className="border-t border-zinc-800 px-6 py-3 text-xs text-zinc-500">
-              Synthetic demo data · Every claim links to evidence · Inferred intelligence is never presented as fact
+              Observed public data · Claims link to evidence · Inferred intelligence is never presented as fact
             </footer>
           </div>
         </div>

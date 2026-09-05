@@ -1,6 +1,7 @@
 import {
   Confidence,
   ObservationCategory,
+  type MediaType,
   type NormalizedComment,
   type NormalizedFollowPage,
   type NormalizedPost,
@@ -31,16 +32,32 @@ export function normalizePosts(raw: RawPostsPageV1): NormalizedPost[] {
   return raw.posts.map((p) => ({
     postId: p.id,
     ...(p.shortcode !== undefined ? { shortcode: p.shortcode } : {}),
+    ...(p.permalink !== undefined ? { permalink: p.permalink } : {}),
     takenAt: p.taken_at,
     ...(p.caption !== undefined ? { caption: p.caption } : {}),
     ...(p.like_count !== undefined ? { likeCount: p.like_count } : {}),
     ...(p.comment_count !== undefined ? { commentCount: p.comment_count } : {}),
+    ...(p.media_type !== undefined
+      ? { mediaType: mapRawMediaType(p.media_type) }
+      : {}),
+    ...(p.media_product_type !== undefined
+      ? { mediaProductType: p.media_product_type }
+      : {}),
     meta: {
       category: ObservationCategory.OBSERVED,
       confidence: Confidence.HIGH,
       observedAt: raw.captured_at,
     },
   }));
+}
+
+/** Provider-declared media type token → MediaType. Unknown tokens stay UNKNOWN. */
+export function mapRawMediaType(raw: string): MediaType {
+  const token = raw.trim().toUpperCase();
+  if (token === "IMAGE") return "IMAGE";
+  if (token === "VIDEO") return "VIDEO";
+  if (token === "CAROUSEL" || token === "CAROUSEL_ALBUM") return "CAROUSEL";
+  return "UNKNOWN";
 }
 
 export function normalizeComments(raw: RawCommentsPageV1): NormalizedComment[] {

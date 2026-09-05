@@ -11,6 +11,7 @@ import {
   type CapabilityResult,
   type Cursor,
   type InstagramProvider,
+  type MediaType,
   type NormalizedAccountRef,
   type NormalizedComment,
   type NormalizedFollowPage,
@@ -59,6 +60,30 @@ export function graphConfigFromEnv(
 
 interface GraphErrorBody {
   error?: { message?: string; code?: number; error_subcode?: number };
+}
+
+/**
+ * Provider-declared Graph media_type token → MediaType. IMAGE/VIDEO map
+ * directly, CAROUSEL_ALBUM maps to CAROUSEL, anything else stays UNKNOWN —
+ * never inferred from any other signal.
+ */
+export function mapGraphMediaType(raw: string | undefined): MediaType {
+  if (raw === "IMAGE") return "IMAGE";
+  if (raw === "VIDEO") return "VIDEO";
+  if (raw === "CAROUSEL_ALBUM") return "CAROUSEL";
+  return "UNKNOWN";
+}
+
+/**
+ * Derive the canonical shortcode from an Instagram permalink
+ * (…/p/SHORTCODE/, …/reel/SHORTCODE/, …/tv/SHORTCODE/). Returns undefined
+ * when the URL carries no recognizable shortcode — callers keep shortcode
+ * absent rather than storing a guess.
+ */
+export function shortcodeFromPermalink(permalink: string | undefined): string | undefined {
+  if (permalink === undefined) return undefined;
+  const match = /\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/.exec(permalink);
+  return match?.[1];
 }
 
 export class GraphProvider implements InstagramProvider {
@@ -197,7 +222,7 @@ export class GraphProvider implements InstagramProvider {
       }>(`/${this.igUserId}/stories`, { fields: "id,timestamp,media_type" });
       const stories: NormalizedStory[] = (data.data ?? []).map((s) => ({
         storyId: s.id,
-        mediaType: "UNKNOWN",
+        mediaType: mapGraphMediaType(s.media_type),
         takenAt: s.timestamp ?? meta.observedAt,
         hasLink: false,
         stickerKinds: [],
@@ -253,12 +278,14 @@ export class GraphProvider implements InstagramProvider {
           like_count?: number;
           comments_count?: number;
           permalink?: string;
+          media_type?: string;
+          media_product_type?: string;
         }>;
         paging?: { cursors?: { after?: string } };
       }>(
         `/${this.igUserId}/media`,
         {
-          fields: "id,caption,timestamp,like_count,comments_count,permalink",
+          fields: "id,caption,timestamp,like_count,comments_count,permalink,media_type,media_product_type",
           limit: "25",
           ...(cursor !== undefined ? { after: cursor.value } : {}),
         },
@@ -266,10 +293,21 @@ export class GraphProvider implements InstagramProvider {
       const observedAt = meta.observedAt;
       const posts: NormalizedPost[] = (data.data ?? []).map((p) => ({
         postId: p.id,
+        ...(shortcodeFromPermalink(p.permalink) !== undefined
+          ? { shortcode: shortcodeFromPermalink(p.permalink) as string }
+          : {}),
+        // Permalink kept verbatim alongside the derived shortcode: the URL
+        // is provider data, the shortcode a parse of it. UI guards the
+        // scheme before rendering it as a link.
+        ...(p.permalink !== undefined ? { permalink: p.permalink } : {}),
         takenAt: p.timestamp ?? observedAt,
         ...(p.caption !== undefined ? { caption: p.caption } : {}),
         ...(p.like_count !== undefined ? { likeCount: p.like_count } : {}),
         ...(p.comments_count !== undefined ? { commentCount: p.comments_count } : {}),
+        ...(p.media_type !== undefined ? { mediaType: mapGraphMediaType(p.media_type) } : {}),
+        ...(p.media_product_type !== undefined
+          ? { mediaProductType: p.media_product_type }
+          : {}),
         meta: {
           category: ObservationCategory.OBSERVED,
           confidence: Confidence.HIGH,
@@ -287,6 +325,7 @@ export class GraphProvider implements InstagramProvider {
         confidence: Confidence.MEDIUM,
         note: "More media pages available; continue with the returned cursor",
         rawReference: `graph:v1/media?after=${after}`,
+        nextCursor: after,
       };
     } catch (err) {
       return providerFailure(meta, err);
@@ -306,6 +345,7 @@ export class GraphProvider implements InstagramProvider {
           username?: string;
           timestamp?: string;
         }>;
+        paging?: { cursors?: { after?: string } };
       }>(
         `/${post.postId}/comments`,
         {
@@ -326,7 +366,18 @@ export class GraphProvider implements InstagramProvider {
           observedAt,
         },
       }));
-      return available(comments, { ...meta, confidence: Confidence.MEDIUM });
+      const after = data.paging?.cursors?.after;
+      if (after === undefined) {
+        return available(comments, { ...meta, confidence: Confidence.MEDIUM });
+      }
+      return {
+        status: CapabilityStatus.PARTIAL,
+        data: comments,
+        ...meta,
+        confidence: Confidence.MEDIUM,
+        note: "More comment pages available; continue with the returned cursor",
+        nextCursor: after,
+      };
     } catch (err) {
       if (err instanceof GraphFailure && err.unavailable) {
         return unavailable(meta, err.message);

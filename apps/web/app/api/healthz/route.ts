@@ -25,13 +25,20 @@ export async function GET() {
       migrations = "unknown";
     }
   } catch {
-    db = "unavailable";
+    // db stays "unavailable" — the degraded status below reflects it.
   }
   const latencyMs = Date.now() - startedAt;
+  const provider = process.env.IGTRACK_PROVIDER ?? "fixture";
+  const production = process.env.NODE_ENV === "production";
   const body = {
     status: db === "ok" ? "ok" : "degraded",
     version: process.env.npm_package_version ?? "0.1.0",
-    provider: process.env.IGTRACK_PROVIDER ?? "fixture",
+    provider,
+    production,
+    // Production must never silently run on synthetic data: render.yaml pins
+    // fixture for the free-tier deploy, so this flag makes that choice
+    // machine-visible alongside the diagnostics banner.
+    fixtureInProduction: production && provider === "fixture",
     db,
     migrations,
     latencyMs,

@@ -92,6 +92,12 @@ export interface CapabilityResult<T> {
   rawPayloadHash?: string;
   // Reference to the raw payload's location (fixture file, API URL, ...).
   rawReference?: string;
+  // Opaque continuation token when the provider holds more pages. Present
+  // only when the caller must pass it back as Cursor{value} to continue the
+  // listing; absent means the listing is complete (or the provider cannot
+  // paginate this capability). Executors use it for resumable multi-page
+  // scans instead of silently truncating at the first page.
+  nextCursor?: string;
 }
 
 export function available<T>(
@@ -102,6 +108,7 @@ export function available<T>(
     confidence: Confidence;
     rawPayloadHash?: string;
     rawReference?: string;
+    nextCursor?: string;
   },
 ): CapabilityResult<T> {
   return { status: CapabilityStatus.AVAILABLE, data, ...meta };
@@ -116,6 +123,7 @@ export function partial<T>(
     note: string;
     rawPayloadHash?: string;
     rawReference?: string;
+    nextCursor?: string;
   },
 ): CapabilityResult<T> {
   return { status: CapabilityStatus.PARTIAL, data, ...meta };

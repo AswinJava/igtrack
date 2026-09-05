@@ -176,20 +176,42 @@ export async function deleteTargetWithObservations(
     if (target === null) return;
     const accountId = target.igAccountId;
 
-    const mentionIds = await tx
-      .select({ id: storyMentions.id })
-      .from(storyMentions)
-      .innerJoin(stories, sql`${stories.id} = ${storyMentions.storyDbId}`)
-      .where(sql`${stories.igAccountId} = ${accountId}`);
+    // Account-scoped rows (profile snapshots, stories) are shared by every
+    // target watching the same username. Deleting one user's target must not
+    // wipe another user's observations: only remove them when no other target
+    // references this account. Target-scoped rows are always safe to delete.
+    const siblingRows = await tx
+      .select({ id: targets.id })
+      .from(targets)
+      .where(
+        sql`${targets.igAccountId} = ${accountId} AND ${targets.id} != ${targetId}`,
+      )
+      .limit(1);
+    const accountOrphaned = siblingRows.length === 0;
 
-    const deletedSnapshotIds = await tx
-      .delete(profileSnapshots)
-      .where(sql`${profileSnapshots.igAccountId} = ${accountId}`)
-      .returning({ id: profileSnapshots.id });
-    const deletedStoryIds = await tx
-      .delete(stories)
-      .where(sql`${stories.igAccountId} = ${accountId}`)
-      .returning({ id: stories.id });
+    const mentionIds =
+      accountOrphaned === false
+        ? []
+        : await tx
+            .select({ id: storyMentions.id })
+            .from(storyMentions)
+            .innerJoin(stories, sql`${stories.id} = ${storyMentions.storyDbId}`)
+            .where(sql`${stories.igAccountId} = ${accountId}`);
+
+    const deletedSnapshotIds =
+      accountOrphaned === false
+        ? []
+        : await tx
+            .delete(profileSnapshots)
+            .where(sql`${profileSnapshots.igAccountId} = ${accountId}`)
+            .returning({ id: profileSnapshots.id });
+    const deletedStoryIds =
+      accountOrphaned === false
+        ? []
+        : await tx
+            .delete(stories)
+            .where(sql`${stories.igAccountId} = ${accountId}`)
+            .returning({ id: stories.id });
     const deletedInteractionIds = await tx
       .delete(interactions)
       .where(sql`${interactions.targetId} = ${targetId}`)

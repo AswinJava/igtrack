@@ -4,6 +4,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty";
 import { formatRelative } from "@/lib/format";
+import { targetSyncState, syncTone } from "@/lib/sync-state";
+import { sourceBadgeForSources } from "@/lib/source-badge";
 import { CreateTargetForm } from "@/components/targets/create-target-form";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +18,7 @@ export default async function TargetsPage() {
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Tracked Accounts</h1>
-          <p className="mt-1 text-sm text-zinc-500">Public monitoring targets — every observation links to evidence.</p>
+          <p className="mt-1 text-sm text-zinc-500">Public monitoring targets — open an account to inspect its observations, history, and evidence.</p>
         </div>
         <div className="flex items-center gap-3">
           <span className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-400">{targets.length} target{targets.length !== 1 ? "s" : ""}</span>
@@ -45,8 +47,34 @@ export default async function TargetsPage() {
                     </div>
                     <Badge tone={t.status === "ACTIVE" ? "success" : t.status === "PAUSED" ? "warning" : "muted"}>{t.status}</Badge>
                   </div>
+                  {(() => {
+                    const badge =
+                      t.snapshotSourceId === null || t.snapshotSourceId === undefined
+                        ? null
+                        : sourceBadgeForSources([t.snapshotSourceId]);
+                    return badge === null ? null : (
+                      <p className="mt-2 text-xs" title={`Latest snapshot source: ${t.snapshotSourceId}`}>
+                        <Badge tone="muted">{badge}</Badge>
+                      </p>
+                    );
+                  })()}
                 </CardHeader>
                 <CardContent>
+                  {(() => {
+                    const sync = targetSyncState({
+                      status: t.status,
+                      latestJobStatus: t.latestJobStatus,
+                      latestJobOutcome: t.latestJobOutcome,
+                      latestJobCompletedAt: t.latestJobCompletedAt,
+                      lastObserved: t.lastObserved,
+                    });
+                    return (
+                      <p className="mb-2 text-xs text-zinc-500" title={sync.detail}>
+                        <Badge tone={syncTone(sync.state)}>{sync.state}</Badge>{" "}
+                        <span>{sync.detail}</span>
+                      </p>
+                    );
+                  })()}
                   <div className="flex flex-wrap gap-2 text-xs">
                     <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-zinc-400">{t.followerCount !== null ? `${t.followerCount.toLocaleString()} followers` : "followers unavailable"}</span>
                     <span className="rounded-full bg-zinc-800 px-2.5 py-1 text-zinc-400">{t.followingCount !== null ? `${t.followingCount.toLocaleString()} following` : "following unavailable"}</span>

@@ -38,14 +38,14 @@ export function CapabilityBadge({ state }: { state: CapabilityState }) {
 }
 
 export function ConfidenceBadge({ confidence }: { confidence: string }) {
-  const tone =
+  const tone: "success" | "warning" | "danger" | "muted" | "info" =
     confidence === "HIGH" ? "success" : confidence === "MEDIUM" ? "info" : confidence === "LOW" ? "warning" : "muted";
-  return <Badge tone={tone as any}>{confidence}</Badge>;
+  return <Badge tone={tone}>{confidence}</Badge>;
 }
 
 export function CategoryBadge({ category }: { category: string }) {
-  const tone =
+  const tone: "success" | "warning" | "danger" | "muted" | "info" =
     category === "OBSERVED" ? "info" : category === "DERIVED" ? "warning" : category === "INFERRED" ? "muted" : "danger";
   const label = category === "OBSERVED" ? "Observed" : category === "DERIVED" ? "Derived" : category === "INFERRED" ? "Inferred" : "Unavailable";
-  return <Badge tone={tone as any}>{label}</Badge>;
+  return <Badge tone={tone}>{label}</Badge>;
 }

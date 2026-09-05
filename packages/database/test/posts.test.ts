@@ -38,6 +38,7 @@ const hash = (label: string): string =>
 function postInput(postId: string, takenAt: Date) {
   return {
     owner: { username: "target_posts" },
+    commentsState: "OBSERVED" as const,
     post: {
       postId,
       takenAt: takenAt.toISOString(),

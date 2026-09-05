@@ -134,10 +134,34 @@ export async function recordProfileSnapshot(
         category: profile.meta.category,
         confidence: profile.meta.confidence,
       })
+      .onConflictDoNothing({
+        target: [
+          profileSnapshots.igAccountId,
+          profileSnapshots.sourceId,
+          profileSnapshots.observedAt,
+        ],
+      })
       .returning();
     const snapshot = snapshotRows[0];
     if (snapshot === undefined) {
-      throw new Error("igtrack: failed to insert profile snapshot");
+      // Lost the insert race after the pre-select missed (reclaim overlap):
+      // re-read the winner instead of failing the scan.
+      const raced = await tx
+        .select()
+        .from(profileSnapshots)
+        .where(
+          and(
+            eq(profileSnapshots.igAccountId, account.id),
+            eq(profileSnapshots.sourceId, input.evidence.source.id),
+            eq(profileSnapshots.observedAt, observedAt),
+          ),
+        )
+        .limit(1);
+      const racedRow = raced[0];
+      if (racedRow === undefined) {
+        throw new Error("igtrack: failed to insert profile snapshot");
+      }
+      return { snapshot: racedRow, changes: [], deduplicated: true };
     }
 
     const previousRows = await tx

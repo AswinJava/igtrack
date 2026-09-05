@@ -19,6 +19,7 @@ import {
 import {
   recordCapabilitySuccess,
   recordCapabilityFailure,
+  recordProviderMetrics,
   markCapabilityUnavailable,
   recordProfileSnapshot,
   recordFollowSnapshot,
@@ -29,6 +30,7 @@ import {
   persistFollowDiff,
   loadCheckpoint,
   saveCheckpoint,
+  renewJobLease,
   stageFollowScanMembers,
   loadStagedFollowScanMembers,
   clearStagedFollowScanMembers,
@@ -90,7 +92,8 @@ export function sourceKindFor(sourceId: string): SourceKind {
 
 // PC-T1: every provider capability call crosses the timeout boundary. A hang
 // becomes a typed retryable TIMEOUT capability failure (source health records
-// it); no evidence is produced and nothing is marked complete.
+// it); no evidence is produced and nothing is marked complete. Every call is
+// also counted in capability_metrics (best-effort) for operations visibility.
 async function providerCall<T>(
   db: Database,
   source: SourceInput,
@@ -98,10 +101,33 @@ async function providerCall<T>(
   op: () => Promise<CapabilityResult<T>>,
 ): Promise<CapabilityResult<T>> {
   const timeoutMs = providerTimeoutMs();
+  const startedAt = Date.now();
+  const count = async (
+    result: CapabilityResult<T> | null,
+    extra: { timedOut?: boolean } = {},
+  ): Promise<void> => {
+    try {
+      const errorKind = result?.error?.kind;
+      await recordProviderMetrics(db, {
+        source,
+        capability,
+        ok: result !== null && result.status !== CapabilityStatus.ERROR,
+        ...(extra.timedOut === true ? { timedOut: true } : {}),
+        ...(errorKind === "RATE_LIMITED" ? { rateLimited: true } : {}),
+        latencyMs: Date.now() - startedAt,
+        observedAt: new Date(startedAt),
+      });
+    } catch {
+      // Metrics must never break a scan.
+    }
+  };
   try {
-    return await withProviderTimeout(op(), capability, timeoutMs);
+    const result = await withProviderTimeout(op(), capability, timeoutMs);
+    await count(result);
+    return result;
   } catch (err) {
     if (err instanceof ProviderTimeoutError) {
+      await count(null, { timedOut: true });
       await recordCapabilityFailure(db, {
         source,
         capability,
@@ -114,6 +140,20 @@ async function providerCall<T>(
       });
     }
     throw err;
+  }
+}
+
+// Lease heartbeat for paged scans: extends locked_at while this worker still
+// owns the job (running + locked_by match). Returns false when ownership was
+// lost — the scan loop must then stop writing and report `lost` instead of
+// racing the reclaim winner. Never throws: renewal failure surfaces through
+// the existing complete/fail ownership guards.
+async function renewLease(db: Database, job: JobRecord): Promise<boolean> {
+  if (job.lockedBy === null) return true;
+  try {
+    return await renewJobLease(db, job.id, job.lockedBy);
+  } catch {
+    return true;
   }
 }
 
@@ -297,7 +337,7 @@ export async function runProfileScan(
         : {}),
     },
     result.data,
-    { capabilityStatus: result.status },
+    { capabilityStatus: result.status, jobId: job.id },
   );
 
   await recordProfileSnapshot(db, {
@@ -545,6 +585,16 @@ export async function runFollowScan(
 
     await persistCheckpoint(pageCursor);
 
+    // Heartbeat: a many-page scan must not look abandoned mid-run. When the
+    // lease was reclaimed elsewhere this returns false and the scan stops
+    // writing instead of racing the new owner.
+    if ((await renewLease(db, job)) === false) {
+      throw new JobExecutionError("Job lease lost during follow scan", {
+        kind: "LEASE_LOST",
+        retryable: false,
+      });
+    }
+
     if (pageComplete || pageCursor === undefined || pageCursor === "") {
       break;
     }
@@ -580,7 +630,7 @@ export async function runFollowScan(
       ref: account.username,
     },
     { count: members.length, usernames: members.map((e) => e.username) },
-    { direction, completion },
+    { direction, completion, jobId: job.id },
   );
 
   const result = await recordFollowSnapshot(db, {
@@ -600,12 +650,18 @@ export async function runFollowScan(
   });
 
   if (previous !== null && previous.id !== result.snapshot.id) {
-    await persistFollowDiff(db, {
-      targetId,
-      direction,
-      fromSnapshotId: previous.id,
-      toSnapshotId: result.snapshot.id,
-    });
+    // Diffs are derived only between COMPLETE snapshots. Diffing a PARTIAL
+    // scan against a previous snapshot would fabricate LOST_* deltas from a
+    // truncated page — the partial snapshot is still recorded, but no
+    // relationship change is claimed from it.
+    if (lastPageComplete && previous.completeness === "COMPLETE") {
+      await persistFollowDiff(db, {
+        targetId,
+        direction,
+        fromSnapshotId: previous.id,
+        toSnapshotId: result.snapshot.id,
+      });
+    }
   }
 
   // Clear the checkpoint and owned staging now the scan is complete so the
@@ -704,7 +760,7 @@ export async function runStoryScan(
       observationId,
       rawMeta,
       story,
-      { completion },
+      { completion, jobId: job.id },
     );
 
     // Mention evidence keyed by lowercase username, exactly as recordStory
@@ -732,6 +788,7 @@ export async function runStoryScan(
           storyId: story.storyId,
           classification: mention.visibilityClass,
           mentionedUsername: mention.account.username,
+          jobId: job.id,
         },
       );
     }
@@ -761,14 +818,89 @@ export async function runStoryScan(
 // ---------------------------------------------------------------------------
 // POST_SCAN
 //
-// Persists provider posts plus their publicly exposed comments. The v1
-// normalized post shape carries no next-cursor, so multi-page post listings
-// cannot be resumed honestly: a MEDIUM-confidence (more-pages) first page
-// completes as succeeded-partial with a coverage note instead of pretending
-// the listing is complete. A post with no comment source (fixture post-2) is
-// recorded without comments — UNAVAILABLE comments are skipped, never
-// empty-faked and never a job failure.
+// Persists provider posts plus their publicly exposed comments across ALL
+// pages: the listing resumes via CapabilityResult.nextCursor with a
+// POSTS_SCAN checkpoint, so multi-page media collections complete instead of
+// truncating at 25. Per-post comment observation state is recorded at insert
+// time (the table is append-only): OBSERVED (source read, even when empty),
+// UNAVAILABLE (no exposed comment source — skipped, never empty-faked),
+// NOT_SCANNED (comments capability off). A duplicate-cursor loop guard stops
+// pathological providers instead of paging forever.
 // ---------------------------------------------------------------------------
+
+const POSTS_CHECKPOINT_KIND = "POSTS_SCAN";
+
+async function fetchCommentPages(
+  db: Database,
+  source: SourceInput,
+  provider: InstagramProvider,
+  post: NormalizedPost,
+): Promise<{
+  comments: NormalizedComment[];
+  state: "OBSERVED" | "UNAVAILABLE";
+  truncated: boolean;
+  rawPayloadHash?: string;
+  rawReference?: string;
+}> {
+  const comments: NormalizedComment[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  let truncated = false;
+  let rawPayloadHash: string | undefined;
+  let rawReference: string | undefined;
+  for (;;) {
+    const result: CapabilityResult<NormalizedComment[]> = await providerCall(
+      db,
+      source,
+      "getPublicComments",
+      () => provider.getPublicComments(post, cursor !== undefined ? { value: cursor } : undefined),
+    );
+    if (result.status === CapabilityStatus.UNAVAILABLE) {
+      // A post with no exposed comment source stays comment-less. The gap is
+      // recorded in source health; the post itself is still a real observation.
+      await markCapabilityUnavailable(db, {
+        source,
+        capability: "getPublicComments",
+        coverageNote: result.note ?? `No comment source for post ${post.postId}.`,
+      });
+      return { comments, state: "UNAVAILABLE", truncated: false };
+    }
+    if (result.status === CapabilityStatus.ERROR) {
+      const err = result.error;
+      await recordCapabilityFailure(db, {
+        source,
+        capability: "getPublicComments",
+        reason: err?.message ?? "Provider error",
+        errorCategory: err?.kind ?? "INTERNAL",
+      });
+      throw new JobExecutionError(err?.message ?? "Provider error", {
+        kind: err?.kind ?? "INTERNAL",
+        retryable: resolvedRetryable(err),
+        ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+      });
+    }
+    if (result.data !== undefined) comments.push(...result.data);
+    if (rawPayloadHash === undefined) rawPayloadHash = result.rawPayloadHash;
+    if (rawReference === undefined) rawReference = result.rawReference;
+    const next = result.nextCursor;
+    // Duplicate cursor = pathological provider loop: stop instead of paging
+    // forever, and flag the listing truncated so the scan reports partial.
+    if (next !== undefined && next !== "" && seenCursors.has(next)) {
+      truncated = true;
+      break;
+    }
+    if (next === undefined || next === "") break;
+    seenCursors.add(next);
+    cursor = next;
+  }
+  return {
+    comments,
+    state: "OBSERVED",
+    truncated,
+    ...(rawPayloadHash !== undefined ? { rawPayloadHash } : {}),
+    ...(rawReference !== undefined ? { rawReference } : {}),
+  };
+}
 
 export async function runPostScan(
   db: Database,
@@ -800,99 +932,51 @@ export async function runPostScan(
     });
   }
 
+  // Resume an owned multi-page listing; a foreign checkpoint starts fresh.
+  const postCheckpoint = await loadCheckpoint(db, targetId, POSTS_CHECKPOINT_KIND);
+  let postCursor =
+    postCheckpoint !== null && postCheckpoint.jobId === job.id
+      ? (postCheckpoint.progress as { cursor?: string } | null)?.cursor ??
+        postCheckpoint.cursor ??
+        undefined
+      : undefined;
+  await saveCheckpoint(db, {
+    targetId,
+    kind: POSTS_CHECKPOINT_KIND,
+    jobId: job.id,
+    ...(postCursor !== undefined ? { cursor: postCursor } : {}),
+    page: 0,
+    progress: { ...(postCursor !== undefined ? { cursor: postCursor } : {}), page: 0 },
+  });
+
   const ref = accountRef(account);
-  const result: CapabilityResult<NormalizedPost[]> = await providerCall(
-    db,
-    source,
-    "getPublicPosts",
-    () => src.provider.getPublicPosts(ref),
-  );
+  const seenCursors = new Set<string>();
+  let pagesProcessed = 0;
+  let postsObserved = 0;
+  let truncated = false;
 
-  if (result.status === CapabilityStatus.UNAVAILABLE) {
-    await markCapabilityUnavailable(db, {
-      source,
-      capability: "getPublicPosts",
-      coverageNote: result.note ?? "Posts unavailable from this source.",
-    });
-    return "unavailable";
-  }
-
-  if (result.status === CapabilityStatus.ERROR) {
-    const err = result.error;
-    await recordCapabilityFailure(db, {
-      source,
-      capability: "getPublicPosts",
-      reason: err?.message ?? "Provider error",
-      errorCategory: err?.kind ?? "INTERNAL",
-    });
-    throw new JobExecutionError(err?.message ?? "Provider error", {
-      kind: err?.kind ?? "INTERNAL",
-      retryable: resolvedRetryable(err),
-      ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
-    });
-  }
-
-  if (result.data === undefined) {
-    throw new JobExecutionError("Provider returned no post data", { retryable: false });
-  }
-
-  const posts = result.data;
-  const partial =
-    result.status === CapabilityStatus.PARTIAL || result.confidence === Confidence.MEDIUM;
-
-  for (const post of posts) {
-    const postEvidence = evidenceFrom(
-      source,
-      "post",
-      `post:${account.username}:${post.postId}@${post.meta.observedAt}`,
-      {
-        observedAt: post.meta.observedAt,
-        confidence: post.meta.confidence,
-        ref: account.username,
-        ...(result.rawPayloadHash !== undefined
-          ? { rawPayloadHash: result.rawPayloadHash }
-          : {}),
-        ...(result.rawReference !== undefined
-          ? { rawReference: result.rawReference }
-          : {}),
-      },
-      post,
-      { completion: partial ? "PARTIAL" : "COMPLETE" },
-    );
-
-    const { post: postRow } = await recordPost(db, {
-      targetId,
-      owner: ref,
-      post,
-      sourceId: source.id,
-      evidence: postEvidence,
-    });
-
-    if (!commentsSupported) continue;
-
-    const comments: CapabilityResult<NormalizedComment[]> = await providerCall(
+  for (;;) {
+    const result: CapabilityResult<NormalizedPost[]> = await providerCall(
       db,
       source,
-      "getPublicComments",
-      () => src.provider.getPublicComments(post),
+      "getPublicPosts",
+      () => src.provider.getPublicPosts(ref, postCursor !== undefined ? { value: postCursor } : undefined),
     );
 
-    if (comments.status === CapabilityStatus.UNAVAILABLE) {
-      // A post with no exposed comment source stays comment-less. The gap is
-      // recorded in source health; the post itself is still a real observation.
+    if (result.status === CapabilityStatus.UNAVAILABLE) {
       await markCapabilityUnavailable(db, {
         source,
-        capability: "getPublicComments",
-        coverageNote:
-          comments.note ?? `No comment source for post ${post.postId}.`,
+        capability: "getPublicPosts",
+        coverageNote: result.note ?? "Posts unavailable from this source.",
       });
-      continue;
+      return "unavailable";
     }
-    if (comments.status === CapabilityStatus.ERROR) {
-      const err = comments.error;
+
+    if (result.status === CapabilityStatus.ERROR) {
+      const err = result.error;
       await recordCapabilityFailure(db, {
         source,
-        capability: "getPublicComments",
+        capability: "getPublicPosts",
         reason: err?.message ?? "Provider error",
         errorCategory: err?.kind ?? "INTERNAL",
       });
@@ -902,40 +986,126 @@ export async function runPostScan(
         ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
       });
     }
-    if (comments.data === undefined) continue;
 
-    for (const comment of comments.data) {
-      const commentEvidence = evidenceFrom(
+    if (result.data === undefined) {
+      throw new JobExecutionError("Provider returned no post data", { retryable: false });
+    }
+
+    const posts = result.data;
+    const pagePartial =
+      result.status === CapabilityStatus.PARTIAL || result.confidence === Confidence.MEDIUM;
+
+    for (const post of posts) {
+      // Comments resolve BEFORE the post row is written: the posts table is
+      // append-only, so per-post comment state must be known at insert time.
+      let commentsState: "OBSERVED" | "UNAVAILABLE" | "NOT_SCANNED" = "NOT_SCANNED";
+      let postComments: NormalizedComment[] = [];
+      let commentRawHash: string | undefined;
+      let commentRawRef: string | undefined;
+      if (commentsSupported) {
+        const fetched = await fetchCommentPages(db, source, src.provider, post);
+        postComments = fetched.comments;
+        commentsState = fetched.state;
+        commentRawHash = fetched.rawPayloadHash;
+        commentRawRef = fetched.rawReference;
+        if (fetched.truncated) truncated = true;
+      }
+
+      const postEvidence = evidenceFrom(
         source,
-        "post_comment",
-        `post_comment:${account.username}:${post.postId}:${comment.commentId}@${comment.meta.observedAt}`,
+        "post",
+        `post:${account.username}:${post.postId}@${post.meta.observedAt}`,
         {
-          observedAt: comment.meta.observedAt,
-          confidence: comment.meta.confidence,
-          ...(comments.rawPayloadHash !== undefined
-            ? { rawPayloadHash: comments.rawPayloadHash }
+          observedAt: post.meta.observedAt,
+          confidence: post.meta.confidence,
+          ref: account.username,
+          ...(result.rawPayloadHash !== undefined
+            ? { rawPayloadHash: result.rawPayloadHash }
             : {}),
-          ...(comments.rawReference !== undefined
-            ? { rawReference: comments.rawReference }
+          ...(result.rawReference !== undefined
+            ? { rawReference: result.rawReference }
             : {}),
         },
-        comment,
-        { postId: post.postId },
+        post,
+        { completion: pagePartial ? "PARTIAL" : "COMPLETE", jobId: job.id },
       );
-      await recordPostComment(db, {
-        postDbId: postRow.id,
-        comment,
-        evidence: commentEvidence,
+
+      const { post: postRow } = await recordPost(db, {
+        targetId,
+        owner: ref,
+        post,
+        sourceId: source.id,
+        evidence: postEvidence,
+        commentsState,
+      });
+
+      for (const comment of postComments) {
+        const commentEvidence = evidenceFrom(
+          source,
+          "post_comment",
+          `post_comment:${account.username}:${post.postId}:${comment.commentId}@${comment.meta.observedAt}`,
+          {
+            observedAt: comment.meta.observedAt,
+            confidence: comment.meta.confidence,
+            ...(commentRawHash !== undefined ? { rawPayloadHash: commentRawHash } : {}),
+            ...(commentRawRef !== undefined ? { rawReference: commentRawRef } : {}),
+          },
+          comment,
+          { postId: post.postId, jobId: job.id },
+        );
+        await recordPostComment(db, {
+          postDbId: postRow.id,
+          comment,
+          evidence: commentEvidence,
+        });
+      }
+
+      postsObserved += 1;
+    }
+
+    pagesProcessed += 1;
+    await saveCheckpoint(db, {
+      targetId,
+      kind: POSTS_CHECKPOINT_KIND,
+      jobId: job.id,
+      ...(result.nextCursor !== undefined ? { cursor: result.nextCursor } : {}),
+      page: pagesProcessed,
+      progress: {
+        ...(result.nextCursor !== undefined ? { cursor: result.nextCursor } : {}),
+        page: pagesProcessed,
+      },
+    });
+    if ((await renewLease(db, job)) === false) {
+      throw new JobExecutionError("Job lease lost during posts scan", {
+        kind: "LEASE_LOST",
+        retryable: false,
       });
     }
+
+    const next = result.nextCursor;
+    if (next === undefined || next === "" || seenCursors.has(next)) {
+      // Duplicate cursor = pathological provider loop: stop instead of paging
+      // forever, and report the listing as truncated (partial).
+      if (next !== undefined && next !== "") truncated = true;
+      break;
+    }
+    seenCursors.add(next);
+    postCursor = next;
   }
+
+  await saveCheckpoint(db, {
+    targetId,
+    kind: POSTS_CHECKPOINT_KIND,
+    page: 0,
+    progress: { page: 0 },
+  });
 
   await recordCapabilitySuccess(db, {
     source,
     capability: "getPublicPosts",
   });
 
-  if (posts.length === 0) return "succeeded-empty";
-  return partial ? "succeeded-partial" : "succeeded";
+  if (postsObserved === 0) return "succeeded-empty";
+  return truncated ? "succeeded-partial" : "succeeded";
 }
 

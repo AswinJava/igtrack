@@ -35,7 +35,7 @@ export default async function SettingsPage() {
         <Card>
           <CardHeader>
             <CardTitle>Privacy &amp; retention</CardTitle>
-            <CardDescription>Built from day one — see docs/platform-limitations.md.</CardDescription>
+            <CardDescription>Built from day one.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 text-sm text-zinc-400">
             <p>Deleting a tracked account cascades its observations, snapshots, deltas, stories, interactions, and related evidence through the retention boundary (<code className="font-mono">deleteOwnedTarget</code>). Shared registry rows under ig_accounts intentionally survive deletion.</p>
@@ -50,7 +50,7 @@ export default async function SettingsPage() {
             <CardDescription>What IGTrack can and cannot know.</CardDescription>
           </CardHeader>
           <CardContent className="text-sm text-zinc-400">
-            <p>See docs/platform-limitations.md for the honest capability map: public profile metadata, story existence while live, mention metadata where exposed, paginated follower/following lists. Comment monitoring is not currently active. No DMs, no private likes history, no private-account access without authorization.</p>
+            <p>Honest capability map: public profile metadata, story existence while live, mention metadata where exposed, and follower/following lists where the configured provider exposes them. Public comments are recorded where the provider exposes them — a post with no exposed comment source stays comment-less. No DMs, no private likes history, no private-account access without authorization. Anything the source cannot answer is shown as unavailable, never zero.</p>
           </CardContent>
         </Card>
       </div>

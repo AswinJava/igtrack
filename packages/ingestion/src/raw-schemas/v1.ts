@@ -93,10 +93,15 @@ export const rawFollowPageV1 = z.object({
 export const rawPostV1 = z.object({
   id: z.string().min(1),
   shortcode: z.string().optional(),
+  permalink: z.string().optional(),
   taken_at: isoDatetime,
   caption: z.string().optional(),
   like_count: z.number().int().nonnegative().optional(),
   comment_count: z.number().int().nonnegative().optional(),
+  // Optional provider-declared media typing (v1 fixture files omit these;
+  // future sets and live adapters may carry them). IMAGE/VIDEO/CAROUSEL only.
+  media_type: z.string().optional(),
+  media_product_type: z.string().optional(),
 });
 
 export const rawPostsPageV1 = z.object({

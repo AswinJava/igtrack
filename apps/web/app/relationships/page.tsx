@@ -22,7 +22,7 @@ export default async function RelationshipsPage({
       <h1 className="text-xl font-semibold tracking-tight">Relationships</h1>
       <p className="mt-1 text-sm text-zinc-500">
         Observed relationship signals — <span className="font-medium text-amber-400">simple heuristic counts</span> from
-        synthetic fixture observations, never knowledge about real relationships.
+        observed sources, never knowledge about real relationships.
       </p>
 
       <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-4 py-3 text-xs leading-relaxed text-amber-200">
@@ -80,7 +80,7 @@ export default async function RelationshipsPage({
             <div className="mt-4 rounded-lg bg-zinc-800/50 px-4 py-3 text-xs text-zinc-500">
               <p className="font-medium text-zinc-400">How the score works</p>
               <p className="mt-1">Heuristic score = mentions × 12 + follow signals × 8. The weights are arbitrary and transparent — they order accounts by raw signal volume only.</p>
-              <p className="mt-1">All underlying data is synthetic fixture data. No recency decay, persistence weighting, or reciprocal-signal analysis is implemented.</p>
+              <p className="mt-1">All underlying data comes from observed sources and is marked with its provenance. No recency decay, persistence weighting, or reciprocal-signal analysis is implemented.</p>
               <p className="mt-1">Public likes are UNAVAILABLE — Instagram exposes no public likes feed, so they are never counted here. Frequently observed public associations are derived analytics, not “favourite people”.</p>
             </div>
           </CardContent>

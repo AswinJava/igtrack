@@ -43,11 +43,12 @@ export interface InstagramProvider {
   ): Promise<CapabilityResult<NormalizedFollowPage>>;
   /**
    * PRODUCT STATUS: provider-level AVAILABLE in fixture:v1 (synthetic posts +
-   * comments for the fixture target), but no scan executor, persistence model,
-   * evidence path, query, or UI consumes these methods yet. They must not be
-   * presented as supported product features until the complete pipeline exists;
-   * see docs/platform-limitations.md capability matrix (PARTIAL at provider,
-   * UNAVAILABLE at product).
+   * comments for the fixture target) and the official Graph API (owned
+   * account media + comments), consumed end-to-end by the POSTS_SCAN executor
+   * (persistence in posts/post_comments, evidence, content tab). Multi-page
+   * listings resume via CapabilityResult.nextCursor; a result without
+   * nextCursor is a complete listing. Highlights, reels-as-distinct-type, and
+   * likes have no provider method anywhere — those stay UNAVAILABLE.
    */
   getPublicPosts(
     account: NormalizedAccountRef,

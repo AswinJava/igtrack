@@ -102,10 +102,40 @@ export async function recordFollowSnapshot(
           : {}),
         ...(evidenceId !== undefined ? { evidenceId } : {}),
       })
+      .onConflictDoNothing({
+        target: [
+          followSnapshots.targetId,
+          followSnapshots.direction,
+          followSnapshots.takenAt,
+          followSnapshots.sourceId,
+        ],
+      })
       .returning();
     const snapshot = snapshotRows[0];
     if (snapshot === undefined) {
-      throw new Error("igtrack: failed to insert follow snapshot");
+      // Lost the insert race after the pre-select missed (reclaim overlap):
+      // re-read the winner instead of failing the scan.
+      const raced = await tx
+        .select()
+        .from(followSnapshots)
+        .where(
+          and(
+            eq(followSnapshots.targetId, input.targetId),
+            eq(followSnapshots.direction, input.direction),
+            eq(followSnapshots.takenAt, takenAt),
+            eq(followSnapshots.sourceId, input.source.id),
+          ),
+        )
+        .limit(1);
+      const racedRow = raced[0];
+      if (racedRow === undefined) {
+        throw new Error("igtrack: failed to insert follow snapshot");
+      }
+      return {
+        snapshot: racedRow,
+        memberCount: input.page.entries.length,
+        deduplicated: true,
+      };
     }
 
     if (accountIds.length > 0) {
@@ -162,6 +192,23 @@ async function snapshotMemberIds(
     .from(followSnapshotMembers)
     .where(sql`${followSnapshotMembers.snapshotId} = ${snapshotId}`);
   return rows.map((r) => r.igAccountId);
+}
+
+// Auditable member roster for the UI: usernames in one ordered query so a
+// snapshot's contents can be inspected (bounded; the delta list stays the
+// change surface for large rosters).
+export async function listMembersForSnapshot(
+  db: Database,
+  snapshotId: string,
+  limit = 50,
+): Promise<{ username: string }[]> {
+  return db
+    .select({ username: igAccounts.username })
+    .from(followSnapshotMembers)
+    .innerJoin(igAccounts, sql`${igAccounts.id} = ${followSnapshotMembers.igAccountId}`)
+    .where(sql`${followSnapshotMembers.snapshotId} = ${snapshotId}`)
+    .orderBy(igAccounts.username)
+    .limit(limit);
 }
 
 export interface PersistFollowDiffResult {
@@ -244,6 +291,9 @@ export async function persistFollowDiff(
 export interface DeltaWithAccount extends FollowDeltaRecord {
   username: string;
   displayName: string | null;
+  // Evidence of the snapshot this delta was derived INTO: every "newly
+  // observed" claim links to the observation that first contained it.
+  toEvidenceId: string | null;
 }
 
 export async function listRecentDeltas(
@@ -273,9 +323,11 @@ export async function listRecentDeltas(
       createdAt: followDeltas.createdAt,
       username: igAccounts.username,
       displayName: igAccounts.displayName,
+      toEvidenceId: followSnapshots.evidenceId,
     })
     .from(followDeltas)
     .innerJoin(igAccounts, sql`${igAccounts.id} = ${followDeltas.igAccountId}`)
+    .leftJoin(followSnapshots, sql`${followSnapshots.id} = ${followDeltas.toSnapshotId}`)
     .where(and(...conditions))
     .orderBy(desc(followDeltas.firstSeenAt))
     .limit(options.limit ?? 50);

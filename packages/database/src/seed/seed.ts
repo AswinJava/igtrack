@@ -181,6 +181,18 @@ export async function seed(db: Database): Promise<void> {
     direction: "FOLLOWING",
     source: SYNTHETIC_SOURCE,
     takenAt: at(1),
+    evidence: {
+      observationKind: "follow_snapshot",
+      source: SYNTHETIC_SOURCE,
+      sourceReference: "seed:v1/following",
+      schemaVersion: "v1",
+      observedAt: at(1),
+      capturedAt: at(1),
+      confidence: Confidence.HIGH,
+      rawHash: fixedHash("follow-snap-1"),
+      normalizedHash: fixedHash("follow-snap-norm-1"),
+      metadata: { synthetic: true },
+    },
     page: {
       entries: [
         { username: "person_alpha", igId: "9100000002" },
@@ -199,6 +211,18 @@ export async function seed(db: Database): Promise<void> {
     direction: "FOLLOWING",
     source: SYNTHETIC_SOURCE,
     takenAt: at(2),
+    evidence: {
+      observationKind: "follow_snapshot",
+      source: SYNTHETIC_SOURCE,
+      sourceReference: "seed:v1/following",
+      schemaVersion: "v1",
+      observedAt: at(2),
+      capturedAt: at(2),
+      confidence: Confidence.HIGH,
+      rawHash: fixedHash("follow-snap-2"),
+      normalizedHash: fixedHash("follow-snap-norm-2"),
+      metadata: { synthetic: true },
+    },
     page: {
       entries: [
         { username: "person_alpha", igId: "9100000002" },

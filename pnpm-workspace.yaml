@@ -7,3 +7,6 @@ onlyBuiltDependencies:
   - esbuild
 allowBuilds:
   esbuild: true
+
+overrides:
+  postcss: '^8.5.26'

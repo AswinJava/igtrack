@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 const primary = [
   { href: "/", label: "Dashboard", icon: "◧" },
@@ -11,6 +12,7 @@ const primary = [
 ];
 
 const secondary = [
+  { href: "/lookup", label: "Lookup", icon: "⌕" },
   { href: "/evidence", label: "Evidence", icon: "⬔" },
   { href: "/diagnostics", label: "Diagnostics", icon: "⬢" },
   { href: "/settings", label: "Settings", icon: "⚙" },
@@ -35,6 +37,30 @@ function NavItem({ href, label, icon, active }: { href: string; label: string; i
 export function Sidebar() {
   const pathname = usePathname();
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
+  // Provider pill reflects the live /api/healthz probe — never hardcoded, so a
+  // graph deployment stops claiming synthetic data.
+  const [provider, setProvider] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/healthz", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((json: unknown) => {
+        if (cancelled) return;
+        const name =
+          typeof json === "object" && json !== null && "provider" in json
+            ? String((json as { provider: unknown }).provider)
+            : null;
+        setProvider(name);
+      })
+      .catch(() => {
+        if (!cancelled) setProvider(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const pill =
+    provider === null ? null : provider === "graph" ? "LIVE" : "SYNTHETIC";
 
   return (
     <aside className="hidden w-64 shrink-0 flex-col border-r border-zinc-800 bg-zinc-950 lg:flex">
@@ -43,9 +69,11 @@ export function Sidebar() {
           I
         </div>
         <span className="text-sm font-semibold tracking-tight">IGTrack</span>
-        <span className="ml-auto rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-amber-400">
-          SYNTHETIC
-        </span>
+        {pill !== null && (
+          <span className="ml-auto rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium tracking-widest text-amber-400">
+            {pill}
+          </span>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 py-4">
@@ -67,7 +95,7 @@ export function Sidebar() {
       <div className="border-t border-zinc-800 p-4">
         <p className="text-xs font-medium text-zinc-400">Evidence-first</p>
         <p className="mt-1 text-xs leading-relaxed text-zinc-500">
-          Every claim links to provenance. Inferred intelligence is never presented as fact.
+          Claims link to provenance. Inferred intelligence is never presented as fact.
         </p>
       </div>
     </aside>

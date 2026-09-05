@@ -1,8 +1,9 @@
-// Simple in-memory rate limiters (Phase 10 login, Phase 15 target mutations).
-// Single-process, non-persistent: suitable for the modular monolith's current
-// deployment (one web process; state resets on restart). A distributed limiter
-// (Redis / DB) would replace this only if the app scales to multiple web
-// instances. Documented as single-process — never claim distributed protection.
+// Rate limiting seam: the deployment runs ONE web process (render.yaml single
+// service, docker-compose single web), so the default store is in-memory.
+// The RateLimiter interface is the migration path — a shared-store (Redis/DB)
+// implementation can replace InMemoryRateLimiter without touching call sites
+// if the app ever scales horizontally. Until then, documented as
+// single-process: never claim distributed protection.
 //
 // Contract: limit to N attempts per window per key. Returns 429 with
 // Retry-After when exceeded. Never logs passwords or tokens.
@@ -13,56 +14,82 @@ export interface RateLimitResult {
   remaining?: number;
 }
 
+export interface RateLimiter {
+  check(key: string, opts: { windowMs: number; max: number; now?: number }): RateLimitResult;
+  reset(key?: string): void;
+}
+
 interface Bucket {
   count: number;
   windowStart: number;
 }
 
-// ttlMs sweeps stale buckets — prevents unbounded memory growth.
-// Under normal load (<1k distinct IPs) memory is trivial; worst-case a
-// hostile sweep could grow the map — mitigation: periodic prune + cap.
-const buckets = new Map<string, Bucket>();
-let lastPruneAt = 0;
+class InMemoryRateLimiter implements RateLimiter {
+  private readonly buckets = new Map<string, Bucket>();
+  private lastPruneAt = 0;
 
-function prune(now: number, windowMs: number): void {
-  if (now - lastPruneAt < windowMs) return;
-  lastPruneAt = now;
-  for (const [k, b] of buckets) {
-    if (now - b.windowStart > windowMs * 2) buckets.delete(k);
-  }
-  // hard cap: if still huge, drop oldest (defense against hostile key spam)
-  if (buckets.size > 5000) {
-    const toDelete = buckets.size - 4000;
-    let i = 0;
-    for (const k of buckets.keys()) {
-      if (i++ >= toDelete) break;
-      buckets.delete(k);
+  // Sweeps stale buckets — prevents unbounded memory growth.
+  // Under normal load (<1k distinct IPs) memory is trivial; worst-case a
+  // hostile sweep could grow the map — mitigation: periodic prune + cap.
+  private prune(now: number, windowMs: number): void {
+    if (now - this.lastPruneAt < windowMs) return;
+    this.lastPruneAt = now;
+    for (const [k, b] of this.buckets) {
+      if (now - b.windowStart > windowMs * 2) this.buckets.delete(k);
+    }
+    // hard cap: if still huge, drop oldest (defense against hostile key spam)
+    if (this.buckets.size > 5000) {
+      const toDelete = this.buckets.size - 4000;
+      let i = 0;
+      for (const k of this.buckets.keys()) {
+        if (i++ >= toDelete) break;
+        this.buckets.delete(k);
+      }
     }
   }
+
+  check(
+    key: string,
+    opts: { windowMs: number; max: number; now?: number },
+  ): RateLimitResult {
+    const now = opts.now ?? Date.now();
+    this.prune(now, opts.windowMs);
+    const existing = this.buckets.get(key);
+    if (!existing || now - existing.windowStart >= opts.windowMs) {
+      this.buckets.set(key, { count: 1, windowStart: now });
+      return { allowed: true, remaining: opts.max - 1 };
+    }
+    if (existing.count < opts.max) {
+      existing.count += 1;
+      return { allowed: true, remaining: opts.max - existing.count };
+    }
+    const retryAfterMs = existing.windowStart + opts.windowMs - now;
+    return { allowed: false, retryAfterMs: Math.max(0, retryAfterMs) };
+  }
+
+  reset(key?: string): void {
+    if (key) this.buckets.delete(key);
+    else this.buckets.clear();
+  }
+}
+
+// Process-wide default. All existing call sites go through these functions,
+// so swapping the store is one line: setDefaultRateLimiter(new SharedLimiter).
+let defaultLimiter: RateLimiter = new InMemoryRateLimiter();
+
+export function setDefaultRateLimiter(limiter: RateLimiter): void {
+  defaultLimiter = limiter;
 }
 
 export function checkRateLimit(
   key: string,
   opts: { windowMs: number; max: number; now?: number },
 ): RateLimitResult {
-  const now = opts.now ?? Date.now();
-  prune(now, opts.windowMs);
-  const existing = buckets.get(key);
-  if (!existing || now - existing.windowStart >= opts.windowMs) {
-    buckets.set(key, { count: 1, windowStart: now });
-    return { allowed: true, remaining: opts.max - 1 };
-  }
-  if (existing.count < opts.max) {
-    existing.count += 1;
-    return { allowed: true, remaining: opts.max - existing.count };
-  }
-  const retryAfterMs = existing.windowStart + opts.windowMs - now;
-  return { allowed: false, retryAfterMs: Math.max(0, retryAfterMs) };
+  return defaultLimiter.check(key, opts);
 }
 
 export function resetRateLimitForTest(key?: string): void {
-  if (key) buckets.delete(key);
-  else buckets.clear();
+  defaultLimiter.reset(key);
 }
 
 // Convenience for the login route: per-IP + per-email key so an attacker

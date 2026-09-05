@@ -42,6 +42,21 @@ export function schedulerEnabled(): boolean {
   return process.env.IGTRACK_SCHEDULER_ENABLED !== "false";
 }
 
+// Deterministic per-target stagger: without it every target in a tick shares
+// one windowStart AND one availableAt, so the whole fleet becomes claimable
+// in the same instant (thundering herd to the provider). Spreading each
+// target's availability across its window by a stable hash of its id keeps
+// single-tick bursts bounded while remaining fully deterministic and
+// observable via the job's available_at.
+export function staggerMs(targetId: string, intervalMs: number): number {
+  let hash = 2166136261;
+  for (let i = 0; i < targetId.length; i += 1) {
+    hash ^= targetId.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash) % intervalMs;
+}
+
 export function schedulerTickIntervalMs(): number {
   const parsed = Number(process.env.IGTRACK_SCHEDULER_TICK_MS);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
@@ -86,6 +101,7 @@ export async function runSchedulerTick(
           kind,
           targetId,
           windowStart,
+          availableAt: new Date(windowStart.getTime() + staggerMs(targetId, intervals[kind])),
         });
         if (enqueued) {
           result.enqueued += 1;

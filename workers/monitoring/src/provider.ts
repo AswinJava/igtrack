@@ -38,6 +38,7 @@ export function defaultFixturesDir(): string {
 }
 
 export function providerFromEnv(): ExecutionSource {
+
   const name = process.env.IGTRACK_PROVIDER ?? "fixture";
   // Credential-safety: an unknown provider name or a missing Graph credential
   // is a *configuration* failure, not a provider UNAVAILABLE. The worker must
@@ -48,7 +49,7 @@ export function providerFromEnv(): ExecutionSource {
   }
   if (name !== "fixture") {
     const expected =
-      'IGTRACK_PROVIDER=fixture|graph (allowed values: "fixture", "graph"; the Graph API provider requires an owned Business/Creator account + Meta app + token via env — see docs/platform-limitations.md)';
+      'IGTRACK_PROVIDER=fixture|graph (allowed values: "fixture", "graph"; the Graph API provider requires an owned Business/Creator account + Meta app + token via env: IGTRACK_GRAPH_ACCESS_TOKEN, IGTRACK_GRAPH_IG_USER_ID, IGTRACK_GRAPH_USERNAME)';
     throw new Error(
       `igtrack worker: no provider implementation for "${name}". Expected ${expected}.`,
     );

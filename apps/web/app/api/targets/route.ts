@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
+import { CapabilityErrorKind, CapabilityStatus } from "@igtrack/core";
 import {
   createTarget,
   enqueueJob,
@@ -8,26 +8,16 @@ import {
 import { getDatabase } from "@/lib/db";
 import { requireApiSession } from "@/lib/auth";
 import { respondError } from "@/lib/api-helpers";
+import { targetCreateSchema as createBody } from "@/lib/target-validation";
+import { getProvider } from "@/lib/provider";
 
 export const dynamic = "force-dynamic";
-
-const createBody = z.object({
-  username: z
-    .string()
-    .min(1)
-    .max(40)
-    .transform((v) => v.trim().replace(/^@/, "").toLowerCase())
-    .pipe(z.string().regex(/^[a-z0-9._]+$/, "invalid Instagram username")),
-  localName: z.string().trim().max(200).optional(),
-  notes: z.string().trim().max(5000).optional(),
-  tags: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
-});
 
 const NO_STORE = { "Cache-Control": "no-store" } as const;
 
 // POST /api/targets — create a monitoring target for the authenticated user.
-// Creating does NOT assume Instagram availability: observation is queued and
-// executed through the provider capability pipeline.
+// The username must resolve through the configured provider first; only then
+// is the target row created and the initial observation loop queued.
 export async function POST(req: NextRequest) {
   try {
     const { isSameOrigin } = await import("@/lib/csrf");
@@ -50,6 +40,57 @@ export async function POST(req: NextRequest) {
       );
     }
     const body = createBody.parse(await req.json());
+
+    // A target is only created for an account the configured provider can
+    // actually resolve: nonexistent names get 404, private accounts 403, so
+    // no target is ever created from an invalid preview. Transient provider
+    // trouble surfaces as 502/503 and creates nothing.
+    const resolved = await getProvider().resolveAccount(body.username);
+    if (resolved.status === CapabilityStatus.ERROR) {
+      const kind = resolved.error?.kind;
+      if (kind === CapabilityErrorKind.ACCOUNT_NOT_FOUND) {
+        return NextResponse.json(
+          {
+            error: {
+              code: "NOT_FOUND",
+              message: `No public account @${body.username} is observable from this source.`,
+            },
+          },
+          { status: 404, headers: NO_STORE },
+        );
+      }
+      if (kind === CapabilityErrorKind.ACCOUNT_PRIVATE) {
+        return NextResponse.json(
+          {
+            error: {
+              code: "FORBIDDEN",
+              message: `Account @${body.username} is private; public monitoring is unavailable.`,
+            },
+          },
+          { status: 403, headers: NO_STORE },
+        );
+      }
+      return NextResponse.json(
+        {
+          error: {
+            code: "PROVIDER_ERROR",
+            message: resolved.error?.message ?? "Provider temporarily unavailable.",
+          },
+        },
+        { status: 502, headers: NO_STORE },
+      );
+    }
+    if (resolved.status === CapabilityStatus.UNAVAILABLE) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "CAPABILITY_UNAVAILABLE",
+            message: resolved.note ?? "Account resolution is unavailable from this source.",
+          },
+        },
+        { status: 503, headers: NO_STORE },
+      );
+    }
 
     const db = getDatabase();
     const { target, created } = await createTarget(db, {

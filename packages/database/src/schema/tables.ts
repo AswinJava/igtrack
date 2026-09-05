@@ -252,6 +252,10 @@ export const stories = pgTable(
     durationMs: integer("duration_ms"),
     caption: text("caption"),
     hasLink: boolean("has_link").notNull().default(false),
+    // The provider-supplied link target when hasLink is true; null when the
+    // provider exposes no URL (graph) or none was attached. Rendered only as
+    // a user-initiated outbound link, never fetched server-side.
+    linkUrl: text("link_url"),
     stickerKinds: text("sticker_kinds").array().notNull().default([]),
     poll: jsonb("poll"),
     question: jsonb("question"),
@@ -324,8 +328,21 @@ export const posts = pgTable(
     takenAt: timestamptz("taken_at").notNull(),
     caption: text("caption"),
     shortcode: text("shortcode"),
+    // Full provider-supplied permalink (post URL) when the provider exposes
+    // one. Rendered only as a user-initiated outbound link behind an
+    // http(s) guard — never fetched server-side (SSRF) or auto-loaded
+    // (no third-party IP leak).
+    permalink: text("permalink"),
     likeCount: integer("like_count"),
     commentCount: integer("comment_count"),
+    // Provider-declared media typing (IMAGE/VIDEO/CAROUSEL) and raw product
+    // classifier (FEED/REELS/...) — null when the provider did not declare it.
+    mediaType: text("media_type"),
+    mediaProductType: text("media_product_type"),
+    // Per-post comment observation state: OBSERVED (comment source read, even
+    // when empty), UNAVAILABLE (no exposed comment source), NOT_SCANNED
+    // (comments capability off). NULL = recorded before state tracking.
+    commentsState: text("comments_state"),
     category: observationCategoryEnum("category").notNull().default("OBSERVED"),
     confidence: confidenceLevelEnum("confidence").notNull(),
     evidenceId: text("evidence_id").references(() => evidence.id, {
@@ -358,6 +375,9 @@ export const postComments = pgTable(
     commentedAt: timestamptz("commented_at").notNull(),
     observedAt: timestamptz("observed_at").notNull(),
     confidence: confidenceLevelEnum("confidence").notNull(),
+    // Source-scoped id of the parent comment when the provider exposes reply
+    // threading; null when flat or unexposed.
+    inReplyToCommentId: text("in_reply_to_comment_id"),
     evidenceId: text("evidence_id").references(() => evidence.id, {
       onDelete: "set null",
     }),
@@ -461,6 +481,12 @@ export const followDeltas = pgTable(
   ],
 );
 
+// Intentionally reserved, writerless by decision (not dead architecture):
+// no supported provider exposes a lawful public likes/activity feed, so
+// fabricating rows would violate the no-fake-data rule. The table stays so a
+// future lawful interaction source has a typed landing zone; an emptiness
+// test pins the dormant state. Delete paths and evidence readers already
+// handle it, so activation needs only a writer + UI.
 export const interactions = pgTable(
   "interactions",
   {
@@ -495,6 +521,13 @@ export const interactions = pgTable(
   ],
 );
 
+// Intentionally reserved, writerless by decision (not dead architecture):
+// archiving media BYTES requires settled answers on URL expiry, download
+// permission, and storage policy that no current provider supplies (neither
+// fixture nor graph yields archivable asset URLs today). Media METADATA
+// (types, shortcodes, permalinks, link URLs) is persisted on posts/stories
+// instead. Do not store bytes here until a provider legitimizes the source;
+// do not store credentials or tokens in any media URL.
 export const mediaAssets = pgTable(
   "media_assets",
   {
@@ -630,6 +663,28 @@ export const sourceHealth = pgTable(
     latencyMs: integer("latency_ms"),
     coverageNote: text("coverage_note"),
     updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.sourceId, table.capability] })],
+);
+
+// Append-only operational counters per provider capability: request volume,
+// outcomes, and last latency. Written best-effort by the worker's provider
+// call wrapper; never on the correctness path. Powers the diagnostics
+// capability section and any future alerting. Secrets never touch this table.
+export const capabilityMetrics = pgTable(
+  "capability_metrics",
+  {
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => sources.id, { onDelete: "cascade" }),
+    capability: text("capability").notNull(),
+    totalRequests: integer("total_requests").notNull().default(0),
+    totalOk: integer("total_ok").notNull().default(0),
+    totalErrors: integer("total_errors").notNull().default(0),
+    totalTimeouts: integer("total_timeouts").notNull().default(0),
+    totalRateLimited: integer("total_rate_limited").notNull().default(0),
+    lastLatencyMs: integer("last_latency_ms"),
+    lastObservedAt: timestamptz("last_observed_at"),
   },
   (table) => [primaryKey({ columns: [table.sourceId, table.capability] })],
 );

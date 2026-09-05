@@ -53,7 +53,7 @@ export const mentionVisibilityEnum = pgEnum("mention_visibility", [
   "UNKNOWN",
 ]);
 
-export const mediaTypeEnum = pgEnum("media_type", ["IMAGE", "VIDEO", "UNKNOWN"]);
+export const mediaTypeEnum = pgEnum("media_type", ["IMAGE", "VIDEO", "CAROUSEL", "UNKNOWN"]);
 
 export const jobStatusEnum = pgEnum("job_status", [
   "queued",

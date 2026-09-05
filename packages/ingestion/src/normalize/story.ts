@@ -27,6 +27,7 @@ export function normalizeStory(
     ...(raw.duration_ms !== undefined ? { durationMs: raw.duration_ms } : {}),
     ...(raw.caption !== undefined ? { caption: raw.caption } : {}),
     hasLink: raw.link_url !== undefined,
+    ...(raw.link_url !== undefined ? { linkUrl: raw.link_url } : {}),
     stickerKinds: raw.stickers ?? [],
     ...(raw.poll !== undefined
       ? {

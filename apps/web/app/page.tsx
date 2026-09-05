@@ -2,7 +2,7 @@ import Link from "next/link";
 import { getDashboardData } from "@/lib/data";
 import { requirePageUser } from "@/lib/auth";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Badge, CategoryBadge } from "@/components/ui/badge";
 import { formatRelative, formatDateTime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -79,17 +79,28 @@ export default async function DashboardPage() {
                         <span className="mt-0.5 h-2 w-2 shrink-0 rounded-full bg-sky-500" aria-hidden />
                         <div className="min-w-0 flex-1">
                           <p className="text-sm text-zinc-200">{item.summary}</p>
-                          <p className="mt-1 flex flex-wrap gap-2 text-xs text-zinc-500">
+                          <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
                             <span>{item.type}</span>
                             <span>·</span>
                             <span>{formatRelative(item.timestamp)}</span>
                             <span>·</span>
                             <span title={formatDateTime(item.timestamp)}>{formatDateTime(item.timestamp)}</span>
+                            {item.category !== null && (
+                              <>
+                                <span>·</span>
+                                <CategoryBadge category={item.category as "OBSERVED" | "DERIVED" | "INFERRED" | "UNAVAILABLE"} />
+                              </>
+                            )}
+                            {item.evidenceId !== null && (
+                              <>
+                                <span>·</span>
+                                <Link href={`/evidence/${item.evidenceId}`} className="font-medium text-sky-400 hover:underline">
+                                  Evidence →
+                                </Link>
+                              </>
+                            )}
                           </p>
                         </div>
-                        <Badge tone="muted" className="shrink-0">
-                          Observed
-                        </Badge>
                       </li>
                     ))}
                   </ol>
@@ -104,7 +115,7 @@ export default async function DashboardPage() {
               <Card>
                 <CardHeader>
                   <CardTitle>Source health</CardTitle>
-                  <CardDescription>Capability honesty — unavailable is never shown as zero.</CardDescription>
+                  <CardDescription>Capability honesty — unavailable is never shown as zero. First {Math.min(6, data.sourceHealth.length)} of {data.sourceHealth.length}.</CardDescription>
                 </CardHeader>
                 <CardContent>
                   {data.sourceHealth.length === 0 ? (

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, desc, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import type { NormalizedAccountRef, NormalizedComment, NormalizedPost } from "@igtrack/core";
 import { igAccounts, postComments, posts } from "../schema/index.js";
 import type { Database } from "../client/client.js";
@@ -12,12 +13,17 @@ import { upsertEvidence } from "./evidence.js";
 export type PostRecord = typeof posts.$inferSelect;
 export type PostCommentRecord = typeof postComments.$inferSelect;
 
+export type PostCommentState = "OBSERVED" | "UNAVAILABLE" | "NOT_SCANNED";
+
 export interface RecordPostInput {
   targetId: string;
   owner: NormalizedAccountRef;
   post: NormalizedPost;
   sourceId: string;
   evidence: EvidenceRecordInput;
+  // How the comment source for THIS post resolved. Recorded at insert time
+  // because the posts table is append-only (no later UPDATE possible).
+  commentsState: PostCommentState;
 }
 
 export interface RecordPostResult {
@@ -77,16 +83,42 @@ export async function recordPost(
         takenAt: new Date(post.takenAt),
         ...(post.caption !== undefined ? { caption: post.caption } : {}),
         ...(post.shortcode !== undefined ? { shortcode: post.shortcode } : {}),
+        ...(post.permalink !== undefined ? { permalink: post.permalink } : {}),
         ...(post.likeCount !== undefined ? { likeCount: post.likeCount } : {}),
         ...(post.commentCount !== undefined ? { commentCount: post.commentCount } : {}),
+        ...(post.mediaType !== undefined ? { mediaType: post.mediaType } : {}),
+        ...(post.mediaProductType !== undefined
+          ? { mediaProductType: post.mediaProductType }
+          : {}),
+        commentsState: input.commentsState,
         category: post.meta.category,
         confidence: post.meta.confidence,
         ...(evidenceId !== undefined ? { evidenceId } : {}),
       })
+      .onConflictDoNothing({
+        target: [posts.igAccountId, posts.postId, posts.sourceId],
+      })
       .returning();
     const row = rows[0];
     if (row === undefined) {
-      throw new Error("igtrack: failed to insert post");
+      // Lost the insert race after the pre-select missed: re-read the
+      // winner instead of failing the scan.
+      const raced = await tx
+        .select()
+        .from(posts)
+        .where(
+          and(
+            sql`${posts.igAccountId} = ${owner.id}`,
+            sql`${posts.postId} = ${post.postId}`,
+            sql`${posts.sourceId} = ${input.sourceId}`,
+          ),
+        )
+        .limit(1);
+      const racedRow = raced[0];
+      if (racedRow === undefined) {
+        throw new Error("igtrack: failed to insert post");
+      }
+      return { post: racedRow, deduplicated: true };
     }
     return { post: row, deduplicated: false };
   });
@@ -145,6 +177,9 @@ export async function recordPostComment(
         commentedAt: new Date(comment.createdAt),
         observedAt: new Date(comment.meta.observedAt),
         confidence: comment.meta.confidence,
+        ...(comment.inReplyToCommentId !== undefined
+          ? { inReplyToCommentId: comment.inReplyToCommentId }
+          : {}),
         ...(evidenceId !== undefined ? { evidenceId } : {}),
       })
       .onConflictDoNothing({
@@ -188,12 +223,18 @@ export async function listPosts(
 
 export interface PostCommentWithAccount extends PostCommentRecord {
   username: string;
+  // Username of the parent comment's author when this comment is a reply and
+  // the parent was observed; null otherwise. Resolved in one self-join, not
+  // per-comment queries.
+  replyToUsername: string | null;
 }
 
 export async function listCommentsForPostWithAccount(
   db: Database,
   postDbId: string,
 ): Promise<PostCommentWithAccount[]> {
+  const parentComments = alias(postComments, "parent_comments");
+  const parentAccounts = alias(igAccounts, "parent_accounts");
   return db
     .select({
       id: postComments.id,
@@ -204,12 +245,19 @@ export async function listCommentsForPostWithAccount(
       commentedAt: postComments.commentedAt,
       observedAt: postComments.observedAt,
       confidence: postComments.confidence,
+      inReplyToCommentId: postComments.inReplyToCommentId,
       evidenceId: postComments.evidenceId,
       createdAt: postComments.createdAt,
       username: igAccounts.username,
+      replyToUsername: parentAccounts.username,
     })
     .from(postComments)
     .innerJoin(igAccounts, sql`${igAccounts.id} = ${postComments.authorAccountId}`)
+    .leftJoin(
+      parentComments,
+      sql`${parentComments.postDbId} = ${postComments.postDbId} AND ${parentComments.commentId} = ${postComments.inReplyToCommentId}`,
+    )
+    .leftJoin(parentAccounts, sql`${parentAccounts.id} = ${parentComments.authorAccountId}`)
     .where(sql`${postComments.postDbId} = ${postDbId}`)
     .orderBy(desc(postComments.commentedAt));
 }

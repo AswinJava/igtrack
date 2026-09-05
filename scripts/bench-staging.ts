@@ -5,15 +5,15 @@
 // so the measurement reflects the shipped implementation, not a fake.
 
 import { randomUUID } from "node:crypto";
-import { createDb, type Database } from "../src/index.js";
-import { upsertAccount } from "../src/repositories/accounts.js";
+import { createDb, type Database } from "../packages/database/src/index.js";
+import { upsertAccount } from "../packages/database/src/repositories/accounts.js";
 import {
   stageFollowScanMembers,
   loadStagedFollowScanMembers,
   clearStagedFollowScanMembers,
   clearForeignFollowScanStaging,
-} from "../src/repositories/follow-staging.js";
-import { recordFollowSnapshot } from "../src/repositories/follows.js";
+} from "../packages/database/src/repositories/follow-staging.js";
+import { recordFollowSnapshot } from "../packages/database/src/repositories/follows.js";
 import { sql } from "drizzle-orm";
 import { SourceKind } from "@igtrack/core";
 

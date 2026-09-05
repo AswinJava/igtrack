@@ -1,4 +1,6 @@
 ﻿import { getDiagnostics } from "@/lib/data";
+import { requirePageUser } from "@/lib/auth";
+import { getCapabilityDiagnostic } from "@/lib/capability-diagnostic";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatDateTime, formatRelative } from "@/lib/format";
@@ -6,13 +8,107 @@ import { JobList } from "./_jobs";
 
 export const dynamic = "force-dynamic";
 
+const CAPABILITY_LABELS: Record<string, string> = {
+  resolveAccount: "Resolve account",
+  getProfile: "Profile",
+  getStories: "Stories",
+  getFollowers: "Follower list",
+  getFollowing: "Following list",
+  getPublicPosts: "Posts",
+  getPublicComments: "Comments",
+};
+
 export default async function DiagnosticsPage() {
-  const data = await getDiagnostics();
+  await requirePageUser();
+  const [data, caps] = await Promise.all([getDiagnostics(), getCapabilityDiagnostic()]);
 
   return (
     <div className="mx-auto max-w-6xl px-6 py-6">
       <h1 className="text-xl font-semibold tracking-tight">Diagnostics</h1>
       <p className="mt-1 text-sm text-zinc-500">Internal operational surface — database, queue, workers, and source health. No payloads, no credentials.</p>
+
+      {caps.fixtureInProduction && (
+        <div role="alert" className="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-relaxed text-amber-200">
+          Production is running on the synthetic fixture source. Every observation on this deployment is
+          synthetic data, not live Instagram — switch IGTRACK_PROVIDER to graph with provisioned credentials
+          for live monitoring.
+        </div>
+      )}
+
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle>Capability self-diagnostic</CardTitle>
+          <CardDescription>
+            What this deployment can observe and why. Provider {caps.provider}
+            {caps.sourceId ? ` · source ${caps.sourceId}` : ""} ·{" "}
+            {caps.production ? "production" : "non-production"} · no secrets on this surface.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4 text-xs">
+          {caps.providerError !== null && (
+            <p role="alert" className="rounded-lg border border-red-500/30 bg-red-950/30 px-3 py-2 text-red-300">
+              Provider misconfigured: {caps.providerError}
+            </p>
+          )}
+          {caps.capabilities !== null ? (
+            <ul className="grid gap-2 sm:grid-cols-2">
+              {Object.entries(caps.capabilities).map(([name, on]) => (
+                <li key={name} className="flex items-center justify-between rounded-lg border border-zinc-800 px-3 py-2">
+                  <span className="text-zinc-300">{CAPABILITY_LABELS[name] ?? name}</span>
+                  <Badge tone={on ? "success" : "muted"}>{on ? "AVAILABLE" : "UNAVAILABLE"}</Badge>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-zinc-500">Capability declarations unavailable — see the provider error above.</p>
+          )}
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div className="rounded-lg bg-zinc-800/50 px-3 py-2">
+              <p className="text-zinc-500">Graph provider</p>
+              <p className="mt-1 font-medium text-zinc-200">
+                {caps.graph.configured
+                  ? `configured · ${caps.graph.username ?? "unknown account"} · API ${caps.graph.apiVersion}`
+                  : "not configured (fixture mode)"}
+              </p>
+            </div>
+            <div className="rounded-lg bg-zinc-800/50 px-3 py-2">
+              <p className="text-zinc-500">Scan cadence</p>
+              <p className="mt-1 font-medium text-zinc-200">
+                story every {Math.round(caps.scheduler.intervalsMs.STORY_SCAN / 60000)}m · profile/follows/posts every{" "}
+                {Math.round(caps.scheduler.intervalsMs.PROFILE_SCAN / 3600000)}h · tick {Math.round(caps.scheduler.tickMs / 1000)}s · batch {caps.scheduler.batchLimit}
+              </p>
+            </div>
+            <div className="rounded-lg bg-zinc-800/50 px-3 py-2">
+              <p className="text-zinc-500">Worker bounds</p>
+              <p className="mt-1 font-medium text-zinc-200">
+                poll {caps.worker.pollMs}ms · lease {Math.round(caps.worker.leaseMs / 1000)}s with per-page heartbeat · provider timeout {Math.round(caps.worker.providerTimeoutMs / 1000)}s
+              </p>
+            </div>
+            <div className="rounded-lg bg-zinc-800/50 px-3 py-2">
+              <p className="text-zinc-500">Fixture set</p>
+              <p className="mt-1 font-medium text-zinc-200">{caps.fixture ? `synthetic ${caps.fixture.version}` : "n/a (graph mode)"}</p>
+            </div>
+          </div>
+          {caps.metrics.length > 0 && (
+            <div>
+              <p className="mb-1 font-medium text-zinc-400">Provider call metrics</p>
+              <ul className="space-y-1">
+                {caps.metrics.map((m) => (
+                  <li key={`${m.sourceId}:${m.capability}`} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-zinc-800/50 px-3 py-1.5 text-zinc-400">
+                    <span className="font-mono">{m.capability} · {m.sourceId}</span>
+                    <span>
+                      {m.totalRequests} calls · {m.totalOk} ok · {m.totalErrors} errors
+                      {m.totalTimeouts > 0 && ` · ${m.totalTimeouts} timeouts`}
+                      {m.totalRateLimited > 0 && ` · ${m.totalRateLimited} rate-limited`}
+                      {m.lastLatencyMs !== null && ` · last ${m.lastLatencyMs}ms`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-3">
         <Card>
@@ -79,7 +175,7 @@ export default async function DiagnosticsPage() {
               <span className="font-medium text-zinc-200">{data.workers.runningCount}</span>
             </div>
             <p className="leading-relaxed text-zinc-500">
-              No dedicated heartbeat exists by design yet; this signal is an honest derivation of recent queue claims ({data.workers.lastClaimStartedAt ? `last ${formatDateTime(data.workers.lastClaimStartedAt)}` : "none observed"}).
+              Paged scans heartbeat their job lease after every page; this signal is an honest derivation of recent queue claims ({data.workers.lastClaimStartedAt ? `last ${formatDateTime(data.workers.lastClaimStartedAt)}` : "none observed"}).
             </p>
           </CardContent>
         </Card>

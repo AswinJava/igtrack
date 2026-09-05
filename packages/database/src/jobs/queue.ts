@@ -152,11 +152,15 @@ export interface ClaimJobOptions {
 
 const DEFAULT_LEASE_MS = 300_000;
 
-function resolveLeaseMs(options: ClaimJobOptions): number {
-  const raw =
-    options.leaseMs ??
-    Number(process.env.IGTRACK_JOB_LEASE_MS ?? DEFAULT_LEASE_MS);
-  return Number.isFinite(raw) && raw >= 0 ? raw : DEFAULT_LEASE_MS;
+export function resolveLeaseMs(options: ClaimJobOptions): number {
+  // Explicit programmatic values pass through untouched (deterministic tests
+  // use leaseMs: 0 for immediate reclaim). Environment values must be
+  // positive: 0/negative/NaN from the environment falls back to the default
+  // instead of silently running an instant-reclaim loop. main.ts additionally
+  // refuses to boot on such values with an explicit error.
+  if (options.leaseMs !== undefined) return options.leaseMs;
+  const raw = Number(process.env.IGTRACK_JOB_LEASE_MS ?? DEFAULT_LEASE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_LEASE_MS;
 }
 
 export async function claimJob(
@@ -264,13 +268,47 @@ export async function completeJob(
   return row;
 }
 
+// In-flight lease heartbeat for long-running scans. Extends locked_at only
+// while this worker still owns the job (running + locked_by match); returns
+// false when ownership was lost (reclaimed, completed, or cancelled), in
+// which case the executor should stop writing and let the outcome path report
+// `lost`. Best-effort by contract — callers must tolerate false.
+export async function renewJobLease(
+  db: Database,
+  jobId: string,
+  workerId: string,
+): Promise<boolean> {
+  const rows = await db
+    .update(monitoringJobs)
+    .set({ lockedAt: new Date(), updatedAt: new Date() })
+    .where(
+      sql`${monitoringJobs.id} = ${jobId}
+        AND ${monitoringJobs.status} = 'running'
+        AND ${monitoringJobs.lockedBy} = ${workerId}`,
+    )
+    .returning({ id: monitoringJobs.id });
+  return rows.length > 0;
+}
+
 export interface FailJobInput {
   message: string;
   kind?: string;
   retryable?: boolean;
-  // Provider-supplied retry delay (STEP 10): honored verbatim as the retry's
-  // availability time instead of exponential backoff.
+  // Provider-supplied retry delay (STEP 10): honored as the retry's
+  // availability time instead of exponential backoff, but clamped to
+  // MAX_RETRY_AFTER_MS — a pathological Retry-After (negative, NaN, or years
+  // out) must never park a job forever or spin it hot.
   retryAfterMs?: number;
+}
+
+// Upper bound for provider-directed retry delays. Well-behaved providers
+// send seconds-to-minutes; anything beyond an hour is treated as hostile or
+// broken and clamped, still consuming an attempt via willRetry.
+export const MAX_RETRY_AFTER_MS = 3_600_000;
+
+export function clampRetryAfterMs(raw: number | undefined, backoffMs: number): number {
+  if (raw === undefined || !Number.isFinite(raw) || raw < 0) return backoffMs;
+  return Math.min(raw, MAX_RETRY_AFTER_MS);
 }
 
 export async function failJob(
@@ -308,7 +346,10 @@ export async function failJob(
         ? {
             availableAt: new Date(
               Date.now() +
-                (error.retryAfterMs ?? computeBackoffMs(job.attempts, backoff)),
+                clampRetryAfterMs(
+                  error.retryAfterMs,
+                  computeBackoffMs(job.attempts, backoff),
+                ),
             ),
           }
         : { completedAt: new Date() }),
