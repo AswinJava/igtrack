@@ -1,0 +1,1 @@
+ALTER TABLE "evidence" ALTER COLUMN "raw_hash" DROP NOT NULL;
