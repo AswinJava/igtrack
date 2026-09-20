@@ -1,0 +1,10 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:16:00.000Z",
+  "users": [
+    { "id": "9000000002", "username": "noah.frames" },
+    { "id": "9000000003", "username": "mira.lens" },
+    { "id": "9000000005", "username": "saga.pixel" }
+  ],
+  "next_cursor": "followers-p2"
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:17:00.000Z",
+  "users": [
+    { "id": "9000000002", "username": "noah.frames" },
+    { "id": "9000000003", "username": "mira.lens" },
+    { "id": "9000000004", "username": "theo.north" },
+    { "id": "9000000007", "username": "fjord.atlas" }
+  ],
+  "next_cursor": null
+}

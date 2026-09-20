@@ -1,0 +1,21 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:20:00.000Z",
+  "tags": [
+    {
+      "id": "tag-media-1",
+      "username": "mira.lens",
+      "caption": "Studio day with @aurora.wilde",
+      "permalink": "https://www.instagram.com/p/FxTag001/",
+      "media_type": "IMAGE",
+      "taken_at": "2026-08-26T15:40:00.000Z"
+    },
+    {
+      "id": "tag-media-2",
+      "username": "saga.pixel",
+      "media_type": "VIDEO",
+      "taken_at": "2026-08-21T08:05:00.000Z"
+    }
+  ],
+  "next_cursor": null
+}

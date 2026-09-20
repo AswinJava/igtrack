@@ -1,0 +1,9 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:16:30.000Z",
+  "users": [
+    { "id": "9000000006", "username": "elin.moor" },
+    { "id": "9000000004", "username": "theo.north" }
+  ],
+  "next_cursor": null
+}
