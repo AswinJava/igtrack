@@ -1,0 +1,30 @@
+{
+  "name": "@igtrack/cli",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "IGTrack command line: setup, status, scans, activity, evidence, capabilities, MCP server",
+  "main": "./src/main.ts",
+  "bin": {
+    "igtrack": "./bin/igtrack.mjs"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@igtrack/core": "workspace:*",
+    "@igtrack/database": "workspace:*",
+    "@igtrack/ingestion": "workspace:*",
+    "@igtrack/monitoring": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "drizzle-orm": "^0.45.2",
+    "postgres": "^3.4.9",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3"
+  }
+}
