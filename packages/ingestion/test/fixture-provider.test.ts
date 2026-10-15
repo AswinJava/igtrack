@@ -261,6 +261,49 @@ describe("FixtureProvider", () => {
       expect(absence?.reason).toContain("empty data set instead of 0");
     }
   });
+
+  it("serves the discovery probe for the declared account and refuses others", async () => {
+    const hit = await provider.discoverAccount("@Dune.Harbor");
+    expect(hit.status).toBe(CapabilityStatus.AVAILABLE);
+    expect(hit.data?.account).toMatchObject({
+      username: "dune.harbor",
+      igId: "17841400000000002",
+    });
+    expect(hit.data?.followerCount).toBe(18420);
+    expect(hit.data?.followingCount).toBe(302);
+    expect(hit.data?.recentMedia).toHaveLength(2);
+    expect(hit.data?.recentMedia[0]?.likeCount).toBe(512);
+    expect(hit.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(hit.rawReference).toBe("fixture:v1/discovery.json");
+    // A probe of another account says so; nothing was recorded.
+    expect(hit.note).toContain("nothing was persisted");
+
+    const miss = await provider.discoverAccount("someone.else");
+    expect(miss.status).toBe(CapabilityStatus.ERROR);
+    expect(miss.error?.kind).toBe(CapabilityErrorKind.ACCOUNT_NOT_FOUND);
+  });
+
+  it("treats the observed account as non-discoverable, not as empty discovery data", async () => {
+    const result = await provider.discoverAccount("aurora.wilde");
+    expect(result.status).toBe(CapabilityStatus.UNAVAILABLE);
+    expect(result.note).toContain("profile path");
+  });
+
+  it("reports an undeclared discovery file as UNAVAILABLE naming the manifest key", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "igtrack-discovery-"));
+    cpSync(fixturesDir, dir, { recursive: true });
+    const manifestPath = join(dir, "manifest.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      files: { discovery?: string };
+    };
+    delete manifest.files.discovery;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    const bare = new FixtureProvider({ fixturesDir: dir, clock: () => FIXED_NOW });
+    const result = await bare.discoverAccount("dune.harbor");
+    expect(result.status).toBe(CapabilityStatus.UNAVAILABLE);
+    expect(result.note).toContain("files.discovery");
+  });
 });
 
 describe("FixtureProvider provenance honesty", () => {

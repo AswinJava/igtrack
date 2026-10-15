@@ -1,0 +1,39 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:15:00.000Z",
+  "account": {
+    "id": "17841400000000002",
+    "username": "dune.harbor",
+    "full_name": "Dune Harbor Studio",
+    "biography": "Ceramics and slow light. Studio account.",
+    "website": "https://example.invalid/dune-harbor",
+    "profile_picture_url": "https://example.invalid/media/dune-harbor/profile.jpg",
+    "followers_count": 18420,
+    "follows_count": 302,
+    "media_count": 214
+  },
+  "recent_media": [
+    {
+      "id": "dune-post-1",
+      "shortcode": "DhYz901",
+      "permalink": "https://example.invalid/p/DhYz901/",
+      "taken_at": "2026-08-26T10:00:00.000Z",
+      "caption": "Kiln opening day",
+      "like_count": 512,
+      "comment_count": 21,
+      "media_type": "IMAGE",
+      "media_product_type": "FEED"
+    },
+    {
+      "id": "dune-post-2",
+      "shortcode": "DhYz902",
+      "permalink": "https://example.invalid/p/DhYz902/",
+      "taken_at": "2026-08-21T08:10:00.000Z",
+      "caption": "Glaze tests, batch 14",
+      "like_count": 903,
+      "comment_count": 44,
+      "media_type": "VIDEO",
+      "media_product_type": "REELS"
+    }
+  ]
+}

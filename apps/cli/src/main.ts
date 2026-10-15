@@ -109,7 +109,7 @@ async function dispatch(args: ParsedArgs): Promise<number> {
     case "relationships":
       if (wantsHelp(args)) {
         process.stdout.write(
-          "igtrack relationships <target id|username> [--limit N]\n\nRank accounts by observed signal strength (story mentions and follow deltas)\nagainst one tracked target, with mutual/observed state and first/last seen.\n",
+          "igtrack relationships <target id|username> [--limit N]\n\nRank accounts by observed signal strength (story mentions, comment authorship\non owned media, follow deltas) against one tracked target, with\nmutual/observed state and first/last seen.\n",
         );
         return 0;
       }

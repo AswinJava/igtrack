@@ -95,13 +95,14 @@ export async function runRelationships(args: ParsedArgs): Promise<number> {
     const human = [
       `Target   @${result.target.username} (${result.target.status})`,
       result.ranks.length === 0
-        ? "No relationships observed yet. Relationship ranks come from COMPLETE follower/following snapshots and story mentions."
+        ? "No relationships observed yet. Relationship ranks come from COMPLETE follower/following snapshots, story mentions, and comment authorship on owned media."
         : table(
-            ["account", "score", "mentions", "deltas", "mutual", "first seen", "last seen", "basis"],
+            ["account", "score", "mentions", "comments", "deltas", "mutual", "first seen", "last seen", "basis"],
             result.ranks.map((r) => [
               `@${r.username}`,
               String(r.score),
               String(r.signals.mentions),
+              String(r.signals.comments),
               String(r.signals.deltas),
               r.mutual ? "yes" : "no",
               r.firstSeenAt === null ? "unavailable" : r.firstSeenAt,
@@ -177,8 +178,31 @@ persisting anything. This is the cheapest way for an agent to answer "is this
 account observable at all, and from which source?".
 
 Fixture answers are synthetic. Graph answers describe the authorized account
-only. UNAVAILABLE means the source does not expose it — the output says so
-instead of returning an empty object.`;
+only — unless Business Discovery is explicitly enabled
+(IGTRACK_GRAPH_BUSINESS_DISCOVERY=1), in which case another account's public
+profile and a bounded recent-media preview come back as a PROBE from the
+documented Business Discovery edge. Consumer and private accounts are
+unreachable, and age-gated accounts return nothing: both are reported with the
+reason instead of an empty profile. UNAVAILABLE means the source does not
+expose it — the output says so instead of returning an empty object.`;
+
+interface DiscoveredAccountView {
+  account: { username: string; igId?: string; displayName?: string };
+  displayName?: string;
+  bio?: string;
+  externalUrl?: string;
+  followerCount?: number;
+  followingCount?: number;
+  postCount?: number;
+  recentMedia: Array<{
+    postId: string;
+    takenAt: string;
+    likeCount?: number;
+    commentCount?: number;
+    mediaType?: string;
+    permalink?: string;
+  }>;
+}
 
 export async function runLookup(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
@@ -187,24 +211,59 @@ export async function runLookup(args: ParsedArgs): Promise<number> {
   const ctx = await createContext();
   try {
     const result = await opLookup(ctx, { username });
-    const human = [
-      table(
-        ["field", "value"],
-        [
-          ["username", `@${result.username}`],
-          ["source", result.sourceId],
-          ["capability status", result.status],
-          ["confidence", display(result.confidence)],
-          ["observed at", display(result.observedAt)],
-          ["note", display(result.note)],
-          ["error", result.error === null ? "none" : `${result.error.kind}: ${result.error.message}`],
-        ],
-      ),
-      "",
+    const rows: Array<[string, string]> = [
+      ["username", `@${result.username}`],
+      ["source", result.sourceId],
+      ["route", display(result.via)],
+      ["capability status", result.status],
+      ["confidence", display(result.confidence)],
+      ["observed at", display(result.observedAt)],
+      ["note", display(result.note)],
+      ["error", result.error === null ? "none" : `${result.error.kind}: ${result.error.message}`],
+    ];
+    const probe =
+      result.via === "discovery" && result.status === "AVAILABLE"
+        ? (result.account as DiscoveredAccountView)
+        : null;
+    const sections: string[] = [table(["field", "value"], rows)];
+    if (probe !== null) {
+      sections.push(
+        "",
+        table(
+          ["field", "value"],
+          [
+            ["platform id", display(probe.account.igId ?? null)],
+            ["display name", display(probe.displayName ?? null)],
+            ["bio", display(probe.bio ?? null)],
+            ["external url", display(probe.externalUrl ?? null)],
+            ["followers", display(probe.followerCount ?? null)],
+            ["following", display(probe.followingCount ?? null)],
+            ["posts", display(probe.postCount ?? null)],
+          ],
+        ),
+      );
+      if (probe.recentMedia.length > 0) {
+        sections.push(
+          "",
+          "recent media (bounded preview — not the account's full history)",
+          table(
+            ["post", "taken", "type", "likes", "comments"],
+            probe.recentMedia.map((m) => [
+              m.postId,
+              m.takenAt,
+              display(m.mediaType ?? null),
+              display(m.likeCount ?? null),
+              display(m.commentCount ?? null),
+            ]),
+          ),
+        );
+      }
+    }
+    const footer =
       result.status === "UNAVAILABLE"
-        ? "This source does not expose account resolution. Nothing was written."
-        : "Nothing was persisted: `lookup` is a read-only probe.",
-    ].join("\n");
+        ? "The requested route does not expose this. Nothing was written."
+        : "Nothing was persisted: `lookup` is a read-only probe.";
+    const human = [...sections, "", footer].join("\n");
     emit({ json, meta: ctx.meta, data: result, human });
     return 0;
   } finally {

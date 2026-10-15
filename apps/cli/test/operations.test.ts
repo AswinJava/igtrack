@@ -205,6 +205,20 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     expect(known.account).not.toBeNull();
   });
 
+  it("answers another public account through the discovery probe, as a probe", async () => {
+    const probe = await opLookup(ctx, { username: "@dune.harbor" });
+    expect(probe.via).toBe("discovery");
+    expect(probe.status).toBe("AVAILABLE");
+    const account = probe.account as {
+      followerCount?: number;
+      recentMedia?: unknown[];
+    } | null;
+    expect(account?.followerCount).toBe(18420);
+    expect(account?.recentMedia).toHaveLength(2);
+    // The probe says what it is: read-through, nothing persisted.
+    expect(probe.note).toContain("nothing was persisted");
+  });
+
   it("refuses to resolve a target that is not tracked", async () => {
     await expect(resolveTarget(ctx.db, ctx.userId, "definitely-not-tracked")).rejects.toThrow(
       /No tracked target matches/,

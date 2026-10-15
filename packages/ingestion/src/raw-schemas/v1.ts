@@ -154,6 +154,27 @@ export const rawInsightsV1 = z.object({
   absences: z.array(rawInsightAbsenceV1),
 });
 
+// Another account's public data via the documented Business Discovery edge
+// (D42). Every descriptive field is optional: the platform legitimately omits
+// what it does not return, and a fixture exercises the absence path by
+// omission — never by a zero.
+export const rawDiscoveryV1 = z.object({
+  schema_version: z.literal("v1"),
+  captured_at: isoDatetime,
+  account: z.object({
+    id: z.string().min(1),
+    username: z.string().min(1),
+    full_name: z.string().optional(),
+    biography: z.string().optional(),
+    website: z.string().optional(),
+    profile_picture_url: z.string().optional(),
+    followers_count: z.number().int().nonnegative().optional(),
+    follows_count: z.number().int().nonnegative().optional(),
+    media_count: z.number().int().nonnegative().optional(),
+  }),
+  recent_media: z.array(rawPostV1),
+});
+
 export type RawProfileV1 = z.infer<typeof rawProfileV1>;
 export type RawStoriesV1 = z.infer<typeof rawStoriesV1>;
 export type RawStoryV1 = z.infer<typeof rawStoryV1>;
@@ -162,3 +183,4 @@ export type RawFollowPageV1 = z.infer<typeof rawFollowPageV1>;
 export type RawPostsPageV1 = z.infer<typeof rawPostsPageV1>;
 export type RawCommentsPageV1 = z.infer<typeof rawCommentsPageV1>;
 export type RawInsightsV1 = z.infer<typeof rawInsightsV1>;
+export type RawDiscoveryV1 = z.infer<typeof rawDiscoveryV1>;

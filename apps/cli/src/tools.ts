@@ -1,5 +1,7 @@
 import {
   CAPABILITY_REGISTRY,
+  CapabilityErrorKind,
+  CapabilityName,
   CapabilityStatus,
   type CapabilityResult,
   type InstagramProvider,
@@ -790,12 +792,49 @@ export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
 export interface LookupResult {
   username: string;
   sourceId: string;
+  /**
+   * Which route answered. "resolve" = the account this deployment observes;
+   * "discovery" = the documented Business Discovery probe of another account
+   * (D42), rendered as a probe and persisted nowhere. Null only when neither
+   * route answered at all.
+   */
+  via: "resolve" | "discovery" | null;
   status: string;
   confidence: string | null;
   observedAt: string | null;
   account: unknown;
   note: string | null;
   error: { kind: string; message: string; retryable: boolean } | null;
+}
+
+function asLookupResult(
+  username: string,
+  sourceId: string,
+  via: LookupResult["via"],
+  result: CapabilityResult<unknown>,
+): LookupResult {
+  return {
+    username,
+    sourceId,
+    via,
+    status: result.status,
+    confidence:
+      result.status === CapabilityStatus.ERROR ? null : (result.confidence as string),
+    observedAt: result.status === CapabilityStatus.ERROR ? null : result.observedAt,
+    account:
+      result.status === CapabilityStatus.AVAILABLE || result.status === CapabilityStatus.PARTIAL
+        ? result.data
+        : null,
+    note: result.note ?? null,
+    error:
+      result.error === undefined
+        ? null
+        : {
+            kind: result.error.kind,
+            message: result.error.message,
+            retryable: result.error.retryable,
+          },
+  };
 }
 
 export async function opLookup(
@@ -812,25 +851,19 @@ export async function opLookup(
       3,
     );
   }
-  const result: CapabilityResult<unknown> = await provider.resolveAccount(username);
-  return {
-    username,
-    sourceId: provider.sourceId,
-    status: result.status,
-    confidence:
-      result.status === CapabilityStatus.ERROR ? null : (result.confidence as string),
-    observedAt: result.status === CapabilityStatus.ERROR ? null : result.observedAt,
-    account: result.status === CapabilityStatus.AVAILABLE || result.status === CapabilityStatus.PARTIAL ? result.data : null,
-    note: result.note ?? null,
-    error:
-      result.error === undefined
-        ? null
-        : {
-            kind: result.error.kind,
-            message: result.error.message,
-            retryable: result.error.retryable,
-          },
-  };
+  const resolved: CapabilityResult<unknown> = await provider.resolveAccount(username);
+  const notOwned =
+    resolved.status === CapabilityStatus.ERROR &&
+    resolved.error?.kind === CapabilityErrorKind.ACCOUNT_NOT_FOUND;
+  if (notOwned && provider.capabilities()[CapabilityName.DISCOVER_ACCOUNT]) {
+    // Another account's public data has exactly one lawful route (D42); the
+    // probe answers with the data or with the platform's reason, which is a
+    // strictly better answer than "this provider does not observe @you". When
+    // the route is switched off, the probe's refusal names the unlock.
+    const probe = await provider.discoverAccount(username);
+    return asLookupResult(username, provider.sourceId, "discovery", probe);
+  }
+  return asLookupResult(username, provider.sourceId, "resolve", resolved);
 }
 
 // ---------------------------------------------------------------------------

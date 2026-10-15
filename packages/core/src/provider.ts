@@ -2,6 +2,7 @@ import type { CapabilityResult } from "./capability.js";
 import type {
   NormalizedAccountRef,
   NormalizedComment,
+  NormalizedDiscoveredAccount,
   NormalizedFollowPage,
   NormalizedInsightSet,
   NormalizedPost,
@@ -20,6 +21,7 @@ export const CapabilityName = {
   GET_PUBLIC_COMMENTS: "getPublicComments",
   GET_POST_CHILDREN: "getPostChildren",
   GET_ACCOUNT_INSIGHTS: "getAccountInsights",
+  DISCOVER_ACCOUNT: "discoverAccount",
 } as const;
 
 export type CapabilityName =
@@ -80,4 +82,17 @@ export interface InstagramProvider {
   getAccountInsights(
     account: NormalizedAccountRef,
   ): Promise<CapabilityResult<NormalizedInsightSet>>;
+  /**
+   * Other-account public data via the documented Business Discovery edge
+   * (D42): public profile fields + a bounded recent-media preview, for public
+   * Business/Creator accounts only. A PROBE, not a record — callers render
+   * it, nothing is persisted, so no evidence row is owed. Providers with no
+   * discovery route report UNAVAILABLE with the reason (and the unlock path
+   * when one exists); unreachable classes (consumer, private, age-gated)
+   * report UNAVAILABLE with the platform's reason, never an empty profile.
+   * The platform id of the discovered account travels in
+   * `account.igId` when the platform returned one — it is an output, never a
+   * lookup key (D44).
+   */
+  discoverAccount(username: string): Promise<CapabilityResult<NormalizedDiscoveredAccount>>;
 }

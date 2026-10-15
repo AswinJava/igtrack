@@ -344,7 +344,7 @@ export function buildServer(): McpServer {
     {
       title: "Relationship ranking",
       description:
-        "Accounts ranked by observed signal strength (story mentions + follow deltas) with mutual/currently-observed state and honest first/last-seen provenance.",
+        "Accounts ranked by observed signal strength (story mentions + comment authorship on owned media + follow deltas) with mutual/currently-observed state and honest first/last-seen provenance.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         target: z.string().describe("Target id or username"),
@@ -429,7 +429,7 @@ export function buildServer(): McpServer {
     {
       title: "Probe one account",
       description:
-        "Ask the configured source what it can observe about a single account, persisting nothing. Answers 'is this observable at all, and from which source?'.",
+        "Ask the configured source what it can observe about a single account, persisting nothing. Answers 'is this observable at all, and from which source?'. The observed account is answered by `resolve`; another account answers via `discovery` when the documented Business Discovery edge is enabled (public Business/Creator accounts only — consumer/private accounts are unreachable and age-gated accounts return nothing; both are reported with the reason). The result's `via` field says which route answered, and a discovery answer carries the platform id as an output, never as a lookup key.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         username: z.string().describe("Instagram username, with or without leading @"),

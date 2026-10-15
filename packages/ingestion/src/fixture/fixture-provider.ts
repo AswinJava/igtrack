@@ -17,6 +17,7 @@ import {
   type InstagramProvider,
   type NormalizedAccountRef,
   type NormalizedComment,
+  type NormalizedDiscoveredAccount,
   type NormalizedFollowPage,
   type NormalizedInsightAbsence,
   type NormalizedInsightPoint,
@@ -30,12 +31,14 @@ import {
 } from "@igtrack/core";
 import {
   rawCommentsPageV1,
+  rawDiscoveryV1,
   rawFollowPageV1,
   rawInsightsV1,
   rawPostsPageV1,
   rawProfileV1,
   rawStoriesV1,
   type RawCommentsPageV1,
+  type RawDiscoveryV1,
   type RawFollowPageV1,
   type RawInsightsV1,
   type RawPostsPageV1,
@@ -66,6 +69,9 @@ const fixtureManifestSchema = z.object({
     // is a complete set for what it declares — the provider answers
     // UNAVAILABLE for insights instead of rejecting the whole set.
     insights: z.string().min(1).optional(),
+    // Same rule for the discovery probe (D42): optional, and its absence is
+    // an UNAVAILABLE with a reason, never a schema rejection.
+    discovery: z.string().min(1).optional(),
   }),
 });
 
@@ -151,6 +157,10 @@ export class FixtureProvider implements InstagramProvider {
       // Fixture insights exercise the full absence pipeline: the payload
       // carries both points and reasons (D39).
       [CapabilityName.GET_ACCOUNT_INSIGHTS]: true,
+      // Synthetic discovery probes exercise the D42 path offline; whether the
+      // set actually declares a discovery file is answered per call with an
+      // UNAVAILABLE + reason, like insights.
+      [CapabilityName.DISCOVER_ACCOUNT]: true,
       // No child-media source ships in the v1 fixture set: honest
       // UNAVAILABLE from getPostChildren, never an empty album masquerading
       // as observed structure.
@@ -477,6 +487,108 @@ export class FixtureProvider implements InstagramProvider {
         rawPayloadHash: sha256(rawText),
         rawReference: this.manifestRef(insightsFile),
       });
+    } catch (err) {
+      return toProviderError(meta, err);
+    }
+  }
+
+  /**
+   * Synthetic counterpart of the documented Business Discovery probe (D42):
+   * reads the optional discovery file and mirrors the provider semantics that
+   * matter — the fixture's own target is never returned as "discovered", a
+   * name the set does not carry is ACCOUNT_NOT_FOUND, and an undeclared file
+   * is UNAVAILABLE with a reason (not a schema failure).
+   */
+  async discoverAccount(
+    username: string,
+  ): Promise<CapabilityResult<NormalizedDiscoveredAccount>> {
+    const meta = this.meta();
+    try {
+      const manifest = await this.loadManifest();
+      const target = username.trim().replace(/^@/, "").toLowerCase();
+      if (target === "") {
+        return errored(meta, {
+          kind: CapabilityErrorKind.ACCOUNT_NOT_FOUND,
+          message: "discoverAccount requires a non-empty username",
+          retryable: false,
+        });
+      }
+      const file = manifest.files.discovery;
+      if (file === undefined) {
+        return unavailable(
+          meta,
+          "This fixture set declares no discovery file, so it carries no other-account public data. Add files.discovery to the manifest to exercise the discovery probe.",
+        );
+      }
+      if (target === manifest.target_username.toLowerCase()) {
+        return unavailable(
+          meta,
+          `@${manifest.target_username} is the account this fixture set observes; use the profile path for it.`,
+        );
+      }
+      const rawText = await this.readFixture(file);
+      const json = this.parseJson(rawText);
+      if (!("value" in json)) return json;
+      const parsed = rawDiscoveryV1.safeParse(json.value);
+      if (!parsed.success) return this.schemaError(meta, parsed.error.message);
+
+      const raw: RawDiscoveryV1 = parsed.data;
+      if (raw.account.username.toLowerCase() !== target) {
+        return errored(meta, {
+          kind: CapabilityErrorKind.ACCOUNT_NOT_FOUND,
+          message: `Fixture set contains discovery data only for @${raw.account.username}, requested @${username}`,
+          retryable: false,
+        });
+      }
+
+      const recentMedia = normalizePosts({
+        schema_version: "v1",
+        captured_at: raw.captured_at,
+        posts: raw.recent_media,
+        next_cursor: null,
+      });
+      const discovered: NormalizedDiscoveredAccount = {
+        account: {
+          username: raw.account.username,
+          igId: raw.account.id,
+          ...(raw.account.full_name !== undefined
+            ? { displayName: raw.account.full_name }
+            : {}),
+        },
+        ...(raw.account.full_name !== undefined
+          ? { displayName: raw.account.full_name }
+          : {}),
+        ...(raw.account.biography !== undefined ? { bio: raw.account.biography } : {}),
+        ...(raw.account.website !== undefined ? { externalUrl: raw.account.website } : {}),
+        ...(raw.account.profile_picture_url !== undefined
+          ? { profilePicUrl: raw.account.profile_picture_url }
+          : {}),
+        ...(raw.account.followers_count !== undefined
+          ? { followerCount: raw.account.followers_count }
+          : {}),
+        ...(raw.account.follows_count !== undefined
+          ? { followingCount: raw.account.follows_count }
+          : {}),
+        ...(raw.account.media_count !== undefined
+          ? { postCount: raw.account.media_count }
+          : {}),
+        recentMedia,
+        meta: {
+          category: ObservationCategory.OBSERVED,
+          confidence: Confidence.HIGH,
+          observedAt: raw.captured_at,
+        },
+      };
+      const result = available(discovered, {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: Confidence.HIGH,
+        rawPayloadHash: sha256(rawText),
+        rawReference: this.manifestRef(file),
+      });
+      result.note =
+        "Synthetic fixture probe of another account's public data (D42); nothing was persisted. Real deployments answer this from the documented Business Discovery edge.";
+      return result;
     } catch (err) {
       return toProviderError(meta, err);
     }

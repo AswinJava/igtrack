@@ -139,6 +139,7 @@ function insightsSource(config: InsightsSourceConfig = {}): ExecutionSource {
       getPublicComments: true,
       getPostChildren: false,
       getAccountInsights: config.capabilityAvailable ?? true,
+      discoverAccount: false,
     }),
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
@@ -163,6 +164,9 @@ function insightsSource(config: InsightsSourceConfig = {}): ExecutionSource {
     },
     getPostChildren: async () => {
       throw new Error("stub: getPostChildren not wired");
+    },
+    discoverAccount: async () => {
+      throw new Error("stub: discoverAccount not wired");
     },
     getAccountInsights: async (): Promise<CapabilityResult<NormalizedInsightSet>> => {
       if (status === CapabilityStatus.UNAVAILABLE) {

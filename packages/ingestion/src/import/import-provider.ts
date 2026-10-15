@@ -16,6 +16,7 @@ import {
   type InstagramProvider,
   type NormalizedAccountRef,
   type NormalizedComment,
+  type NormalizedDiscoveredAccount,
   type NormalizedFollowPage,
   type NormalizedInsightSet,
   type NormalizedPost,
@@ -132,6 +133,9 @@ export class ImportProvider implements InstagramProvider {
       // The export has no insight metrics at all (D38) — declared false so
       // doctor and the capability matrix never over-claim.
       getAccountInsights: false,
+      // The export describes only the account it was downloaded from; it
+      // carries no other-account data (D42).
+      discoverAccount: false,
     };
   }
 
@@ -202,6 +206,16 @@ export class ImportProvider implements InstagramProvider {
     return unavailable(
       this.meta(),
       "The Instagram data export carries no account insight metrics — reach, views, and demographics exist only behind the IG User insights edge. Use the graph provider (owned Business/Creator account) for insights.",
+    );
+  }
+
+  async discoverAccount(
+    username: string,
+  ): Promise<CapabilityResult<NormalizedDiscoveredAccount>> {
+    const target = username.trim().replace(/^@/, "");
+    return unavailable(
+      this.meta(),
+      `The Instagram data export describes only the account it was downloaded from; it carries no public data for another account${target === "" ? "" : ` such as @${target}`}. Another account's public profile is reachable solely through the graph provider's documented Business Discovery edge (D42).`,
     );
   }
 

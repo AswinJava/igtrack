@@ -228,6 +228,54 @@ describe.runIf(available)("relationship structure (mutual, span)", () => {
     expect(dave.firstSeenBasis).toBe("delta");
   });
 
+  it("counts comment authorship on owned media, excluding the owner's own comments", async () => {
+    const recorded = await recordPost(handle.db, {
+      targetId,
+      owner: { username: "rel_target" },
+      commentsState: "OBSERVED",
+      post: {
+        postId: "rel-post-1",
+        takenAt: T0.toISOString(),
+        meta: {
+          category: ObservationCategory.OBSERVED,
+          confidence: Confidence.HIGH,
+          observedAt: T0.toISOString(),
+        },
+      },
+      sourceId: SOURCE.id,
+      evidence: evidenceFor("post", "rel-post-1", T0),
+    });
+    const commenters = ["close_friend", "close_friend", "rel_target"] as const;
+    for (const [index, author] of commenters.entries()) {
+      await recordPostComment(handle.db, {
+        postDbId: recorded.post.id,
+        comment: {
+          commentId: `rel-c${index + 1}`,
+          postId: "rel-post-1",
+          author: { username: author },
+          text: "!",
+          createdAt: T1.toISOString(),
+          meta: {
+            category: ObservationCategory.OBSERVED,
+            confidence: Confidence.HIGH,
+            observedAt: T1.toISOString(),
+          },
+        },
+        evidence: evidenceFor("post_comment", `rel-c${index + 1}`, T1),
+      });
+    }
+
+    const ranks = await getRelationshipsForUser(handle.db, userId, targetId);
+    const byName = new Map(ranks.map((r) => [r.username, r]));
+    const friend = byName.get("close_friend")!;
+    expect(friend.signals.comments).toBe(2);
+    expect(friend.signals.mentions).toBe(0);
+    // Two stored comment rows × the documented comment weight, nothing else.
+    expect(friend.score).toBe(20);
+    // The owner commenting on their own post is not a relationship signal.
+    expect(byName.get("rel_target")?.signals.comments ?? 0).toBe(0);
+  });
+
   it("returns [] for unknown targets instead of fabricating ranks", async () => {
     expect(await getRelationshipsForUser(handle.db, userId, "00000000-0000-0000-0000-000000000000")).toEqual([]);
   });

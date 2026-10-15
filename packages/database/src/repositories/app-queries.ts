@@ -555,7 +555,10 @@ export async function getOwnedTargetDetail(
 export interface RelationshipRank {
   username: string;
   score: number;
-  signals: { mentions: number; deltas: number };
+  // Observed signal counts only (D43): story mentions, comment authorship on
+  // owned media, follow deltas. A signal a scan never observed stays 0 here —
+  // this is a count of stored rows, not an inferred affinity.
+  signals: { mentions: number; comments: number; deltas: number };
   confidence: string;
   // Structural relationship state, derived from the latest COMPLETE-agnostic
   // snapshots (membership is a fact about the latest observation, not a
@@ -579,7 +582,7 @@ export async function getRelationshipsForUser(
   const owned = await getOwnedTarget(db, userId, targetId);
   if (owned === null) return [];
 
-  const [deltas, mentionRows] = await Promise.all([
+  const [deltas, mentionRows, commentRows] = await Promise.all([
     listRecentDeltas(db, owned.id, { limit: 50 }).catch(
       () => [] as DeltaWithAccount[],
     ),
@@ -595,14 +598,36 @@ export async function getRelationshipsForUser(
         ORDER BY count DESC
       `,
     ).catch(() => [] as Array<{ username: string; count: number }>),
+    // Comment authorship on the owned account's media (D43). The owner's own
+    // comments are excluded — talking on your own post is not a relationship
+    // signal. Readable lawfully only because these comments live on media the
+    // operator owns.
+    query<{ username: string; count: number }>(
+      db,
+      sql`
+        SELECT ia.username, count(*)::int AS count
+        FROM post_comments pc
+        JOIN posts p ON p.id = pc.post_db_id
+        JOIN ig_accounts ia ON ia.id = pc.author_account_id
+        WHERE p.ig_account_id = ${owned.igAccountId}
+          AND pc.author_account_id <> ${owned.igAccountId}
+        GROUP BY ia.username
+        ORDER BY count DESC
+      `,
+    ).catch(() => [] as Array<{ username: string; count: number }>),
   ]);
 
-  const map = new Map<string, { mentions: number; deltas: number }>();
+  const map = new Map<string, { mentions: number; comments: number; deltas: number }>();
   for (const m of mentionRows) {
-    map.set(m.username, { mentions: int(m.count), deltas: 0 });
+    map.set(m.username, { mentions: int(m.count), comments: 0, deltas: 0 });
+  }
+  for (const c of commentRows) {
+    const cur = map.get(c.username) ?? { mentions: 0, comments: 0, deltas: 0 };
+    cur.comments += int(c.count);
+    map.set(c.username, cur);
   }
   for (const d of deltas) {
-    const cur = map.get(d.username) ?? { mentions: 0, deltas: 0 };
+    const cur = map.get(d.username) ?? { mentions: 0, comments: 0, deltas: 0 };
     cur.deltas += 1;
     map.set(d.username, cur);
   }
@@ -645,20 +670,27 @@ export async function getRelationshipsForUser(
   ).catch(() => [] as Array<{ username: string }>);
   for (const row of stableRows) {
     if (!map.has(row.username)) {
-      map.set(row.username, { mentions: 0, deltas: 0 });
+      map.set(row.username, { mentions: 0, comments: 0, deltas: 0 });
     }
   }
 
   // Structural enrichment, bounded to ranked candidates with indexed EXISTS
   // probes (no full-roster loads). Everything here describes snapshot
   // membership — observed facts, never inferred follow/unfollow timestamps.
+  // Weights (D43): a story mention is a public act naming the account (12), a
+  // comment is a direct interaction (10), a follow delta is a structural
+  // change (8). The score orders observed counts; it never invents one.
   const ranked = [...map.entries()]
     .map(([username, v]) => ({
       username,
-      score: v.mentions * 12 + v.deltas * 8,
+      score: v.mentions * 12 + v.comments * 10 + v.deltas * 8,
       signals: v,
       confidence:
-        v.mentions + v.deltas > 2 ? "MEDIUM" : v.mentions + v.deltas > 0 ? "LOW" : "UNKNOWN",
+        v.mentions + v.comments + v.deltas > 2
+          ? "MEDIUM"
+          : v.mentions + v.comments + v.deltas > 0
+            ? "LOW"
+            : "UNKNOWN",
     }))
     .sort((a, b) => b.score - a.score);
 

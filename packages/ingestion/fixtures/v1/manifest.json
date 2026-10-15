@@ -12,6 +12,7 @@
     "comments": {
       "post-1": "comments/post-1.json"
     },
-    "insights": "insights.json"
+    "insights": "insights.json",
+    "discovery": "discovery.json"
   }
 }

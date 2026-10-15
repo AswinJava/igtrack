@@ -15,6 +15,7 @@ export const RegistryCapabilityId = {
   PROFILE: "PROFILE",
   COUNTS: "COUNTS",
   ACCOUNT_INSIGHTS: "ACCOUNT_INSIGHTS",
+  OTHER_ACCOUNT_PUBLIC: "OTHER_ACCOUNT_PUBLIC",
   STORIES: "STORIES",
   STORY_METADATA: "STORY_METADATA",
   STORY_MENTIONS: "STORY_MENTIONS",
@@ -111,6 +112,22 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     liveState: "NOT_VERIFIED",
     liveEvidence:
       "No credentials in this environment. Request shape is docs-pinned against the IG User insights reference (updated 2026-06-16): metric names, period=today/day/lifetime tokens, metric_type=time_series|total_value, breakdown=country. Documented constraints carried into the pipeline: unavailable metrics return an empty data set (not 0); follower_count and online_followers are unavailable below 100 followers; demographics are top-45 with a 48 h delay; account insights default to a 24-hour lookback unless since/until are supplied (the provider always supplies an explicit 30-day window).",
+  },
+  {
+    id: "OTHER_ACCOUNT_PUBLIC",
+    label: "Other public professional account profile and recent media",
+    providerMethods: ["discoverAccount"],
+    permissions:
+      "Facebook Login product; the documented business_discovery edge. Public Business/Creator accounts only — consumer and private accounts are unreachable, age-gated accounts return nothing. Documented permissions: instagram_basic + instagram_manage_insights + pages_read_engagement. Opt-in on the graph provider: IGTRACK_GRAPH_BUSINESS_DISCOVERY=1 (D42).",
+    persistence: [],
+    ui: ["igtrack lookup (CLI)", "lookup (MCP tool)"],
+    howItWorks:
+      "A probe, not a record: lookup asks the documented business_discovery edge for one username and renders the public profile fields plus a bounded recent-media preview with the audited media fields (captions, type, permalink, like and comment counts). Nothing is persisted, so no evidence row is owed — a probe is not a claim of record. Unreachable classes (consumer, private, age-gated, no such account) return UNAVAILABLE with the platform's reason, never an empty profile and never a zero. The platform id travels as an output of this response; it is never a lookup key.",
+    whyUnavailable: null,
+    unlock: null,
+    liveState: "NOT_VERIFIED",
+    liveEvidence:
+      "No credentials in this environment. Request shape is docs-pinned against Meta's Business Discovery references (both updated 2026-08-12): no previous/next paging (before/after cursors only), a direct GET on a returned IG Media ID fails with insufficient permissions, view_count via Business Discovery is Reels-only (added 2025-06-16), and the route is limited by Platform Rate Limits (200 × users per hour) rather than the Instagram BUC formula.",
   },
   {
     id: "STORIES",

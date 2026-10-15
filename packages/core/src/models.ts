@@ -225,3 +225,25 @@ export interface NormalizedInsightSet {
   windowUntil?: string;
   meta: ObservationMeta;
 }
+
+// ---------------------------------------------------------------------------
+// Other-account public data (Business Discovery). A PROBE, not a record: the
+// lookup path renders it for the caller and persists nothing, so there is no
+// evidence row to owe. Only the documented Business Discovery fields exist
+// here — profile fields plus the media edge. Nothing is inferred: a field the
+// platform withheld stays absent (D42).
+// ---------------------------------------------------------------------------
+
+export interface NormalizedDiscoveredAccount {
+  account: NormalizedAccountRef;
+  displayName?: string;
+  bio?: string;
+  externalUrl?: string;
+  profilePicUrl?: string;
+  followerCount?: number;
+  followingCount?: number;
+  postCount?: number;
+  /** Bounded recent-media preview from the discovery media edge, in the order the platform returned it (Business Discovery returns newest first). */
+  recentMedia: NormalizedPost[];
+  meta: ObservationMeta;
+}

@@ -742,3 +742,130 @@ describe("GraphProvider account insights", () => {
     expect(result.data).toBeUndefined();
   });
 });
+
+describe("GraphProvider business discovery (D42)", () => {
+  function discoveryProvider() {
+    return new GraphProvider(
+      graphConfigFromEnv({ ...ENV, IGTRACK_GRAPH_BUSINESS_DISCOVERY: "1" }),
+    );
+  }
+
+  it("is off unless the environment opts in, and the refusal names the unlock", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({}));
+    vi.stubGlobal("fetch", fetchSpy);
+    const result = await provider().discoverAccount("@someone.else");
+    expect(result.status).toBe(CapabilityStatus.UNAVAILABLE);
+    expect(result.note).toContain("IGTRACK_GRAPH_BUSINESS_DISCOVERY=1");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("probes the documented business_discovery edge and persists nothing", async () => {
+    const seen: URL[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: URL) => {
+        seen.push(url);
+        return jsonResponse({
+          business_discovery: {
+            id: "999",
+            username: "other.studio",
+            name: "Other Studio",
+            biography: "bio",
+            website: "https://example.invalid",
+            followers_count: 100,
+            follows_count: 20,
+            media_count: 3,
+            profile_picture_url: "https://example.invalid/pic.jpg",
+            media: {
+              data: [
+                {
+                  id: "m1",
+                  caption: "c",
+                  timestamp: "2026-08-01T00:00:00+0000",
+                  like_count: 5,
+                  comments_count: 2,
+                  permalink: "https://example.invalid/p/m1/",
+                  shortcode: "m1s",
+                  media_type: "IMAGE",
+                  media_product_type: "FEED",
+                },
+                { id: "m2" },
+              ],
+            },
+          },
+        });
+      }),
+    );
+
+    const result = await discoveryProvider().discoverAccount("Other.Studio");
+    expect(result.status).toBe(CapabilityStatus.AVAILABLE);
+    expect(result.data?.account).toMatchObject({ username: "other.studio", igId: "999" });
+    expect(result.data?.followerCount).toBe(100);
+    expect(result.data?.followingCount).toBe(20);
+    expect(result.data?.postCount).toBe(3);
+    expect(result.data?.recentMedia).toHaveLength(2);
+    expect(result.data?.recentMedia[0]?.likeCount).toBe(5);
+    // A field the platform omitted stays absent on the media preview too.
+    expect(result.data?.recentMedia[1]?.likeCount).toBeUndefined();
+    expect(result.note).toContain("Probe");
+    expect(result.rawPayloadHash).toBeUndefined();
+
+    const url = seen[0]!;
+    const fields = url.searchParams.get("fields") ?? "";
+    expect(fields).toContain("business_discovery.username(other.studio)");
+    expect(fields).toContain("followers_count");
+    expect(fields).toContain("media.limit(");
+  });
+
+  it("turns the platform's empty answer into UNAVAILABLE with the documented classes", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const result = await discoveryProvider().discoverAccount("age.gated");
+    expect(result.status).toBe(CapabilityStatus.UNAVAILABLE);
+    expect(result.note).toContain("age-gated");
+    expect(result.data).toBeUndefined();
+  });
+
+  it("refuses its own account without a network call", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({}));
+    vi.stubGlobal("fetch", fetchSpy);
+    const result = await discoveryProvider().discoverAccount("Owned.Account");
+    expect(result.status).toBe(CapabilityStatus.UNAVAILABLE);
+    expect(result.note).toContain("profile path");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("never lets a crafted username reach the request builder", async () => {
+    const fetchSpy = vi.fn(async () => jsonResponse({}));
+    vi.stubGlobal("fetch", fetchSpy);
+    const crafted = await discoveryProvider().discoverAccount("x},media.limit(50){id");
+    expect(crafted.status).toBe(CapabilityStatus.ERROR);
+    expect(crafted.error?.kind).toBe(CapabilityErrorKind.ACCOUNT_NOT_FOUND);
+    expect(crafted.error?.message).toContain("not a possible Instagram username");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("maps a documented 400 to UNAVAILABLE and a 403 permission failure to a loud error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          { error: { message: "(#803) Some of the aliases you requested do not exist" } },
+          400,
+        ),
+      ),
+    );
+    const absent = await discoveryProvider().discoverAccount("ghost.account");
+    expect(absent.status).toBe(CapabilityStatus.UNAVAILABLE);
+    expect(absent.note).toContain("aliases");
+
+    // A missing permission is the operator's app configuration, not a fact
+    // about the account — it must fail loud, never look like "no data".
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: { message: "permission missing" } }, 403)),
+    );
+    const forbidden = await discoveryProvider().discoverAccount("ghost.account");
+    expect(forbidden.status).toBe(CapabilityStatus.ERROR);
+    expect(forbidden.error?.kind).toBe(CapabilityErrorKind.FORBIDDEN);
+  });
+});

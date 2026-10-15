@@ -4,7 +4,7 @@
 > from `CAPABILITY_REGISTRY` (`packages/core/src/capabilities.ts`); a test fails if it
 > is stale. Prose cannot drift from the product because there is no prose.
 
-14 of 19 capabilities are obtainable from a lawful source; 5 have no provider method at all. Separately, 7 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
+15 of 20 capabilities are obtainable from a lawful source; 5 have no provider method at all. Separately, 7 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
 
 A capability can be available **and** documented-absent at the same time, and saying so is the point of this table: follower and following rosters are `DOCUMENTED_ABSENT` for any live interface — no roster edge exists — while the synthetic fixture provider exposes rosters so the pipeline can be built and tested end to end, and the operator's own Instagram export (`import:v1`) supplies the real roster lawfully.
 
@@ -25,6 +25,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 | **Public profile** | available · `NOT_VERIFIED` | `resolveAccount`, `getProfile` | `igAccounts`, `profileSnapshots`, `profileChanges`, `evidence` |
 | **Follower / following / post counts** | available · `NOT_VERIFIED` | `getProfile` | `profileSnapshots` |
 | **Own-account insights over time** | available · `NOT_VERIFIED` | `getAccountInsights` | `insightPoints`, `evidence` |
+| **Other public professional account profile and recent media** | available · `NOT_VERIFIED` | `discoverAccount` | — |
 | **Active stories** | available · `NOT_VERIFIED` | `getStories` | `stories`, `storySightings`, `evidence` |
 | **Story metadata** | available · `NOT_VERIFIED` | `getStories` | `stories` |
 | **Story mentions and tags** | available · `NOT_VERIFIED` | `getStories` | `storyMentions`, `evidence` |
@@ -76,6 +77,17 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Surfaced in:** `igtrack insights (CLI)`, `insights (MCP tool)`
 
 **Pipeline.** Each INSIGHTS_SCAN calls the documented IG User insights edge once for a fixed, docs-pinned metric set: daily time series for follower_count, reach, views, accounts_engaged and total_interactions, plus follower_demographics (country breakdown) as a lifetime total_value point-in-time snapshot. Points are appended to insight_points (append-only), so repeated scans build the history the native 90-day window deletes and the demographic time line the API itself cannot produce (demographics are a current-state snapshot, never a series). A metric the platform does not return becomes an ABSENCE row with the documented reason (below 100 followers, 48 h demographic delay) — never a zero.
+
+### Other public professional account profile and recent media — `available`
+
+- **Registry id:** `OTHER_ACCOUNT_PUBLIC`
+- **Live state:** `NOT_VERIFIED` — No credentials in this environment. Request shape is docs-pinned against Meta's Business Discovery references (both updated 2026-08-12): no previous/next paging (before/after cursors only), a direct GET on a returned IG Media ID fails with insufficient permissions, view_count via Business Discovery is Reels-only (added 2025-06-16), and the route is limited by Platform Rate Limits (200 × users per hour) rather than the Instagram BUC formula.
+- **Permissions:** Facebook Login product; the documented business_discovery edge. Public Business/Creator accounts only — consumer and private accounts are unreachable, age-gated accounts return nothing. Documented permissions: instagram_basic + instagram_manage_insights + pages_read_engagement. Opt-in on the graph provider: IGTRACK_GRAPH_BUSINESS_DISCOVERY=1 (D42).
+- **Provider methods:** `discoverAccount`
+- **Persists to:** —
+- **Surfaced in:** `igtrack lookup (CLI)`, `lookup (MCP tool)`
+
+**Pipeline.** A probe, not a record: lookup asks the documented business_discovery edge for one username and renders the public profile fields plus a bounded recent-media preview with the audited media fields (captions, type, permalink, like and comment counts). Nothing is persisted, so no evidence row is owed — a probe is not a claim of record. Unreachable classes (consumer, private, age-gated, no such account) return UNAVAILABLE with the platform's reason, never an empty profile and never a zero. The platform id travels as an output of this response; it is never a lookup key.
 
 ### Active stories — `available`
 

@@ -240,6 +240,10 @@ const CONFIG_KEYS: Array<{ key: string; meaning: string }> = [
   { key: "IGTRACK_GRAPH_IG_USER_ID", meaning: "Owned IG user id" },
   { key: "IGTRACK_GRAPH_USERNAME", meaning: "Owned IG username" },
   { key: "IGTRACK_GRAPH_API_VERSION", meaning: "Graph API version" },
+  {
+    key: "IGTRACK_GRAPH_BUSINESS_DISCOVERY",
+    meaning: "1 enables the Business Discovery probe of other public accounts (D42)",
+  },
   { key: "IGTRACK_USER_EMAIL", meaning: "Owner user for CLI operations" },
   { key: "IGTRACK_SCHEDULER", meaning: "1 enables in-process scheduling" },
   { key: "IGTRACK_JOB_POLL_MS", meaning: "Worker poll interval" },

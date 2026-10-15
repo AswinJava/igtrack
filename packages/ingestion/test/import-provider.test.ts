@@ -48,6 +48,9 @@ describe("ImportProvider (import:v1)", () => {
       getPostChildren: false,
       // An export contains no insights edge; the refusal is in the method too.
       getAccountInsights: false,
+      // The export describes one account; other-account public data has no
+      // route through it (D42) — the method says so with the reason.
+      discoverAccount: false,
     });
   });
 
@@ -123,7 +126,8 @@ describe("ImportProvider (import:v1)", () => {
     const comments = await sample.getPublicComments();
     const children = await sample.getPostChildren();
     const insights = await sample.getAccountInsights();
-    for (const r of [profile, stories, posts, comments, children, insights]) {
+    const discovered = await sample.discoverAccount("mira.codes");
+    for (const r of [profile, stories, posts, comments, children, insights, discovered]) {
       expect(r.status).toBe(CapabilityStatus.UNAVAILABLE);
       expect(r.confidence).toBe(Confidence.UNKNOWN);
       expect(r.data).toBeUndefined();
@@ -133,6 +137,9 @@ describe("ImportProvider (import:v1)", () => {
     expect(stories.note).toMatch(/never includes story content/);
     expect(posts.note).toMatch(/not read by this provider version/);
     expect(insights.note).toMatch(/no account insight metrics/i);
+    // An export can never describe another account; the refusal names the one
+    // lawful route rather than implying the data does not exist (D42).
+    expect(discovered.note).toMatch(/Business Discovery/);
   });
 
   it("accepts the roster directory directly as the import dir", async () => {

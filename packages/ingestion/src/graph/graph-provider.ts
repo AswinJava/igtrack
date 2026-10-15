@@ -14,6 +14,7 @@ import {
   type MediaType,
   type NormalizedAccountRef,
   type NormalizedComment,
+  type NormalizedDiscoveredAccount,
   type NormalizedFollowPage,
   type NormalizedInsightAbsence,
   type NormalizedInsightPoint,
@@ -31,6 +32,12 @@ export interface GraphProviderConfig {
   igUserId: string;
   username: string;
   apiVersion?: string;
+  /**
+   * Opt-in for the documented Business Discovery edge (D42). Off by default:
+   * it is the one route that reads OTHER accounts, so it never turns itself
+   * on — `IGTRACK_GRAPH_BUSINESS_DISCOVERY=1` does, explicitly.
+   */
+  businessDiscovery?: boolean;
 }
 
 // Documented request shapes, exported so the field-coverage audit
@@ -62,6 +69,18 @@ export const GRAPH_INSIGHTS_DEMOGRAPHICS_TIMEFRAME = "this_month";
 // trap for a product whose entire value is a retained series — so the window
 // is always explicit.
 export const GRAPH_INSIGHTS_WINDOW_DAYS = 30;
+
+// Business Discovery (D42): the one documented route to another account's
+// public data. The request reuses the audited profile and media field sets
+// verbatim, so no field enters the product through this route that the §15
+// field-coverage audit has not already accounted for.
+export const GRAPH_DISCOVERY_MEDIA_LIMIT = 12;
+export function graphDiscoveryFields(username: string): string {
+  return (
+    `business_discovery.username(${username})` +
+    `{${GRAPH_PROFILE_FIELDS},media.limit(${GRAPH_DISCOVERY_MEDIA_LIMIT}){${GRAPH_MEDIA_FIELDS}}}`
+  );
+}
 
 interface GraphInsightsValue {
   value?: number;
@@ -173,6 +192,9 @@ export function graphConfigFromEnv(
     ...(env.IGTRACK_GRAPH_API_VERSION !== undefined
       ? { apiVersion: env.IGTRACK_GRAPH_API_VERSION }
       : {}),
+    // Only the literal "1" enables it: an empty, misspelled, or placeholder
+    // value must not silently widen the provider's read scope.
+    ...(env.IGTRACK_GRAPH_BUSINESS_DISCOVERY === "1" ? { businessDiscovery: true } : {}),
   };
 }
 
@@ -224,12 +246,14 @@ export class GraphProvider implements InstagramProvider {
   private readonly igUserId: string;
   private readonly ownedUsername: string;
   private readonly baseUrl: string;
+  private readonly businessDiscovery: boolean;
 
   constructor(config: GraphProviderConfig) {
     this.token = config.accessToken;
     this.igUserId = config.igUserId;
     this.ownedUsername = config.username.toLowerCase();
     this.baseUrl = `https://graph.facebook.com/${config.apiVersion ?? "v21.0"}`;
+    this.businessDiscovery = config.businessDiscovery === true;
   }
 
   capabilities(): ProviderCapabilities {
@@ -244,6 +268,11 @@ export class GraphProvider implements InstagramProvider {
       [CapabilityName.GET_POST_CHILDREN]: true,
       // Documented IG User insights edge for the owned account (D36).
       [CapabilityName.GET_ACCOUNT_INSIGHTS]: true,
+      // The documented business_discovery edge, opt-in (D42). Off by default
+      // because it is the only route that reads accounts other than the owned
+      // one; discoverAccount still answers UNAVAILABLE with the unlock path
+      // when it is off, rather than pretending the method does not exist.
+      [CapabilityName.DISCOVER_ACCOUNT]: true,
     };
   }
 
@@ -435,29 +464,9 @@ export class GraphProvider implements InstagramProvider {
         },
       );
       const observedAt = meta.observedAt;
-      const posts: NormalizedPost[] = (data.data ?? []).map((p) => ({
-        postId: p.id,
-        ...(shortcodeFor(p.shortcode, p.permalink) !== undefined
-          ? { shortcode: shortcodeFor(p.shortcode, p.permalink) as string }
-          : {}),
-        // Permalink kept verbatim alongside the derived shortcode: the URL
-        // is provider data, the shortcode a parse of it. UI guards the
-        // scheme before rendering it as a link.
-        ...(p.permalink !== undefined ? { permalink: p.permalink } : {}),
-        takenAt: p.timestamp ?? observedAt,
-        ...(p.caption !== undefined ? { caption: p.caption } : {}),
-        ...(p.like_count !== undefined ? { likeCount: p.like_count } : {}),
-        ...(p.comments_count !== undefined ? { commentCount: p.comments_count } : {}),
-        ...(p.media_type !== undefined ? { mediaType: mapGraphMediaType(p.media_type) } : {}),
-        ...(p.media_product_type !== undefined
-          ? { mediaProductType: p.media_product_type }
-          : {}),
-        meta: {
-          category: ObservationCategory.OBSERVED,
-          confidence: Confidence.HIGH,
-          observedAt,
-        },
-      }));
+      const posts: NormalizedPost[] = (data.data ?? []).map((p) =>
+        mapGraphMediaItem(p, observedAt),
+      );
       const after = data.paging?.cursors?.after;
       if (after === undefined) {
         return available(posts, { ...meta, confidence: Confidence.HIGH });
@@ -673,6 +682,162 @@ export class GraphProvider implements InstagramProvider {
       return providerFailure(meta, err);
     }
   }
+
+  /**
+   * The documented business_discovery edge (D42). A PROBE, not a record:
+   * nothing is persisted, so no evidence row is owed. Off by default — the
+   * refusal names the unlock (the env flag + the documented permissions)
+   * instead of pretending the account is unobservable. Unreachable classes
+   * (consumer, private, age-gated, nonexistent) are UNAVAILABLE with the
+   * platform's reason, never an empty profile and never a zero.
+   */
+  async discoverAccount(
+    username: string,
+  ): Promise<CapabilityResult<NormalizedDiscoveredAccount>> {
+    const meta = this.meta();
+    const target = username.trim().replace(/^@/, "").toLowerCase();
+    if (target === "") {
+      return errored(meta, {
+        kind: CapabilityErrorKind.ACCOUNT_NOT_FOUND,
+        message: "discoverAccount requires a non-empty username",
+        retryable: false,
+      });
+    }
+    // Instagram usernames are letters, digits, periods and underscores (max
+    // 30). This guard is about more than honesty: the username is embedded in
+    // the fields expression, so anything else must never reach the request
+    // builder — and no such account can exist, so the answer is "not found",
+    // not "unavailable".
+    if (!/^[a-z0-9._]{1,30}$/.test(target)) {
+      return errored(meta, {
+        kind: CapabilityErrorKind.ACCOUNT_NOT_FOUND,
+        message: `"${username.trim()}" is not a possible Instagram username (documented charset: letters, digits, periods, underscores; at most 30 characters) — nothing was requested.`,
+        retryable: false,
+      });
+    }
+    if (target === this.ownedUsername) {
+      return unavailable(
+        meta,
+        `@${target} is the account this provider already observes; use the profile path for it.`,
+      );
+    }
+    if (!this.businessDiscovery) {
+      return unavailable(
+        meta,
+        "Business Discovery is off (the default). It is the only documented route to another account's public data, so enabling it is explicit: set IGTRACK_GRAPH_BUSINESS_DISCOVERY=1 and use a Facebook-Login token carrying instagram_basic + instagram_manage_insights + pages_read_engagement.",
+      );
+    }
+    try {
+      const data = await this.get<GraphDiscoveryResponse>(`/${this.igUserId}`, {
+        fields: graphDiscoveryFields(target),
+      });
+      const d = data.business_discovery;
+      if (d === undefined || d.id === undefined) {
+        // Meta documents this: Business Discovery answers only for public
+        // Business/Creator accounts; consumer and private accounts are
+        // unreachable and age-gated accounts return nothing. The absence
+        // says that, rather than inventing an empty profile.
+        return unavailable(
+          meta,
+          `The platform returned no public data for @${target}. Documented behavior: Business Discovery surfaces only public Business/Creator accounts — consumer and private accounts are unreachable, age-gated accounts return nothing, and a nonexistent username has nothing to return.`,
+        );
+      }
+      const observedAt = meta.observedAt;
+      const discovered: NormalizedDiscoveredAccount = {
+        account: {
+          username: d.username ?? target,
+          igId: d.id,
+          ...(d.name !== undefined ? { displayName: d.name } : {}),
+        },
+        ...(d.name !== undefined ? { displayName: d.name } : {}),
+        ...(d.biography !== undefined ? { bio: d.biography } : {}),
+        ...(d.website !== undefined ? { externalUrl: d.website } : {}),
+        ...(d.profile_picture_url !== undefined
+          ? { profilePicUrl: d.profile_picture_url }
+          : {}),
+        ...(d.followers_count !== undefined ? { followerCount: d.followers_count } : {}),
+        ...(d.follows_count !== undefined ? { followingCount: d.follows_count } : {}),
+        ...(d.media_count !== undefined ? { postCount: d.media_count } : {}),
+        recentMedia: (d.media?.data ?? []).map((m) => mapGraphMediaItem(m, observedAt)),
+        meta: {
+          category: ObservationCategory.OBSERVED,
+          confidence: Confidence.MEDIUM,
+          observedAt,
+        },
+      };
+      // Confidence MEDIUM and a note: this is another account's platform-
+      // reported public data, unhashed (probe, not record), and the media
+      // preview is a bounded window — it is not the account's full history.
+      const result = available(discovered, {
+        ...meta,
+        confidence: Confidence.MEDIUM,
+        rawReference: `${this.sourceId}/business_discovery?username=${target}`,
+      });
+      result.note = `Probe of another account's public data via the documented Business Discovery edge; nothing was persisted. Recent media is a bounded preview (limit ${GRAPH_DISCOVERY_MEDIA_LIMIT}), not the account's full post history.`;
+      return result;
+    } catch (err) {
+      return providerFailure(meta, err);
+    }
+  }
+}
+
+interface GraphRawMedia {
+  id: string;
+  caption?: string;
+  timestamp?: string;
+  like_count?: number;
+  comments_count?: number;
+  permalink?: string;
+  shortcode?: string;
+  media_type?: string;
+  media_product_type?: string;
+}
+
+/**
+ * One IG Media node → NormalizedPost. Shared by the owned-account media edge
+ * and the Business Discovery media preview: the two routes normalize the same
+ * documented fields the same way, and a field the provider withheld stays
+ * absent (never zero-filled).
+ */
+function mapGraphMediaItem(p: GraphRawMedia, observedAt: string): NormalizedPost {
+  return {
+    postId: p.id,
+    ...(shortcodeFor(p.shortcode, p.permalink) !== undefined
+      ? { shortcode: shortcodeFor(p.shortcode, p.permalink) as string }
+      : {}),
+    // Permalink kept verbatim alongside the derived shortcode: the URL
+    // is provider data, the shortcode a parse of it. UI guards the
+    // scheme before rendering it as a link.
+    ...(p.permalink !== undefined ? { permalink: p.permalink } : {}),
+    takenAt: p.timestamp ?? observedAt,
+    ...(p.caption !== undefined ? { caption: p.caption } : {}),
+    ...(p.like_count !== undefined ? { likeCount: p.like_count } : {}),
+    ...(p.comments_count !== undefined ? { commentCount: p.comments_count } : {}),
+    ...(p.media_type !== undefined ? { mediaType: mapGraphMediaType(p.media_type) } : {}),
+    ...(p.media_product_type !== undefined
+      ? { mediaProductType: p.media_product_type }
+      : {}),
+    meta: {
+      category: ObservationCategory.OBSERVED,
+      confidence: Confidence.HIGH,
+      observedAt,
+    },
+  };
+}
+
+interface GraphDiscoveryResponse {
+  business_discovery?: {
+    id?: string;
+    username?: string;
+    name?: string;
+    biography?: string;
+    website?: string;
+    followers_count?: number;
+    follows_count?: number;
+    media_count?: number;
+    profile_picture_url?: string;
+    media?: { data?: GraphRawMedia[] };
+  };
 }
 
 interface GraphCommentAuthor {
