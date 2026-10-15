@@ -374,3 +374,82 @@ the IG User insights reference (updated 2026-06-16). The metric set is v1 —
 `online_followers` (24 hourly buckets), `follows_and_unfollows` (breakdown-shaped),
 and media-level insights are deliberately not requested yet; the unlock path is
 recorded in the registry entry rather than guessed at here.
+
+
+---
+
+## 14. The fourth founding - the complete-account dossier requirement
+
+**Date:** 2026-10-15 · **Status:** adopted (requirement recorded; Phase E built where lawful)
+
+The founder stated the product requirement in full: given **any public account
+username**, the system should surface that account's details (follower/following
+counts, posts, tags, stories, highlights - *including hidden ones* - story and
+highlight tags), every comment and like the account ever left on other public
+accounts' posts, its reposts, an id-based lookup, who followed/unfollowed since
+the last audit (both directions, by name), and a "closest contacts" analysis
+built by analysing interactions (comments, likes, reposts, tags) not only on the
+observed account but **recursively through its followers' and following's
+accounts**. This section records that requirement faithfully, then maps every
+clause to what is observable, what is absent by platform design, and what would
+require access-control circumvention - which this project does not do (invariant
+3), because that is the line that makes it lawful and the thing that gets
+accounts disabled (stream 02, verbatim user reports).
+
+The requirement is the north star. The refusals below are not TODOs and not
+gaps-to-close-later: they are the platform's shape, verified in stream 04
+against Meta's own references (dated). **Changing a refusal requires a new
+dated founding entry here - not a feature PR, not a later agent's "finishing
+the feature".**
+
+### 14.1 The requirement, clause by clause, mapped
+
+| # | The ask (as given) | Lawful route | Status |
+|---|---|---|---|
+| A1 | Give any public account username - show its details (follower/following counts, posts) | **Business Discovery** - `GET /{owned-ig-id}?fields=business_discovery.username({x}){...}`: public profile fields + bounded `media` edge with `comments_count`, `like_count` (the provider requests only the audited field set; `view_count` is Reels-only and outside it, so it is not requested). Public **Business/Creator** accounts only; consumer and private accounts are unreachable; age-gated accounts return **nothing** | **Built this phase** (D42): opt-in, probe-only, absence-with-reason for the unreachable classes |
+| A2 | Tags (media the account is tagged in / tagged content) | Own account: the IG User `tags` edge exists (media where *you* were tagged) - not yet requested by any provider method. Other accounts: no tags edge on the generic node; the only cross-account route is Hashtag Search (App Review + 30 hashtags / rolling 7 days + business verification) | **Gap recorded** (D46): own-account tags edge is a lawful Phase E candidate; hashtag route is gated and deferred |
+| A3 | Their stories | Own account: `stories` edge (implemented, STORIES). Other accounts: only the owner's tray exists - no story edge for third-party accounts | Own: **exists**. Others: **refused** (STORIES liveEvidence) |
+| A4 | Their highlights, story tags, highlight tags - "even if it is hidden" | No `highlights` edge exists anywhere (IG User reference, 2026-04-22); archived story content is not enumerable after the 24 h window; story tags of others do not exist as readable fields; the export does not carry highlight content. "Even if hidden" = the owner's session cookie = unlawful | **Refused** (HIGHLIGHTS, DOCUMENTED_ABSENT) |
+| A5 | All comments the account made on other public accounts' posts | No edge exists. Comments are readable only on media you own or manage (comments edge on own media, `mentioned_comment`); no route enumerates a third party's outgoing comments | **Refused** (INTERACTIONS, DOCUMENTED_ABSENT) |
+| A6 | All likes the account made on other public accounts' posts | No edge exists and none can: the likers list is absent by design, and Instagram made like activity private. `like_count` is a number; who is never enumerated | **Refused** (LIKES, DOCUMENTED_ABSENT) |
+| A7 | Reposts | `reposts_count` exists as a *number* on IG Media (added 2026-04-22) for media you can read; no edge lists reposting accounts; "the account's reposts" is not an API concept | **Partial**: count for owned media is requestable (recorded, D46); identities **refused** (REPOSTS) |
+| A8 | "If anyone takes the user id, it should show" | No id → account route exists for arbitrary accounts. The platform id is an *output of* a username-based Business Discovery response, and a *credential input* for the owned account - never a lookup key | **Adopted semantics** (D44): id is returned by discovery; `lookup` stays username-keyed |
+| A9 | Who followed / unfollowed since the last audit, both directions, by name | The operator's own export (import:v1 → snapshots → `follow_deltas` → `activity`), COMPLETE-only diffs; both directions; names included | **Already built** (Phase B); demonstrated in the demo feed as NEW_FOLLOWING / LOST_FOLLOWING rows |
+| A10 | Closest contacts by analysing comments/likes/reposts/tags - and the same recursively through followers' and following's accounts | Observable signals on accounts the operator owns: story mentions (implemented), comment authorship on owned media (**built this phase**), follow deltas (implemented). The recursive input - the follow/following graph of arbitrary accounts plus their likes/comments/reposts - does not exist lawfully; the only way to obtain it is scraping/session access, which the market evidence shows gets accounts permanently disabled and is invariant-3 prohibited | Observed-evidence ranking: **extended** (D43). Recursive traversal: **refused, permanently** |
+
+### 14.2 Decision log (Phase E)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D42 | **Adopt Business Discovery as the only route to other-account public data** - opt-in via `IGTRACK_GRAPH_BUSINESS_DISCOVERY=1`; the audited profile + media field sets only (no `view_count`: Reels-only, not audited); results are a **probe, not a record** (no persistence, therefore no evidence obligation); unreachable classes (consumer, private, age-gated) become UNAVAILABLE **with the reason**; requires the Facebook Login product + `instagram_basic` + `instagram_manage_insights` + `pages_read_engagement`; live state `NOT_VERIFIED` until a credential exists. | The ask behind A1 is the market's biggest paid category and the only lawful cross-account route. It changes D4's "owned accounts only" scope, so it is explicit, opt-in, and gated - and it refuses to pretend: age-gated accounts "return nothing" is Meta's own documented behavior, so nothing is what they get here, with the reason. |
+| D43 | **Comment authorship on owned media becomes the third relationship signal** (weights: mentions 12, comments 10, deltas 8), ranked only from stored evidence. | It directly answers A10's core with data already observed (post_comments.author_account_id) - no new scans, no new tables. Weight rationale: a story mention is a public act naming the account; a comment is a direct interaction; a follow delta is a structural change. All three are observed facts; the score orders them, it never invents one. |
+| D44 | **The platform id is an output, never a lookup key.** `lookup` accepts a username; discovery responses carry `id` where the platform returns it; the owned account's id remains a credential (`IGTRACK_GRAPH_IG_USER_ID`). | An id → account route does not exist. Any local mapping table would be fabricated knowledge, and any remote id resolution would be the undocumented-endpoint path (invariant 3). |
+| D45 | **The dossier requirement is recorded as the product north star** (this section); AGENTS.md carries the binding refusal list; a change to any refused row requires a new dated founding entry. | The failure mode this prevents: a future agent asked "add likes-the-user-made" reading a TODO and building a scraper. The refusals are the product's lawfulness, not an oversight. |
+| D46 | **Recorded, not built (unlock paths):** own-account `tags` edge (A2); media `reposts_count` / `saved_count` / `shares_count` on owned media (A7, documented 2026-04-22 fields); the `mentions` edge of the owned account (A5's only lawful sliver - comments where *you* were mentioned). Hashtag Search is **deferred as unpromising**: App Review actively rejects the analytics use case verbatim ("IPCA cannot be used to retrieve metrics and insights of the content"), plus a 30 hashtags / 7 days budget. | Each is a lawful, documented edge with a real increment; each deserves its own phase with tests rather than being smuggled into this one. Hashtag Search fails the cost/benefit test on Meta's own rejection evidence. |
+
+### 14.3 What was deliberately NOT added
+
+- Any session-cookie, headless-browser, proxy, or undocumented-endpoint path - for
+  any clause of the requirement. The requirement does not override invariant 3;
+  it is exactly the pressure invariant 3 exists to withstand.
+- Any local username/id mapping table, any identity inference ("this liker
+  pattern suggests..."), any zero-fill for unobserved counts.
+- Recursive crawl scaffolding ("crawl the follow graph later") - the input does
+  not exist lawfully, so the scaffolding would be a promise the product cannot
+  keep.
+
+### Verification for Phase E
+
+| Item | Evidence |
+|---|---|
+| Typecheck | `pnpm typecheck` — clean across all 5 workspace packages (2026-10-15) |
+| Tests | `pnpm test` — 56 files, 405 passed, 1 skipped, 0 failed; new coverage: `graph-provider.test.ts` (discovery on/off, unreachable classes, crafted-username refusal, 403 vs 400), `fixture-provider.test.ts` (discovery file, undeclared file, own-target refusal), `import-provider.test.ts` (refusal names the lawful route), `operations.test.ts` (lookup routes to discovery as a probe), `activity-relationships.test.ts` (comment signal counts, owner's own comments excluded) |
+| End-to-end (fixture) | `igtrack lookup dune.harbor` → `route discovery`, AVAILABLE, synthetic profile + 2 bounded media rows, note "nothing was persisted"; `igtrack lookup nobody.at.all` → `ACCOUNT_NOT_FOUND` naming the set's only discovery entry; `igtrack relationships target_a` → new `comments` column, @noah.frames 2 / @mira.lens 1 with scores 40/30 |
+| Capability registry + docs | `OTHER_ACCOUNT_PUBLIC` added; `pnpm docs:capabilities` regenerated `docs/CAPABILITIES.md` (15 of 20 obtainable); matrix test green |
+| Config surface | `igtrack config` lists `IGTRACK_GRAPH_BUSINESS_DISCOVERY` as presence only; `.env.example` documents the opt-in |
+
+Not claimed in this phase: no live Graph credential exists in this environment,
+so Business Discovery is `NOT_VERIFIED` live; the request shape is docs-pinned
+against Meta's Business Discovery references (both updated 2026-08-12). The
+media preview is bounded (12) because paging does not exist on this edge — it
+is a preview, said as such in the note, never "the account's posts".

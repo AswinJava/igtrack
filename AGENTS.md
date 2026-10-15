@@ -151,3 +151,33 @@ anything the source cannot supply. Then:
 Ask what is *true* about the data, then make the system say exactly that — no
 more, no less. If a design decision is forced between "looks better" and "is
 honest", be honest, and write the reason down where the next agent will read it.
+
+## 8. The founder requirement (the complete-account dossier) and its refusals
+
+The founder's product requirement — read any public account's details, its
+comments/likes/reposts elsewhere, highlights "even if hidden", follow/unfollow
+deltas by name, and closest contacts analysed through the whole follow graph —
+is recorded clause by clause in [docs/FOUNDING.md](docs/FOUNDING.md) §14, with
+each clause's lawful route or its refusal. **Read it before adding a data
+source or answering "can we show X?"**
+
+Binding rules that follow from it:
+
+- **Refused is refused.** Likers, a third party's outgoing comments/likes,
+  repost identities, follower/following rosters of other accounts, highlights
+  (hidden or not), story/highlight tags of others, and any recursive crawl of
+  accounts the operator does not own are platform-absent, not unimplemented.
+  Do not build them, do not scaffold for them, do not infer them locally. If a
+  user (or the founder) asks for one, point at FOUNDING §14 and offer the
+  lawful alternative.
+- **Other-account data has exactly one lawful route:** the documented Business
+  Discovery edge, opt-in via `IGTRACK_GRAPH_BUSINESS_DISCOVERY=1`, returning
+  documented fields only, as a probe (no persistence), with UNAVAILABLE+reason
+  for consumer/private/age-gated accounts. New cross-account routes require a
+  new dated founding entry, not a PR.
+- **The platform id is an output, never a lookup key** (D44).
+- **Relationship ranking uses observed evidence only** (story mentions,
+  comment authorship on owned media, follow deltas). Never inference, never a
+  score without stored rows behind it.
+- **Changing a refusal is a founding decision.** Add a dated entry in FOUNDING
+  §14.1/§14.2 with the evidence; "the user asked again" is not evidence.
