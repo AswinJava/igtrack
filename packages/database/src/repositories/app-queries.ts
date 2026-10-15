@@ -760,7 +760,11 @@ export interface ScopedEvidenceRow {
   observed_at: Date;
   captured_at: Date;
   confidence: string;
-  raw_hash: string;
+  // Nullable by design: a hash is only recorded when the provider could
+  // actually transport the raw representation. Follow snapshots, for example,
+  // observe a normalized page and honestly store no raw hash — a normalized
+  // hash must never be presented as a raw one.
+  raw_hash: string | null;
   normalized_hash: string | null;
   metadata: Record<string, unknown> | null;
 }
@@ -773,7 +777,7 @@ function mapEvidenceRow(r: {
   observed_at: Date | string;
   captured_at: Date | string;
   confidence: string;
-  raw_hash: string;
+  raw_hash: string | null;
   normalized_hash: string | null;
   metadata: Record<string, unknown> | null;
 }): ScopedEvidenceRow {
@@ -1324,7 +1328,6 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
           UNION ALL SELECT 'stories', count(*)::int FROM stories
           UNION ALL SELECT 'follow_deltas', count(*)::int FROM follow_deltas
           UNION ALL SELECT 'monitoring_jobs', count(*)::int FROM monitoring_jobs
-          UNION ALL SELECT 'sessions', count(*)::int FROM sessions
           UNION ALL SELECT 'evidence', count(*)::int FROM evidence
         `,
         ).catch(() => [] as Array<{ table: string; count: number }>),

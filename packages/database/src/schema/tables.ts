@@ -45,31 +45,15 @@ const createdAt = () =>
 const timestamptz = (name: string) =>
   timestamp(name, { withTimezone: true, mode: "date" });
 
+// The users table is pure ownership scope: rows exist so every read and write
+// can be scoped to the deployment owner (invariant 9). There is no credential
+// material here — the agent surface (CLI/MCP) authenticates to nothing.
 export const users = pgTable("users", {
   id: uuid(),
   email: text("email").notNull().unique(),
   displayName: text("display_name"),
-  // scrypt$salt$hash; null means credential login is disabled for this account
-  passwordHash: text("password_hash"),
   createdAt: createdAt(),
 });
-
-export const sessions = pgTable(
-  "sessions",
-  {
-    id: text("id").primaryKey(), // sha256 of the opaque session token; raw token never stored
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    expiresAt: timestamptz("expires_at").notNull(),
-    lastSeenAt: timestamptz("last_seen_at").notNull().defaultNow(),
-    createdAt: createdAt(),
-  },
-  (table) => [
-    index("sessions_user_idx").on(table.userId),
-    index("sessions_expiry_idx").on(table.expiresAt),
-  ],
-);
 
 
 export const sources = pgTable("sources", {

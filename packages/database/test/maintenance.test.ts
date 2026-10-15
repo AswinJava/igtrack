@@ -4,11 +4,8 @@ import {
   completeJob,
   enqueueJob,
   getJob,
-  issueSession,
-  purgeExpiredSessions,
   purgeTerminalJobs,
   resolveJobsRetentionDays,
-  resolveSession,
   users,
   type DatabaseHandle,
 } from "../src/index.js";
@@ -22,32 +19,18 @@ const available = await probeDatabase(TEST_DATABASE_URL);
 
 describe.runIf(available)("maintenance retention", () => {
   let handle: DatabaseHandle;
-  let userId: string;
 
   beforeAll(async () => {
     handle = await createFreshTestDb();
-    const rows = await handle.db
+    // Ownership scope row only: no credentials exist anywhere in the schema.
+    await handle.db
       .insert(users)
       .values({ email: "maintenance@igtrack.local" })
-      .returning({ id: users.id });
-    userId = rows[0]!.id;
+      .onConflictDoNothing({ target: users.email });
   });
 
   afterAll(async () => {
     await handle.close();
-  });
-
-  it("purges only expired sessions and keeps valid ones resolvable", async () => {
-    const expired = await issueSession(handle.db, userId, -1000);
-    const valid = await issueSession(handle.db, userId);
-    expect(await resolveSession(handle.db, expired.token)).toBeNull();
-
-    const purged = await purgeExpiredSessions(handle.db);
-    expect(purged).toBeGreaterThanOrEqual(1);
-
-    const resolved = await resolveSession(handle.db, valid.token);
-    expect(resolved?.userId).toBe(userId);
-    expect(await purgeExpiredSessions(handle.db)).toBe(0);
   });
 
   it("purges only old terminal jobs, never queued or recent terminals", async () => {

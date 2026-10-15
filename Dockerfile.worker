@@ -6,7 +6,6 @@ COPY pnpm-lock.yaml pnpm-workspace.yaml package.json ./
 COPY packages/core/package.json packages/core/package.json
 COPY packages/ingestion/package.json packages/ingestion/package.json
 COPY packages/database/package.json packages/database/package.json
-COPY apps/web/package.json apps/web/package.json
 COPY workers/monitoring/package.json workers/monitoring/package.json
 # tsx is needed at runtime (worker start uses tsx) — ensure it is installed
 COPY tsconfig.base.json tsconfig.base.json

@@ -49,6 +49,14 @@ Thumbs.db
 cleanup.ps1
 *.out.txt
 .muse/
+.freebuff/
+
+# third-party analysis tooling and its caches (local only, never part of the product)
+rea/
+graphify-out/
+
+# local reverse-engineering scratch notes (see docs/FOUNDING.md for what they drove)
+re/
 
 test-log.txt
 

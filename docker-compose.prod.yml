@@ -19,31 +19,6 @@ services:
       timeout: 3s
       retries: 10
 
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-    container_name: igtrack-web-prod
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    env_file:
-      - .env
-    environment:
-      NODE_ENV: production
-      DATABASE_URL: postgresql://igtrack:${POSTGRES_PASSWORD}@db:5432/igtrack
-      IGTRACK_DATABASE_URL: postgresql://igtrack:${POSTGRES_PASSWORD}@db:5432/igtrack
-      # IGTRACK_PROVIDER=fixture is default; Graph remains disabled
-    ports:
-      - "${IGTRACK_PORT:-3000}:3000"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/healthz | grep -q '\"status\":\"ok\"'"]
-      interval: 30s
-      timeout: 5s
-      start_period: 60s
-      retries: 3
-
   worker:
     build:
       context: .
@@ -53,15 +28,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      web:
-        condition: service_healthy
     env_file:
       - .env
     environment:
       NODE_ENV: production
       DATABASE_URL: postgresql://igtrack:${POSTGRES_PASSWORD}@db:5432/igtrack
       IGTRACK_DATABASE_URL: postgresql://igtrack:${POSTGRES_PASSWORD}@db:5432/igtrack
-    # no ports — worker is internal
+    # no ports — worker is internal; agents talk to the DB through `igtrack`/`igtrack mcp`
     healthcheck:
       test: ["CMD-SHELL", "pgrep -f 'workers/monitoring' >/dev/null || pgrep -f 'tsx.*main' >/dev/null"]
       interval: 30s

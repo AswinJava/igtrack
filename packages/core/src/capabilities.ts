@@ -17,6 +17,7 @@ export const RegistryCapabilityId = {
   STORIES: "STORIES",
   STORY_METADATA: "STORY_METADATA",
   STORY_MENTIONS: "STORY_MENTIONS",
+  MENTION_INTELLIGENCE: "MENTION_INTELLIGENCE",
   HIGHLIGHTS: "HIGHLIGHTS",
   POSTS: "POSTS",
   REELS: "REELS",
@@ -138,6 +139,21 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     liveState: "NOT_VERIFIED",
     liveEvidence:
       "Fixture path implements the full pipeline synthetically. Graph exposes no story-mention read field (DOCUMENTED_ABSENT for the read path), so live graph stories carry no mentions by provider design.",
+  },
+  {
+    id: "MENTION_INTELLIGENCE",
+    label: "Mention roll-up (not-established-visible accounts)",
+    providerMethods: ["getStories"],
+    permissions: "Same as STORIES. Reads only mentions the provider already exposed.",
+    persistence: ["storyMentions", "evidence"],
+    ui: ["/targets/[id] (stories tab, hidden-mention roll-up with /lookup?username= pivot)"],
+    howItWorks:
+      "A pure read-side aggregation over stored story_mentions rows: per mentioned account, how many distinct stories named it, how many of those named it through a class that did not establish on-canvas rendering (POSSIBLY_HIDDEN, OFF_CANVAS, METADATA_ONLY), and which story ids those were. It fetches nothing, adds no provider method, and writes no new table. Merging is case-insensitive and per story, so one story naming an account twice counts once but stays hidden if any of its rows was hidden-class. UNKNOWN is deliberately excluded from the hidden classes: a missing visibility signal is absence of evidence, never a finding, and a classification is never proof of intent to hide.",
+    whyUnavailable: null,
+    unlock: null,
+    liveState: "NOT_VERIFIED",
+    liveEvidence:
+      "Aggregation is pure and covered by packages/core/test/mention-intelligence.test.ts; the fixture path exercises the full pipeline end to end. The underlying mentions are provider-exposed only — the Graph read path has no story-mention field (see STORY_MENTIONS), so live data yields no mentions by provider design, and this roll-up can only ever surface what a provider actually exposed.",
   },
   {
     id: "HIGHLIGHTS",

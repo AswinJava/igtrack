@@ -8,7 +8,6 @@ import {
   failJob,
   getTarget,
   JobStateError,
-  purgeExpiredSessions,
   purgeTerminalJobs,
   type Database,
   type FailJobInput,
@@ -262,19 +261,18 @@ function maintenanceTickMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 3_600_000;
 }
 
-// Production retention (SES-001 + terminal jobs): expired sessions and
-// >90d terminal job rows would otherwise grow unbounded. Best-effort and
-// hourly: failures are logged and retried at the next maintenance window,
-// never fatal to the daemon. Purges only delete expired/completed-old rows.
+// Production retention: >90d terminal job rows would otherwise grow unbounded.
+// Best-effort and hourly: failures are logged and retried at the next
+// maintenance window, never fatal to the daemon. Purges only delete
+// completed-old rows.
 async function runMaintenanceTick(
   db: Database,
   onError?: (err: unknown) => void,
 ): Promise<void> {
   try {
-    const purgedSessions = await purgeExpiredSessions(db);
     const purgedJobs = await purgeTerminalJobs(db);
-    if (purgedSessions > 0 || purgedJobs > 0) {
-      logWorker("info", "maintenance_purge", { purgedSessions, purgedJobs });
+    if (purgedJobs > 0) {
+      logWorker("info", "maintenance_purge", { purgedJobs });
     }
   } catch (err) {
     logWorker("warn", "maintenance_purge_error", { message: messageOf(err) });
