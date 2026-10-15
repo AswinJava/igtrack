@@ -33,8 +33,8 @@ The gap is not more data. The gap is **epistemic integrity**: record what was ob
 
 ## What it does
 
-- **Observes** — profile, active stories, story mentions, following/follower counts, public posts, comments, carousels. Each observation is stored with source id, observation id, observed vs. captured time, confidence, and SHA-256 hashes in an append-only evidence ledger.
-- **Derives** — follow deltas, profile changes, story lifetimes, mention roll-ups and relationship rankings. Every derived row points at the observations it came from. Truncated (PARTIAL) scans are recorded but **never diffed**, so partiality cannot fabricate a "lost follower".
+- **Observes** — profile, active stories, story mentions, following/follower counts, public posts, comments, carousels, and **own-account insights** (follower-count series, daily reach/views/engagement, country demographics). Each observation is stored with source id, observation id, observed vs. captured time, confidence, and SHA-256 hashes in an append-only evidence ledger.
+- **Derives** — follow deltas, profile changes, story lifetimes, mention roll-ups, relationship rankings and **insight series**. Every derived row points at the observations it came from. Truncated (PARTIAL) scans are recorded but **never diffed**, so partiality cannot fabricate a "lost follower", and a metric the platform did not return is stored as an **absence with a reason**, never a zero.
 - **Refuses, out loud** — follower/following *rosters*, liker lists, interaction history, reposts, highlights and media bytes are not exposed by any supported interface. IGTrack names the reason instead of inventing a number. `igtrack capabilities` prints the whole registry.
 - **Runs itself** — a Postgres-backed job queue (`FOR UPDATE SKIP LOCKED`, leases, heartbeats, resumable paged scans, checkpoints, retry classification) plus a scheduler with per-target cadence.
 - **Speaks agent** — `igtrack`, a JSON-first CLI, and `igtrack mcp`, a stdio MCP server exposing the same operations as tools. One operations layer, two surfaces, no drift.
@@ -53,6 +53,7 @@ pnpm igtrack status                      # provider, targets, queue, source heal
 pnpm igtrack scans run                   # queue scans
 pnpm igtrack work --max 10               # run the worker: this is what observes
 pnpm igtrack activity                    # what was observed, with evidence ids
+pnpm igtrack insights target_a           # own-account insights: the recorded series, absences named
 ```
 
 No database configured yet? `pnpm igtrack setup --local` uses the Docker Compose
@@ -88,7 +89,7 @@ Then ask your agent things like:
 
 > *"Queue a scan, run the worker, and tell me everything that changed on aurora.wilde in the last 7 days. Quote the evidence id for each claim. If something isn't observable, say so instead of guessing."*
 
-The server ships instructions that tell the agent the same rules this README does: `null` means *not observable* (never zero), synthetic data must be declared as synthetic, and lawfully unavailable data must not be chased. Fifteen tools are exposed, all backed by the same operations the CLI uses.
+The server ships instructions that tell the agent the same rules this README does: `null` means *not observable* (never zero), synthetic data must be declared as synthetic, and lawfully unavailable data must not be chased. Sixteen tools are exposed, all backed by the same operations the CLI uses.
 
 Prefer plain CLI? Everything is JSON-first and scriptable:
 
@@ -109,7 +110,7 @@ run Node can call it without pnpm:
 pnpm igtrack capabilities
 ```
 
-`13 of 18 capabilities are obtainable from a lawful source.` The rest are marked
+`14 of 19 capabilities are obtainable from a lawful source.` The rest are marked
 `DOCUMENTED_ABSENT` with the exact reason and what would unlock them. This table
 is generated from the same registry the CLI reads — the CLI cannot advertise
 more than the code delivers. See [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
@@ -119,7 +120,9 @@ more than the code delivers. See [docs/CAPABILITIES.md](docs/CAPABILITIES.md).
 Live observation uses the **official Instagram Graph API against your own
 Business/Creator account**. It is the only lawful path, and it is a narrow one: the
 Graph API exposes profile, stories, media and comments for the authorized account
-— not follower rosters for arbitrary accounts.
+— plus own-account **insights** (follower-count series, daily reach/views/
+engagement, country demographics) that no other source can supply — but not
+follower rosters for arbitrary accounts.
 
 ```bash
 # .env  (never commit these; use your platform's secret store in production)
@@ -150,9 +153,9 @@ IGTRACK_IMPORT_DIR=/path/to/export   # its root, connections/, or followers_and_
 IGTRACK_IMPORT_USERNAME=yourhandle   # the export's owner — the only account observed
 ```
 
-The export carries rosters and nothing else: profile, stories, and posts
-answer `UNAVAILABLE` with the reason, never zero. A synthetic example layout
-lives at `packages/ingestion/fixtures/import-sample/`.
+The export carries rosters and nothing else: profile, stories, posts and
+insights answer `UNAVAILABLE` with the reason, never zero. A synthetic example
+layout lives at `packages/ingestion/fixtures/import-sample/`.
 
 ## Running the worker
 

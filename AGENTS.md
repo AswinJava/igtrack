@@ -50,7 +50,7 @@ Notes that save time:
 |---|---|
 | `packages/core` | Pure domain: observation categories, confidence, `CapabilityResult`, typed errors + retryability, evidence hashing, profile/follow diffs, mention classification, the **capability registry**. **Zero runtime dependencies — keep it that way.** |
 | `packages/database` | Drizzle schema, repositories, append-only evidence ledger, job queue + scheduling primitives, migrations, synthetic seed. |
-| `packages/ingestion` | Providers (`fixture`, `graph`), normalizers, raw schemas, documented-field audit. |
+| `packages/ingestion` | Providers (`fixture`, `graph`, `import`), normalizers, raw schemas, documented-field audit. |
 | `workers/monitoring` | Job execution: claim/complete, per-kind executors, checkpoint + staging, lease heartbeat, provider timeout, scheduler, retention. |
 | `apps/cli` | `igtrack` CLI and `igtrack mcp` server. **All agent-facing capability lives in `apps/cli/src/tools.ts`.** |
 | `docs/` | Architecture, capability matrix, deployment recipes, founding decisions. |
