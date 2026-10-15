@@ -316,7 +316,9 @@ export async function runDoctor(args: ParsedArgs): Promise<number> {
       "Full registry: `igtrack capabilities`.",
     ].join("\n");
     emit({ json, meta: ctx.meta, data: report, human });
-    return report.findings.length === 0 ? 0 : 0;
+    // Doctor is informational: findings never change the exit code — a
+    // deployment with advisory findings must not break the scripts calling it.
+    return 0;
   } finally {
     await ctx.close();
   }

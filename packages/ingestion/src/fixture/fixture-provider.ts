@@ -6,6 +6,7 @@ import {
   available,
   CapabilityErrorKind,
   CapabilityName,
+  CapabilityStatus,
   Confidence,
   errored,
   SourceKind,
@@ -102,6 +103,10 @@ function toProviderError(
 export interface FixtureProviderOptions {
   fixturesDir: string;
   clock?: () => Date;
+  // Version label for provenance. Must agree with the set's manifest.version:
+  // the provider refuses a manifest that disagrees, so the source id can
+  // never lie about which bytes were actually read.
+  version?: string;
 }
 
 function sha256(input: string): string {
@@ -113,13 +118,15 @@ export class FixtureProvider implements InstagramProvider {
 
   private readonly fixturesDir: string;
   private readonly clock: () => Date;
+  private readonly declaredVersion: string;
   private manifestCache?: FixtureManifest;
   private fileCache = new Map<string, string>();
 
   constructor(options: FixtureProviderOptions) {
     this.fixturesDir = options.fixturesDir;
     this.clock = options.clock ?? (() => new Date());
-    this.sourceId = "fixture:v1";
+    this.declaredVersion = options.version ?? "v1";
+    this.sourceId = `fixture:${this.declaredVersion}`;
   }
 
   capabilities(): ProviderCapabilities {
@@ -339,10 +346,25 @@ export class FixtureProvider implements InstagramProvider {
       const raw: RawCommentsPageV1 = parsed.data;
       const comments = normalizeComments(raw);
 
+      // Honesty: fixture:v1 ships one comments page per post. A payload that
+      // declares more pages (next_cursor non-null) cannot be served further —
+      // so the result is PARTIAL, never a complete listing in disguise.
+      if (raw.next_cursor !== null) {
+        return {
+          status: CapabilityStatus.PARTIAL,
+          data: comments,
+          ...meta,
+          observedAt: raw.captured_at,
+          confidence: Confidence.MEDIUM,
+          note: "Fixture:v1 serves one comments page per post; the payload declares further pages this source cannot serve.",
+          rawPayloadHash: sha256(rawText),
+          rawReference: this.manifestRef(file),
+        };
+      }
       return available(comments, {
         ...meta,
         observedAt: raw.captured_at,
-        confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
+        confidence: Confidence.HIGH,
         rawPayloadHash: sha256(rawText),
         rawReference: this.manifestRef(file),
       });
@@ -424,7 +446,7 @@ export class FixtureProvider implements InstagramProvider {
   }
 
   private manifestRef(file: string): string {
-    return `fixture:v1/${file}`;
+    return `${this.sourceId}/${file}`;
   }
 
   private schemaError(
@@ -476,6 +498,14 @@ export class FixtureProvider implements InstagramProvider {
       throw new FixtureIoError(
         CapabilityErrorKind.SCHEMA_MISMATCH,
         `Fixture manifest failed validation: ${validated.error.message.slice(0, 300)}`,
+      );
+    }
+    if (validated.data.version !== this.declaredVersion) {
+      // Provenance honesty: serving a v2 directory while labelled v1 (or the
+      // reverse) would poison every evidence row with a false source id.
+      throw new FixtureIoError(
+        CapabilityErrorKind.SCHEMA_MISMATCH,
+        `Fixture set declares version "${validated.data.version}" but the provider was constructed as "${this.declaredVersion}"`,
       );
     }
     this.manifestCache = validated.data;

@@ -17,6 +17,7 @@ import {
   getRelationshipsForUser,
   listJobsForTarget,
   listProviderMetrics,
+  listQueueJobs,
   listScopedEvidence,
   listTargets,
   listTargetsForUser,
@@ -361,10 +362,17 @@ export async function opScanList(
 ): Promise<{ jobs: Awaited<ReturnType<typeof listJobsForTarget>>; scope: string }> {
   const limit = input.limit ?? 20;
   if (input.target === undefined) {
-    const operations = await getOperationsSnapshot(ctx.db);
+    // Ownership-scoped (invariant 9): job rows carry usernames and error
+    // messages, so the owner sees only jobs belonging to their own targets —
+    // never the deployment-wide queue.
+    const jobs = await listQueueJobs(ctx.db, {
+      statuses: ["running", "retry_wait", "failed"],
+      limit,
+      userId: ctx.userId,
+    });
     return {
-      scope: "all targets (queue: running + retry + failed)",
-      jobs: [...operations.runningJobs, ...operations.retryWaitJobs, ...operations.failedJobs].slice(0, limit),
+      scope: "your targets (queue: running + retry + failed)",
+      jobs,
     };
   }
   const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);

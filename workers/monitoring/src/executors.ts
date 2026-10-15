@@ -345,6 +345,9 @@ export async function runProfileScan(
   await recordProfileSnapshot(db, {
     profile: result.data,
     evidence,
+    // Invariant 4: a PARTIAL profile is recorded but never diffed, in
+    // either direction (see RecordProfileSnapshotInput.completeness).
+    completeness: result.status === CapabilityStatus.AVAILABLE ? "COMPLETE" : "PARTIAL",
   });
 
   await recordCapabilitySuccess(db, {
@@ -506,6 +509,7 @@ export async function runFollowScan(
   let cursor = progress?.cursor;
   let pagesProcessed = progress?.page ?? 0;
   let lastPageComplete = false;
+  let lastPageConfidence: Confidence | undefined;
 
   const persistCheckpoint = async (nextCursor: string | undefined): Promise<void> => {
     // Checkpoint is now cursor/page only (PC-T2): no O(n²) array rewrites.
@@ -566,6 +570,7 @@ export async function runFollowScan(
     const pageCursor = page.nextCursor;
     const pageComplete = page.complete;
     lastPageComplete = pageComplete;
+    lastPageConfidence = pageResult.confidence;
 
     // PC-T2: stage the new members durably NOW — append-only and idempotent.
     // pagesProcessed advances only after the persistent write succeeds.
@@ -628,7 +633,9 @@ export async function runFollowScan(
     observationId,
     {
       observedAt,
-      confidence: Confidence.HIGH,
+      // Forward the final page's confidence, never force HIGH: a PARTIAL
+      // scan's evidence must not claim more certainty than its pages gave.
+      confidence: lastPageConfidence ?? Confidence.MEDIUM,
       ref: account.username,
     },
     { count: members.length, usernames: members.map((e) => e.username) },
@@ -645,7 +652,9 @@ export async function runFollowScan(
       complete: lastPageComplete,
       meta: {
         category: ObservationCategory.OBSERVED,
-        confidence: Confidence.HIGH,
+        // Same honesty rule as the evidence row: the snapshot's own meta
+        // carries the final page's confidence, not a forced HIGH.
+        confidence: lastPageConfidence ?? Confidence.MEDIUM,
         observedAt,
       },
     },
@@ -900,7 +909,12 @@ async function fetchCommentPages(
       truncated = true;
       break;
     }
-    if (next === undefined || next === "") break;
+    if (next === undefined || next === "") {
+      // A PARTIAL page with no continuation cursor cannot be resumed: the
+      // comment listing is truncated, never silently complete.
+      if (result.status === CapabilityStatus.PARTIAL) truncated = true;
+      break;
+    }
     seenCursors.add(next);
     cursor = next;
   }
@@ -1142,6 +1156,9 @@ export async function runPostScan(
       // Duplicate cursor = pathological provider loop: stop instead of paging
       // forever, and report the listing as truncated (partial).
       if (next !== undefined && next !== "") truncated = true;
+      // A PARTIAL final page with no continuation cursor cannot be resumed:
+      // the listing must report truncated, never silently look complete.
+      if (pagePartial) truncated = true;
       break;
     }
     seenCursors.add(next);

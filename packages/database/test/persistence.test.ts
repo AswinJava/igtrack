@@ -143,6 +143,26 @@ describe.runIf(available)("observations & evidence", () => {
     expect(bioChange?.newValue).toBe("bio v2");
   });
 
+  it("never diffs a PARTIAL profile snapshot in either direction", async () => {
+    // COMPLETE baseline.
+    await recordProfileSnapshot(handle.db, profileInput(4, 500, "bio v4"));
+    // A PARTIAL observation with a different bio records NO change: a field
+    // missing from a truncated response must never fabricate a claim.
+    const partial = await recordProfileSnapshot(handle.db, {
+      ...profileInput(5, 505, "bio v5-partial"),
+      completeness: "PARTIAL",
+    });
+    expect(partial.deduplicated).toBe(false);
+    expect(partial.snapshot.completeness).toBe("PARTIAL");
+    expect(partial.changes).toEqual([]);
+    // A later COMPLETE snapshot must not diff against the truncated baseline.
+    const after = await recordProfileSnapshot(handle.db, profileInput(6, 510, "bio v6"));
+    expect(after.changes).toEqual([]);
+    // COMPLETE → COMPLETE still derives changes normally.
+    const next = await recordProfileSnapshot(handle.db, profileInput(7, 515, "bio v7"));
+    expect(next.changes.map((c) => c.field).sort()).toEqual(["bio", "followerCount"]);
+  });
+
   it("refuses to mutate stored snapshots (append-only)", async () => {
     await expect(
       handle.sql.unsafe(`UPDATE profile_snapshots SET bio = 'tampered'`),

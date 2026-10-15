@@ -462,4 +462,17 @@ describe("GraphProvider failure modes", () => {
     const result = await provider().getStories({ username: "owned.account" });
     expect(result.status).toBe(CapabilityStatus.UNAVAILABLE);
   });
+
+  it("maps documented 400/404 to UNAVAILABLE on EVERY method, not just some", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: { message: "unsupported request", code: 100 } }, 400)),
+    );
+    const profile = await provider().getProfile({ username: "owned.account" });
+    expect(profile.status).toBe(CapabilityStatus.UNAVAILABLE);
+    const posts = await provider().getPublicPosts({ username: "owned.account" });
+    expect(posts.status).toBe(CapabilityStatus.UNAVAILABLE);
+    const resolved = await provider().resolveAccount("owned.account");
+    expect(resolved.status).toBe(CapabilityStatus.UNAVAILABLE);
+  });
 });

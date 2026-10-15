@@ -272,9 +272,6 @@ export class GraphProvider implements InstagramProvider {
       }));
       return available(stories, { ...meta, confidence: Confidence.MEDIUM });
     } catch (err) {
-      if (err instanceof GraphFailure && err.unavailable) {
-        return unavailable(meta, err.message);
-      }
       return providerFailure(meta, err);
     }
   }
@@ -417,9 +414,6 @@ export class GraphProvider implements InstagramProvider {
         nextCursor: after,
       };
     } catch (err) {
-      if (err instanceof GraphFailure && err.unavailable) {
-        return unavailable(meta, err.message);
-      }
       return providerFailure(meta, err);
     }
   }
@@ -455,9 +449,6 @@ export class GraphProvider implements InstagramProvider {
       }));
       return available(children, { ...meta, confidence: Confidence.MEDIUM });
     } catch (err) {
-      if (err instanceof GraphFailure && err.unavailable) {
-        return unavailable(meta, err.message);
-      }
       return providerFailure(meta, err);
     }
   }
@@ -606,6 +597,12 @@ function providerFailure(
   err: unknown,
 ): CapabilityResult<never> {
   if (err instanceof GraphFailure) {
+    // Documented 400/404 responses are structural facts about what this
+    // source can expose — UNAVAILABLE with the reason, honoured on EVERY
+    // catch path so honesty never depends on which method was called.
+    if (err.unavailable) {
+      return unavailable(meta, err.message.slice(0, 300));
+    }
     return errored(meta, {
       kind: err.kind,
       message: err.message.slice(0, 300),

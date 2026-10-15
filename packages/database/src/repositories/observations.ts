@@ -35,6 +35,12 @@ function snapshotFieldSet(row: ProfileSnapshotRecord) {
 export interface RecordProfileSnapshotInput {
   profile: NormalizedProfile;
   evidence: EvidenceRecordInput;
+  // Invariant 4 (partial never becomes a claim): a PARTIAL snapshot is
+  // recorded but never diffed — in either direction. A field missing from a
+  // truncated response would fabricate a "change" against a COMPLETE
+  // baseline, and a COMPLETE snapshot diffed against a truncated baseline
+  // would fabricate the reverse. Mirrors follow_snapshots.completeness.
+  completeness?: "COMPLETE" | "PARTIAL";
 }
 
 export interface RecordProfileSnapshotResult {
@@ -49,6 +55,7 @@ export async function recordProfileSnapshot(
 ): Promise<RecordProfileSnapshotResult> {
   const { profile } = input;
   const observedAt = new Date(profile.meta.observedAt);
+  const completeness = input.completeness ?? "COMPLETE";
 
   return withTransaction(db, async (tx) => {
     const account = await upsertAccount(tx, {
@@ -138,6 +145,7 @@ export async function recordProfileSnapshot(
           : {}),
         category: profile.meta.category,
         confidence: profile.meta.confidence,
+        completeness,
       })
       .onConflictDoNothing({
         target: [
@@ -183,7 +191,13 @@ export async function recordProfileSnapshot(
     const previous = previousRows[0];
 
     const changes: ProfileChangeRecord[] = [];
-    if (previous !== undefined) {
+    // Both sides must be COMPLETE: diffing against (or from) a truncated
+    // snapshot is exactly the fabricated-change class invariant 4 forbids.
+    if (
+      previous !== undefined &&
+      previous.completeness === "COMPLETE" &&
+      completeness === "COMPLETE"
+    ) {
       const fieldChanges = diffProfileFields(
         snapshotFieldSet(previous),
         snapshotFieldSet(snapshot),

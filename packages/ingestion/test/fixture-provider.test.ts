@@ -1,4 +1,7 @@
 import { fileURLToPath } from "node:url";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   CapabilityErrorKind,
@@ -197,5 +200,74 @@ describe("FixtureProvider", () => {
     const followers = await provider.getFollowers(target);
     expect(followers.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(followers.rawReference).toBe("fixture:v1/followers/page-1.json");
+  });
+});
+
+describe("FixtureProvider provenance honesty", () => {
+  it("labels evidence with the directory version it was constructed with", () => {
+    const p = new FixtureProvider({ fixturesDir, clock: () => FIXED_NOW });
+    expect(p.sourceId).toBe("fixture:v1");
+  });
+
+  it("refuses a set whose manifest disagrees with the declared version", async () => {
+    const p = new FixtureProvider({ fixturesDir, version: "v2", clock: () => FIXED_NOW });
+    const result = await p.resolveAccount("aurora.wilde");
+    expect(result.status).toBe(CapabilityStatus.ERROR);
+    if (result.status === CapabilityStatus.ERROR) {
+      expect(result.error?.kind).toBe(CapabilityErrorKind.SCHEMA_MISMATCH);
+      expect(result.error?.message).toContain('declares version "v1"');
+    }
+  });
+
+  it("returns PARTIAL (never complete) when a comments payload declares pages it cannot serve", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "igtrack-fixture-"));
+    await writeFile(
+      join(dir, "comments-post-1.json"),
+      JSON.stringify({
+        schema_version: "v1",
+        captured_at: "2026-08-27T09:15:00.000Z",
+        post_id: "post-1",
+        comments: [
+          {
+            id: "c-1",
+            user: { username: "commenter" },
+            text: "hello",
+            created_at: "2026-08-26T10:00:00.000Z",
+          },
+        ],
+        next_cursor: "2",
+      }),
+      "utf8",
+    );
+    await writeFile(
+      join(dir, "manifest.json"),
+      JSON.stringify({
+        version: "v1",
+        target_username: "aurora.wilde",
+        captured_at: "2026-08-27T09:15:00.000Z",
+        files: {
+          profile: "unused.json",
+          stories: "unused.json",
+          followers: [],
+          following: [],
+          posts: [],
+          comments: { "post-1": "comments-post-1.json" },
+        },
+      }),
+      "utf8",
+    );
+    const p = new FixtureProvider({ fixturesDir: dir, clock: () => FIXED_NOW });
+    const result = await p.getPublicComments({
+      postId: "post-1",
+      takenAt: "2026-08-26T10:00:00.000Z",
+      meta: {
+        category: ObservationCategory.OBSERVED,
+        confidence: Confidence.HIGH,
+        observedAt: "2026-08-26T10:00:00.000Z",
+      },
+    });
+    expect(result.status).toBe(CapabilityStatus.PARTIAL);
+    expect(result.nextCursor).toBeUndefined();
+    expect(result.data).toHaveLength(1);
   });
 });

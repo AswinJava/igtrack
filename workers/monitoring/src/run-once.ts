@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { createDb } from "@igtrack/database";
 import { providerFromEnv, pollOnce, makeWorkerId, runSchedulerTick } from "./index.js";
+import { validateWorkerEnv } from "./config.js";
 
 // One-shot dev worker: one scheduler tick (idempotent enqueue) plus one
 // claimed job, then exits. Matches `start -- --once` with MAX_ITER=1 for a
@@ -8,6 +9,15 @@ import { providerFromEnv, pollOnce, makeWorkerId, runSchedulerTick } from "./ind
 // IGTRACK_JOB_MAX_ITER=25 (bounded drain).
 // For `pnpm --filter @igtrack/monitoring run-once`.
 export async function runOnce(): Promise<void> {
+  // Same fail-fast boot guard as the daemon entry (main.ts): an invalid
+  // lease/poll/timeout value must refuse to run, never run differently.
+  const configErrors = validateWorkerEnv();
+  if (configErrors.length > 0) {
+    for (const message of configErrors) {
+      console.error(message);
+    }
+    throw new Error("igtrack run-once: invalid worker configuration");
+  }
   const handle = createDb();
   try {
     const src = providerFromEnv();

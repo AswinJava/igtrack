@@ -1244,10 +1244,15 @@ const JOB_SUMMARY_SELECT = sql`
 
 export async function listQueueJobs(
   db: Database,
-  options: { statuses?: string[]; limit?: number } = {},
+  options: { statuses?: string[]; limit?: number; userId?: string } = {},
 ): Promise<JobQueueSummary[]> {
   const statuses = options.statuses ?? ["failed"];
   const limit = options.limit ?? 10;
+  // Ownership scoping (invariant 9): job rows carry usernames and error
+  // messages, so a userId restricts rows to that owner's targets. Aggregate
+  // operations snapshots stay deployment-global by design.
+  const ownerFilter =
+    options.userId === undefined ? sql`` : sql`AND t.user_id = ${options.userId}`;
   const rows = await query<JobSummaryRaw>(
     db,
     sql`${JOB_SUMMARY_SELECT}
@@ -1255,6 +1260,7 @@ export async function listQueueJobs(
       statuses.map((s) => sql`${s}`),
       sql`, `,
     )})
+    ${ownerFilter}
     ORDER BY j.updated_at DESC
     LIMIT ${limit}
   `,

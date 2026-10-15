@@ -56,7 +56,10 @@ describe.runIf(available)("schema & migrations", () => {
       SELECT tgname AS name FROM pg_trigger
       WHERE tgname LIKE '%_no_update' ORDER BY tgname
     `;
-    expect(rows.length).toBe(12);
+    // 13 as of migration 0014: story_sightings joined the append-only family
+    // (was 12 before; the count pin catches any dropped trigger).
+    expect(rows.length).toBe(13);
+    expect(rows.map((r) => r.name)).toContain("story_sightings_no_update");
   });
 
   it("rejects updates to append-only profile_snapshots", async () => {

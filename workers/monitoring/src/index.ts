@@ -311,9 +311,9 @@ export async function runWorkerLoop(opts: {
   for (;;) {
     if (maxIterations !== Infinity && iterations >= maxIterations) break;
     if (opts.shouldStop?.()) break;
-    // Hourly retention: expired sessions + old terminal jobs. Runs on the
-    // first iteration too, so ephemeral --once runners (GitHub Actions every
-    // 15 min) each perform a cheap maintenance pass.
+    // Hourly retention: old terminal job rows. Runs on the first iteration
+    // too, so ephemeral --once runners (GitHub Actions every 15 min) each
+    // perform a cheap maintenance pass.
     if (Date.now() - lastMaintenanceTick >= maintenanceMs) {
       lastMaintenanceTick = Date.now();
       await runMaintenanceTick(db, opts.onError);

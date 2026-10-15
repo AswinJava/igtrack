@@ -182,6 +182,9 @@ export const profileSnapshots = pgTable(
     isPrivate: boolean("is_private"),
     category: observationCategoryEnum("category").notNull().default("OBSERVED"),
     confidence: confidenceLevelEnum("confidence").notNull(),
+    // Invariant 4: a PARTIAL snapshot is stored but never diffed (either
+    // direction) — mirrors follow_snapshots.completeness exactly.
+    completeness: snapshotCompletenessEnum("completeness").notNull().default("COMPLETE"),
     createdAt: createdAt(),
   },
   (table) => [

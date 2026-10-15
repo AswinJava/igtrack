@@ -7,6 +7,7 @@ import { buildSource, type ExecutionSource } from "./executors.js";
 export interface ProviderConfig {
   name: "fixture" | "graph";
   fixturesDir?: string;
+  fixtureVersion?: string;
 }
 
 export function createExecutionSource(config: ProviderConfig): ExecutionSource {
@@ -15,6 +16,9 @@ export function createExecutionSource(config: ProviderConfig): ExecutionSource {
     case "fixture":
       provider = new FixtureProvider({
         fixturesDir: config.fixturesDir ?? defaultFixturesDir(),
+        // Evidence is labelled with the directory version actually requested;
+        // the provider cross-checks it against the manifest and fails fast.
+        version: config.fixtureVersion ?? process.env.IGTRACK_FIXTURE_VERSION ?? "v1",
       });
       break;
     case "graph":
