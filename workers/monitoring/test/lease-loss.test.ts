@@ -48,6 +48,7 @@ function followerStub(usernames: string[]): ExecutionSource {
       getPublicPosts: true,
       getPublicComments: true,
       getPostChildren: false,
+      getAccountInsights: false,
     }),
     resolveAccount: async () => {
       throw new Error("not wired");
@@ -84,6 +85,9 @@ function followerStub(usernames: string[]): ExecutionSource {
       throw new Error("not wired");
     },
     getPostChildren: async () => {
+      throw new Error("not wired");
+    },
+    getAccountInsights: async () => {
       throw new Error("not wired");
     },
   };

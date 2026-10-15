@@ -13,6 +13,7 @@ export * from "./repositories/stories.js";
 export * from "./repositories/posts.js";
 export * from "./repositories/follows.js";
 export * from "./repositories/follow-staging.js";
+export * from "./repositories/insights.js";
 export * from "./repositories/evidence.js";
 export * from "./repositories/source-health.js";
 export * from "./repositories/capability-metrics.js";

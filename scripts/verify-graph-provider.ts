@@ -173,6 +173,12 @@ async function main(): Promise<void> {
     );
   }
   if (budget()) {
+    // One logical insights scan is THREE documented calls (time series,
+    // totals, demographics) — counted as three so the cap stays honest.
+    requests += 3;
+    probes.push(summarize("getAccountInsights", await provider.getAccountInsights(account)));
+  }
+  if (budget()) {
     requests += 1;
     probes.push(summarize("getStories", await provider.getStories(account)));
   }

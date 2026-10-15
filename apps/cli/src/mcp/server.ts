@@ -8,6 +8,7 @@ import {
   opCapabilities,
   opDoctor,
   opEvidence,
+  opInsights,
   opLookup,
   opRelationships,
   opScanList,
@@ -39,7 +40,7 @@ const INSTRUCTIONS = `IGTrack is an evidence-first observation engine for Instag
 How to use these tools:
 1. Call \`igtrack_status\` first. It names the active provider and whether data is synthetic.
 2. \`igtrack_scans_run\` only QUEUES work. \`igtrack_work\` executes it. Nothing is observed until a worker runs.
-3. Read with \`igtrack_activity\`, \`igtrack_relationships\`, \`igtrack_evidence\`. Every row carries its source id, confidence, and evidence id — quote them when you report a claim.
+3. Read with \`igtrack_activity\`, \`igtrack_relationships\`, \`igtrack_insights\`, \`igtrack_evidence\`. Every row carries its source id, confidence, and evidence id — quote them when you report a claim.
 4. \`igtrack_capabilities\` lists what can and cannot be observed, with the reason. Never present an unavailable capability as a zero/empty result.
 
 Non-negotiable rules for you as the agent:
@@ -389,6 +390,37 @@ export function buildServer(): McpServer {
     async (args) =>
       guarded(async () =>
         withContext(async (ctx) => withMeta(ctx, await opEvidence(ctx, { id: args.evidenceId }))),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_insights",
+    {
+      title: "Account insights",
+      description:
+        "Instagram account insights as recorded by this deployment: the latest value per metric and breakdown, plus every metric the platform reported ABSENT with its reason. Insights are not kept by the platform indefinitely — the accumulation window is part of the answer. Pass metric to get one metric's series oldest-first.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        target: z.string().describe("Target id or username"),
+        metric: z
+          .string()
+          .optional()
+          .describe('One metric series, e.g. "reach" or "follower_count"'),
+        limit: z.number().int().min(1).max(1000).optional(),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(
+            ctx,
+            await opInsights(ctx, {
+              target: args.target,
+              metric: args.metric,
+              limit: args.limit,
+            }),
+          ),
+        ),
       ),
   );
 

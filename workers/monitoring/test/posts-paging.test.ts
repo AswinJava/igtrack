@@ -94,6 +94,7 @@ function postsStub(config: PostsStubConfig): ExecutionSource {
       getPublicPosts: true,
       getPublicComments: config.commentsCap ?? true,
       getPostChildren: config.childrenCap ?? true,
+      getAccountInsights: false,
     }),
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
@@ -164,6 +165,9 @@ function postsStub(config: PostsStubConfig): ExecutionSource {
         confidence: Confidence.MEDIUM,
       });
     },
+    getAccountInsights: async () => {
+      throw new Error("not wired");
+    },
   };
   return { provider, source: { id: sourceId, kind: SourceKind.FIXTURE, name: "stub" } };
 }
@@ -182,6 +186,7 @@ function followerStub(pages: { usernames: string[]; complete: boolean; nextCurso
       getPublicPosts: true,
       getPublicComments: true,
       getPostChildren: false,
+      getAccountInsights: false,
     }),
     resolveAccount: async () => {
       throw new Error("not wired");
@@ -228,6 +233,9 @@ function followerStub(pages: { usernames: string[]; complete: boolean; nextCurso
       throw new Error("not wired");
     },
     getPostChildren: async () => {
+      throw new Error("not wired");
+    },
+    getAccountInsights: async () => {
       throw new Error("not wired");
     },
   };

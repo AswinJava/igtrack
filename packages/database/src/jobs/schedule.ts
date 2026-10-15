@@ -11,7 +11,8 @@ export type SchedulableScanKind =
   | "FOLLOWER_SCAN"
   | "FOLLOWING_SCAN"
   | "STORY_SCAN"
-  | "POSTS_SCAN";
+  | "POSTS_SCAN"
+  | "INSIGHTS_SCAN";
 
 export const SCHEDULABLE_KINDS: readonly SchedulableScanKind[] = [
   "PROFILE_SCAN",
@@ -19,6 +20,7 @@ export const SCHEDULABLE_KINDS: readonly SchedulableScanKind[] = [
   "FOLLOWING_SCAN",
   "STORY_SCAN",
   "POSTS_SCAN",
+  "INSIGHTS_SCAN",
 ];
 
 export interface ScanIntervalConfig {
@@ -27,20 +29,22 @@ export interface ScanIntervalConfig {
   FOLLOWING_SCAN: number;
   STORY_SCAN: number;
   POSTS_SCAN: number;
+  INSIGHTS_SCAN: number;
 }
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 
 // MVP cadence: stories expire after 24h, so they are polled every 30 minutes
-// (a missed poll is a permanent ephemerality gap); profile, follow lists, and
-// posts move slowly and are polled every 6 hours.
+// (a missed poll is a permanent ephemerality gap); profile, follow lists,
+// posts, and insights move slowly and are polled every 6 hours.
 export const DEFAULT_SCAN_INTERVALS_MS: ScanIntervalConfig = {
   PROFILE_SCAN: 6 * HOUR,
   FOLLOWER_SCAN: 6 * HOUR,
   FOLLOWING_SCAN: 6 * HOUR,
   STORY_SCAN: 30 * MINUTE,
   POSTS_SCAN: 6 * HOUR,
+  INSIGHTS_SCAN: 6 * HOUR,
 };
 
 const INTERVAL_ENV: Record<SchedulableScanKind, string> = {
@@ -49,6 +53,7 @@ const INTERVAL_ENV: Record<SchedulableScanKind, string> = {
   FOLLOWING_SCAN: "IGTRACK_SCAN_FOLLOWING_MS",
   STORY_SCAN: "IGTRACK_SCAN_STORY_MS",
   POSTS_SCAN: "IGTRACK_SCAN_POSTS_MS",
+  INSIGHTS_SCAN: "IGTRACK_SCAN_INSIGHTS_MS",
 };
 
 export function resolveScanIntervals(

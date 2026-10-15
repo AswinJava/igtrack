@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { cpSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -200,6 +201,65 @@ describe("FixtureProvider", () => {
     const followers = await provider.getFollowers(target);
     expect(followers.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
     expect(followers.rawReference).toBe("fixture:v1/followers/page-1.json");
+  });
+
+  it("serves the insights fixture with the recorded window and no fabricated absence", async () => {
+    const result = await provider.getAccountInsights(target);
+    expect(result.status).toBe(CapabilityStatus.AVAILABLE);
+    const set = result.data;
+    expect(set).toBeDefined();
+    if (!set) return;
+
+    expect(set.points).toHaveLength(68);
+    expect(set.absences).toEqual([]);
+    expect(set.windowSince).toBe("2026-07-28T09:15:00.000Z");
+    expect(set.windowUntil).toBe("2026-08-27T09:15:00.000Z");
+    expect(result.rawPayloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.rawReference).toBe("fixture:v1/insights.json");
+
+    // The daily series must agree with the profile it was captured with: a
+    // fixture whose series contradicts its own follower count would teach the
+    // pipeline a shape the real edge cannot produce.
+    const followerCount = set.points.filter((p) => p.metric === "follower_count");
+    expect(followerCount.length).toBeGreaterThan(20);
+    expect(followerCount[followerCount.length - 1]?.value).toBe(12480);
+
+    const demographics = set.points.filter((p) => p.metric === "follower_demographics");
+    expect(demographics).toHaveLength(5);
+    expect(demographics.every((p) => p.dimension === "country")).toBe(true);
+    expect(demographics.every((p) => p.timeframe === "THIS_MONTH")).toBe(true);
+  });
+
+  it("mirrors the documented below-100-followers gate instead of faking the metrics", async () => {
+    // D39: the absence branch is exercised by patching the profile the fixture
+    // already carries, so the payload stays one shape and the pipeline sees
+    // exactly what the platform produces for a small account.
+    const dir = mkdtempSync(join(tmpdir(), "igtrack-insights-"));
+    cpSync(fixturesDir, dir, { recursive: true });
+    const profilePath = join(dir, "profile.json");
+    const profile = JSON.parse(readFileSync(profilePath, "utf8")) as {
+      profile: { follower_count: number };
+    };
+    profile.profile.follower_count = 42;
+    writeFileSync(profilePath, JSON.stringify(profile));
+
+    const small = new FixtureProvider({ fixturesDir: dir, clock: () => FIXED_NOW });
+    const result = await small.getAccountInsights(target);
+    expect(result.status).toBe(CapabilityStatus.AVAILABLE);
+    const set = result.data;
+    expect(set).toBeDefined();
+    if (!set) return;
+
+    expect(set.points.some((p) => p.metric === "follower_count")).toBe(false);
+    expect(set.points.some((p) => p.metric === "follower_demographics")).toBe(false);
+    // The metrics that ARE exposed survive the gate.
+    expect(set.points.some((p) => p.metric === "reach")).toBe(true);
+
+    for (const metric of ["follower_count", "follower_demographics"]) {
+      const absence = set.absences.find((a) => a.metric === metric);
+      expect(absence?.reason).toContain("fewer than 100 followers");
+      expect(absence?.reason).toContain("empty data set instead of 0");
+    }
   });
 });
 

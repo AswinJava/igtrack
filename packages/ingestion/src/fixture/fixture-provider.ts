@@ -9,6 +9,7 @@ import {
   CapabilityStatus,
   Confidence,
   errored,
+  ObservationCategory,
   SourceKind,
   unavailable,
   type CapabilityResult,
@@ -17,6 +18,9 @@ import {
   type NormalizedAccountRef,
   type NormalizedComment,
   type NormalizedFollowPage,
+  type NormalizedInsightAbsence,
+  type NormalizedInsightPoint,
+  type NormalizedInsightSet,
   type NormalizedPost,
   type NormalizedPostChild,
   type NormalizedProfile,
@@ -27,11 +31,13 @@ import {
 import {
   rawCommentsPageV1,
   rawFollowPageV1,
+  rawInsightsV1,
   rawPostsPageV1,
   rawProfileV1,
   rawStoriesV1,
   type RawCommentsPageV1,
   type RawFollowPageV1,
+  type RawInsightsV1,
   type RawPostsPageV1,
   type RawProfileV1,
   type RawStoriesV1,
@@ -56,6 +62,10 @@ const fixtureManifestSchema = z.object({
     following: z.array(z.string().min(1)),
     posts: z.array(z.string().min(1)),
     comments: z.record(z.string().min(1), z.string().min(1)),
+    // Optional by design: a hand-written fixture set without an insights file
+    // is a complete set for what it declares — the provider answers
+    // UNAVAILABLE for insights instead of rejecting the whole set.
+    insights: z.string().min(1).optional(),
   }),
 });
 
@@ -138,6 +148,9 @@ export class FixtureProvider implements InstagramProvider {
       [CapabilityName.GET_FOLLOWING]: true,
       [CapabilityName.GET_PUBLIC_POSTS]: true,
       [CapabilityName.GET_PUBLIC_COMMENTS]: true,
+      // Fixture insights exercise the full absence pipeline: the payload
+      // carries both points and reasons (D39).
+      [CapabilityName.GET_ACCOUNT_INSIGHTS]: true,
       // No child-media source ships in the v1 fixture set: honest
       // UNAVAILABLE from getPostChildren, never an empty album masquerading
       // as observed structure.
@@ -380,6 +393,93 @@ export class FixtureProvider implements InstagramProvider {
       this.meta(),
       `No child-media source for post ${post.postId} in this fixture set`,
     );
+  }
+
+  // Documented platform rule, mirrored verbatim so the synthetic absence is
+  // structurally indistinguishable from the real one (D39).
+  private static readonly BELOW_100_FOLLOWERS_REASON =
+    "Not returned for accounts with fewer than 100 followers (documented platform limitation); the platform returns an empty data set instead of 0.";
+
+  async getAccountInsights(
+    account: NormalizedAccountRef,
+  ): Promise<CapabilityResult<NormalizedInsightSet>> {
+    const meta = this.meta(account);
+    try {
+      const manifest = await this.loadManifest();
+      const insightsFile = manifest.files.insights;
+      if (insightsFile === undefined) {
+        // Undeclared, not broken: the set simply carries no insights payload.
+        // Different claim from "the platform does not expose this".
+        return unavailable(
+          meta,
+          "This fixture set declares no insights file, so it can provide no account insight metrics. Add files.insights to the manifest to exercise the insights pipeline.",
+        );
+      }
+      const rawText = await this.readFixture(insightsFile);
+      const json = this.parseJson(rawText);
+      if (!("value" in json)) return json;
+      const parsed = rawInsightsV1.safeParse(json.value);
+      if (!parsed.success) return this.schemaError(meta, parsed.error.message);
+
+      const raw: RawInsightsV1 = parsed.data;
+      const profile = await this.loadProfile();
+      const followerCount =
+        profile instanceof ErrorResult ? undefined : profile.value.profile.follower_count;
+
+      const gated = new Set(["follower_count", "follower_demographics"]);
+      let points: NormalizedInsightPoint[] = raw.points.map((p) => ({
+        metric: p.metric,
+        period: p.period,
+        ...(p.timeframe !== undefined ? { timeframe: p.timeframe } : {}),
+        ...(p.dimension !== undefined ? { dimension: p.dimension } : {}),
+        ...(p.dimension_value !== undefined ? { dimensionValue: p.dimension_value } : {}),
+        ...(p.end_time !== undefined ? { endTime: p.end_time } : {}),
+        value: p.value,
+      }));
+      const absences: NormalizedInsightAbsence[] = raw.absences.map((a) => ({
+        metric: a.metric,
+        period: a.period,
+        reason: a.reason,
+      }));
+
+      // D39: below 100 followers the platform returns neither metric. The
+      // synthetic set mirrors that rule from the profile's own follower count
+      // instead of baking whichever branch into the payload — the pipeline
+      // stays exercised either way.
+      if (followerCount !== undefined && followerCount < 100) {
+        points = points.filter((p) => !gated.has(p.metric));
+        for (const metric of gated) {
+          if (!absences.some((a) => a.metric === metric)) {
+            absences.push({
+              metric,
+              period: metric === "follower_demographics" ? "lifetime" : "day",
+              reason: FixtureProvider.BELOW_100_FOLLOWERS_REASON,
+            });
+          }
+        }
+      }
+
+      const set: NormalizedInsightSet = {
+        points,
+        absences,
+        ...(raw.window_since !== undefined ? { windowSince: raw.window_since } : {}),
+        ...(raw.window_until !== undefined ? { windowUntil: raw.window_until } : {}),
+        meta: {
+          category: ObservationCategory.OBSERVED,
+          confidence: Confidence.MEDIUM,
+          observedAt: raw.captured_at,
+        },
+      };
+      return available(set, {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: Confidence.MEDIUM,
+        rawPayloadHash: sha256(rawText),
+        rawReference: this.manifestRef(insightsFile),
+      });
+    } catch (err) {
+      return toProviderError(meta, err);
+    }
   }
 
   private async getFollowPage(

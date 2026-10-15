@@ -16,6 +16,9 @@ import {
   getOwnedTarget,
   getUserActivityFeed,
   getRelationshipsForUser,
+  insightLatest,
+  insightState,
+  listInsightSeries,
   listJobsForTarget,
   listProviderMetrics,
   listQueueJobs,
@@ -66,6 +69,7 @@ const SCAN_KINDS = [
   "FOLLOWING_SCAN",
   "STORY_SCAN",
   "POSTS_SCAN",
+  "INSIGHTS_SCAN",
 ] as const;
 export type ScanKind = (typeof SCAN_KINDS)[number];
 
@@ -508,6 +512,73 @@ export async function opRelationships(
   const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
   const ranks = await getRelationshipsForUser(ctx.db, ctx.userId, resolved.id);
   return { target: resolved, ranks: ranks.slice(0, input.limit ?? 25) };
+}
+
+export interface InsightsQuery {
+  target: string;
+  metric?: string | undefined;
+  limit?: number | undefined;
+}
+
+export interface InsightsResult {
+  target: ResolvedTarget;
+  state: Awaited<ReturnType<typeof insightState>>;
+  latest: {
+    rows: Awaited<ReturnType<typeof insightLatest>>;
+    // Honest bound, like opActivity: the bucket list is sliced after the fact,
+    // so say when the slice hid rows.
+    truncated: boolean;
+  };
+  series: {
+    metric: string;
+    points: Awaited<ReturnType<typeof listInsightSeries>>;
+    /**
+     * Why the metric has no values here: the reason the platform reported in the
+     * most recent scan, or null when this deployment has never recorded an
+     * absence for it — "the platform said absent" and "we never looked" must not
+     * read the same.
+     */
+    absentReason: string | null;
+  } | null;
+}
+
+// Insights are the one observation family the platform does NOT keep for us: the
+// Graph API retains roughly 90 days, and demographics only as a current-state
+// snapshot. So the answer here is "what this deployment recorded while it was
+// visible", which is why the accumulation window (`state`) ships with the data.
+export async function opInsights(
+  ctx: CliContext,
+  input: InsightsQuery,
+): Promise<InsightsResult> {
+  const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
+  const limit = input.limit ?? 200;
+  if (limit < 1) throw new UsageError("--limit must be at least 1.");
+
+  const [state, latestRows] = await Promise.all([
+    insightState(ctx.db, resolved.igAccountId),
+    insightLatest(ctx.db, resolved.igAccountId),
+  ]);
+
+  let series: InsightsResult["series"] = null;
+  if (input.metric !== undefined) {
+    const metric = input.metric.trim();
+    if (metric === "") throw new UsageError("--metric expects a metric name, e.g. reach.");
+    const points = await listInsightSeries(ctx.db, resolved.igAccountId, metric, {
+      limit,
+    });
+    series = {
+      metric,
+      points,
+      absentReason: state.latestAbsences.find((a) => a.metric === metric)?.reason ?? null,
+    };
+  }
+
+  return {
+    target: resolved,
+    state,
+    latest: { rows: latestRows.slice(0, limit), truncated: latestRows.length > limit },
+    series,
+  };
 }
 
 export interface EvidenceQuery {

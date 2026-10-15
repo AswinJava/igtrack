@@ -5,6 +5,7 @@ import {
   bigserial,
   boolean,
   check,
+  doublePrecision,
   index,
   integer,
   jsonb,
@@ -531,6 +532,66 @@ export const followDeltas = pgTable(
       table.targetId,
       table.direction,
       table.firstSeenAt,
+    ),
+  ],
+);
+
+// Own-account insights ledger (IG User insights edge). Value XOR reason: a row
+// carries either a measured value or the reason the metric was absent — never
+// both, never zero-filled (invariant 1). The table exists to ACCUMULATE: the
+// platform retains a bounded window (90 days) and demographics only as a
+// current-state snapshot, so a series exists only if this deployment recorded
+// it while it was visible.
+export const insightPoints = pgTable(
+  "insight_points",
+  {
+    id: uuid(),
+    igAccountId: text("ig_account_id")
+      .notNull()
+      .references(() => igAccounts.id, { onDelete: "restrict" }),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => sources.id, { onDelete: "restrict" }),
+    observedAt: timestamptz("observed_at").notNull(),
+    metric: text("metric").notNull(),
+    period: text("period").notNull(),
+    timeframe: text("timeframe"),
+    dimension: text("dimension"),
+    dimensionValue: text("dimension_value"),
+    endTime: timestamptz("end_time"),
+    // double precision, not real: counts (views, reach) must round-trip a
+    // stored claim exactly, and percentages carry decimals.
+    value: doublePrecision("value"),
+    unavailableReason: text("unavailable_reason"),
+    confidence: confidenceLevelEnum("confidence").notNull(),
+    evidenceId: text("evidence_id").references(() => evidence.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "insight_points_value_xor_reason_chk",
+      sql`(${table.value} IS NULL) <> (${table.unavailableReason} IS NULL)`,
+    ),
+    // NULLs are distinct in unique indexes, so the nullable identity columns
+    // are coalesced: without it, retried scans would duplicate every point
+    // whose dimension/end_time is absent (the common case).
+    uniqueIndex("insight_points_idempotency_idx").on(
+      table.igAccountId,
+      table.sourceId,
+      table.observedAt,
+      table.metric,
+      table.period,
+      sql`coalesce(${table.timeframe}, '')`,
+      sql`coalesce(${table.dimension}, '')`,
+      sql`coalesce(${table.dimensionValue}, '')`,
+      sql`coalesce(${table.endTime}, 'epoch'::timestamptz)`,
+    ),
+    index("insight_points_account_metric_idx").on(
+      table.igAccountId,
+      table.metric,
+      table.observedAt,
     ),
   ],
 );

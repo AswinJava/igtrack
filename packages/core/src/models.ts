@@ -177,3 +177,51 @@ export interface NormalizedComment {
   likeCount?: number;
   meta: ObservationMeta;
 }
+
+// ---------------------------------------------------------------------------
+// Own-account insights (IG User insights edge). Metrics are aggregate claims,
+// so the honesty rules are stricter than usual: a metric the platform does not
+// return is an ABSENCE with a reason, never a zero and never a fabricated
+// point. Metric/period/dimension names are provider verbatim — this model
+// defines no metric vocabulary of its own.
+// ---------------------------------------------------------------------------
+
+export interface NormalizedInsightPoint {
+  /** Provider metric name, verbatim (e.g. "reach", "follower_count"). */
+  metric: string;
+  /** Provider period token, verbatim (e.g. "day", "lifetime"). */
+  period: string;
+  /** Demographics timeframe token when the provider used one, else absent. */
+  timeframe?: string;
+  /** Breakdown dimension when the provider supplied one (e.g. "country"), else absent. */
+  dimension?: string;
+  /** The key within the dimension (e.g. "US"); absent for scalar metrics. */
+  dimensionValue?: string;
+  /** ISO end of the metric bucket for time-series points; absent for total_value points. */
+  endTime?: string;
+  value: number;
+}
+
+export interface NormalizedInsightAbsence {
+  metric: string;
+  period: string;
+  /**
+   * Why the metric is absent: the documented platform rule when one applies
+   * (e.g. below 100 followers), otherwise that the platform returned no data
+   * for it. Never a value claim of any kind.
+   */
+  reason: string;
+}
+
+export interface NormalizedInsightSet {
+  points: NormalizedInsightPoint[];
+  absences: NormalizedInsightAbsence[];
+  /**
+   * The since/until window the provider actually requested. Documented
+   * platform default is a 24-hour lookback when omitted — recorded so the
+   * window is never ambiguous after the fact.
+   */
+  windowSince?: string;
+  windowUntil?: string;
+  meta: ObservationMeta;
+}

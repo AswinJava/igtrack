@@ -17,6 +17,7 @@ import {
   type NormalizedAccountRef,
   type NormalizedComment,
   type NormalizedFollowPage,
+  type NormalizedInsightSet,
   type NormalizedPost,
   type NormalizedPostChild,
   type NormalizedProfile,
@@ -128,6 +129,9 @@ export class ImportProvider implements InstagramProvider {
       getPublicPosts: false,
       getPublicComments: false,
       getPostChildren: false,
+      // The export has no insight metrics at all (D38) — declared false so
+      // doctor and the capability matrix never over-claim.
+      getAccountInsights: false,
     };
   }
 
@@ -191,6 +195,13 @@ export class ImportProvider implements InstagramProvider {
     return unavailable(
       this.meta(),
       "import:v1 reads only the export's follower/following roster files; album children are not read by this provider version.",
+    );
+  }
+
+  async getAccountInsights(): Promise<CapabilityResult<NormalizedInsightSet>> {
+    return unavailable(
+      this.meta(),
+      "The Instagram data export carries no account insight metrics — reach, views, and demographics exist only behind the IG User insights edge. Use the graph provider (owned Business/Creator account) for insights.",
     );
   }
 

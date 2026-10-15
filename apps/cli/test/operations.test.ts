@@ -6,6 +6,7 @@ import { UsageError } from "../src/output.js";
 import {
   opActivity,
   opEvidence,
+  opInsights,
   opLookup,
   opScanRun,
   opStatus,
@@ -93,11 +94,11 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
 
   it("queues every scan kind once per scheduling window, and only --force repeats it", async () => {
     const first = await opScanRun(ctx, { target: FIXTURE_USERNAME });
-    expect(first.enqueued).toHaveLength(5);
+    expect(first.enqueued).toHaveLength(6);
     expect(first.enqueued.every((e) => e.deduplicated === false)).toBe(true);
 
     const second = await opScanRun(ctx, { target: FIXTURE_USERNAME });
-    expect(second.enqueued).toHaveLength(5);
+    expect(second.enqueued).toHaveLength(6);
     expect(second.enqueued.every((e) => e.deduplicated === true)).toBe(true);
     expect(new Set(second.enqueued.map((e) => e.jobId))).toEqual(
       new Set(first.enqueued.map((e) => e.jobId)),
@@ -114,7 +115,7 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     await opTargetSetStatus(ctx, { target: FIXTURE_USERNAME, status: "PAUSED" });
     const result = await opScanRun(ctx, { target: FIXTURE_USERNAME });
     expect(result.enqueued).toHaveLength(0);
-    expect(result.skipped).toHaveLength(5);
+    expect(result.skipped).toHaveLength(6);
     expect(result.skipped.every((s) => s.reason.includes("PAUSED"))).toBe(true);
     await opTargetSetStatus(ctx, { target: FIXTURE_USERNAME, status: "ACTIVE" });
   });
@@ -152,6 +153,37 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
         expect(chain.chain?.claim.length).toBeGreaterThan(0);
       }
     }
+  });
+
+  it("reads recorded insights back, and never answers a never-observed metric with silence", async () => {
+    const insights = await opInsights(ctx, { target: FIXTURE_USERNAME });
+    expect(insights.target.username).toBe(FIXTURE_USERNAME);
+    expect(insights.latest.truncated).toBe(false);
+    expect(insights.state.points).toBeGreaterThan(60);
+    expect(insights.state.absences).toBe(0);
+
+    // The daily follower_count series is in the ledger now, oldest first, and
+    // its last point agrees with the profile the fixture was captured with.
+    const series = await opInsights(ctx, {
+      target: FIXTURE_USERNAME,
+      metric: "follower_count",
+    });
+    expect(series.series?.metric).toBe("follower_count");
+    const points = series.series?.points ?? [];
+    expect(points.length).toBeGreaterThan(20);
+    expect(points[points.length - 1]?.value).toBe(12480);
+    expect(series.series?.absentReason).toBeNull();
+
+    // Demographics keep every country bucket rather than collapsing to one.
+    const countries = insights.latest.rows.filter((r) => r.metric === "follower_demographics");
+    expect(countries).toHaveLength(5);
+    expect(countries.every((r) => r.dimension === "country")).toBe(true);
+
+    // A metric that was never observed is EMPTY, and the empty says which kind
+    // of empty it is — never a zero-filled series.
+    const unknown = await opInsights(ctx, { target: FIXTURE_USERNAME, metric: "not_a_metric" });
+    expect(unknown.series?.points).toEqual([]);
+    expect(unknown.series?.absentReason).toBeNull();
   });
 
   it("filters activity by an ISO timestamp", async () => {

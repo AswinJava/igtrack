@@ -3,6 +3,7 @@ import type {
   NormalizedAccountRef,
   NormalizedComment,
   NormalizedFollowPage,
+  NormalizedInsightSet,
   NormalizedPost,
   NormalizedPostChild,
   NormalizedProfile,
@@ -18,6 +19,7 @@ export const CapabilityName = {
   GET_PUBLIC_POSTS: "getPublicPosts",
   GET_PUBLIC_COMMENTS: "getPublicComments",
   GET_POST_CHILDREN: "getPostChildren",
+  GET_ACCOUNT_INSIGHTS: "getAccountInsights",
 } as const;
 
 export type CapabilityName =
@@ -67,4 +69,15 @@ export interface InstagramProvider {
    * No pagination: albums are bounded single responses.
    */
   getPostChildren(post: NormalizedPost): Promise<CapabilityResult<NormalizedPostChild[]>>;
+  /**
+   * PRODUCT STATUS: provider-level AVAILABLE via the documented IG User
+   * insights edge (owned account). A metric the platform does not return is
+   * reported as an absence WITH a reason (documented rules: below 100
+   * followers, 48 h demographic delay, empty-data-set for unavailable
+   * metrics) — never as zero and never as a fabricated point. Providers
+   * whose source carries no insight metrics honestly report UNAVAILABLE.
+   */
+  getAccountInsights(
+    account: NormalizedAccountRef,
+  ): Promise<CapabilityResult<NormalizedInsightSet>>;
 }

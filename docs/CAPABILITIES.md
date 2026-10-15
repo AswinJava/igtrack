@@ -4,7 +4,7 @@
 > from `CAPABILITY_REGISTRY` (`packages/core/src/capabilities.ts`); a test fails if it
 > is stale. Prose cannot drift from the product because there is no prose.
 
-13 of 18 capabilities are obtainable from a lawful source; 5 have no provider method at all. Separately, 7 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
+14 of 19 capabilities are obtainable from a lawful source; 5 have no provider method at all. Separately, 7 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
 
 A capability can be available **and** documented-absent at the same time, and saying so is the point of this table: follower and following rosters are `DOCUMENTED_ABSENT` for any live interface — no roster edge exists — while the synthetic fixture provider exposes rosters so the pipeline can be built and tested end to end, and the operator's own Instagram export (`import:v1`) supplies the real roster lawfully.
 
@@ -24,6 +24,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 |---|---|---|---|
 | **Public profile** | available · `NOT_VERIFIED` | `resolveAccount`, `getProfile` | `igAccounts`, `profileSnapshots`, `profileChanges`, `evidence` |
 | **Follower / following / post counts** | available · `NOT_VERIFIED` | `getProfile` | `profileSnapshots` |
+| **Own-account insights over time** | available · `NOT_VERIFIED` | `getAccountInsights` | `insightPoints`, `evidence` |
 | **Active stories** | available · `NOT_VERIFIED` | `getStories` | `stories`, `storySightings`, `evidence` |
 | **Story metadata** | available · `NOT_VERIFIED` | `getStories` | `stories` |
 | **Story mentions and tags** | available · `NOT_VERIFIED` | `getStories` | `storyMentions`, `evidence` |
@@ -64,6 +65,17 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Surfaced in:** `/targets/[id] (overview)`, `/targets (cards)`, `/lookup`
 
 **Pipeline.** Counts ride inside profile snapshots, so every count has a timestamp, a source, and a history. A missing count renders as unavailable, never zero — zero is a real observation of absence, only valid when the provider returns it.
+
+### Own-account insights over time — `available`
+
+- **Registry id:** `ACCOUNT_INSIGHTS`
+- **Live state:** `NOT_VERIFIED` — No credentials in this environment. Request shape is docs-pinned against the IG User insights reference (updated 2026-06-16): metric names, period=today/day/lifetime tokens, metric_type=time_series\|total_value, breakdown=country. Documented constraints carried into the pipeline: unavailable metrics return an empty data set (not 0); follower_count and online_followers are unavailable below 100 followers; demographics are top-45 with a 48 h delay; account insights default to a 24-hour lookback unless since/until are supplied (the provider always supplies an explicit 30-day window).
+- **Permissions:** Owned professional account only. The documented IG User insights edge; Standard Access covers an app used solely by the account's owner (Meta, 2026-06-30). No App Review for own-account observation.
+- **Provider methods:** `getAccountInsights`
+- **Persists to:** `insightPoints`, `evidence`
+- **Surfaced in:** `igtrack insights (CLI)`, `insights (MCP tool)`
+
+**Pipeline.** Each INSIGHTS_SCAN calls the documented IG User insights edge once for a fixed, docs-pinned metric set: daily time series for follower_count, reach, views, accounts_engaged and total_interactions, plus follower_demographics (country breakdown) as a lifetime total_value point-in-time snapshot. Points are appended to insight_points (append-only), so repeated scans build the history the native 90-day window deletes and the demographic time line the API itself cannot produce (demographics are a current-state snapshot, never a series). A metric the platform does not return becomes an ABSENCE row with the documented reason (below 100 followers, 48 h demographic delay) — never a zero.
 
 ### Active stories — `available`
 

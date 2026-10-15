@@ -46,6 +46,8 @@ describe("ImportProvider (import:v1)", () => {
       getPublicPosts: false,
       getPublicComments: false,
       getPostChildren: false,
+      // An export contains no insights edge; the refusal is in the method too.
+      getAccountInsights: false,
     });
   });
 
@@ -120,7 +122,8 @@ describe("ImportProvider (import:v1)", () => {
     const posts = await sample.getPublicPosts();
     const comments = await sample.getPublicComments();
     const children = await sample.getPostChildren();
-    for (const r of [profile, stories, posts, comments, children]) {
+    const insights = await sample.getAccountInsights();
+    for (const r of [profile, stories, posts, comments, children, insights]) {
       expect(r.status).toBe(CapabilityStatus.UNAVAILABLE);
       expect(r.confidence).toBe(Confidence.UNKNOWN);
       expect(r.data).toBeUndefined();
@@ -129,6 +132,7 @@ describe("ImportProvider (import:v1)", () => {
     expect(profile.note).toMatch(/no profile snapshot/);
     expect(stories.note).toMatch(/never includes story content/);
     expect(posts.note).toMatch(/not read by this provider version/);
+    expect(insights.note).toMatch(/no account insight metrics/i);
   });
 
   it("accepts the roster directory directly as the import dir", async () => {

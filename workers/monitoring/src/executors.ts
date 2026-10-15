@@ -15,6 +15,7 @@ import {
   type NormalizedPost,
   type NormalizedComment,
   type NormalizedStory,
+  type NormalizedInsightSet,
 } from "@igtrack/core";
 import {
   recordCapabilitySuccess,
@@ -28,6 +29,7 @@ import {
   recordPost,
   recordPostChildren,
   recordPostComment,
+  recordInsightSet,
   latestFollowSnapshot,
   persistFollowDiff,
   loadCheckpoint,
@@ -1179,5 +1181,121 @@ export async function runPostScan(
 
   if (postsObserved === 0) return "succeeded-empty";
   return truncated ? "succeeded-partial" : "succeeded";
+}
+
+// ---------------------------------------------------------------------------
+// INSIGHTS_SCAN
+//
+// One provider call yields one insight set for the owned account: aggregate
+// points (time series + lifetime snapshots) and — separately — the metrics the
+// platform did NOT return, each with a reason. Both halves are persisted: a
+// missing metric is evidence of a documented platform rule (e.g. below 100
+// followers), not something to hide or zero-fill. Repeated scans append, which
+// is the entire product: the platform keeps a 90-day window (and demographics
+// only as a current-state snapshot), so the series exists only if it is
+// recorded.
+// ---------------------------------------------------------------------------
+
+export async function runInsightsScan(
+  db: Database,
+  job: JobRecord,
+  src: ExecutionSource,
+): Promise<JobResult> {
+  const { account } = await loadAccountForTarget(db, job);
+  const source = src.source;
+
+  const caps = src.provider.capabilities();
+  if (caps.getAccountInsights !== true) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getAccountInsights",
+      coverageNote: "Provider declares the getAccountInsights capability unavailable.",
+    });
+    return "unavailable";
+  }
+
+  const result: CapabilityResult<NormalizedInsightSet> = await providerCall(
+    db,
+    source,
+    "getAccountInsights",
+    () => src.provider.getAccountInsights(accountRef(account)),
+  );
+
+  if (result.status === CapabilityStatus.UNAVAILABLE) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getAccountInsights",
+      coverageNote: result.note ?? "Account insights unavailable from this source.",
+    });
+    return "unavailable";
+  }
+
+  if (result.status === CapabilityStatus.ERROR) {
+    const err = result.error;
+    await recordCapabilityFailure(db, {
+      source,
+      capability: "getAccountInsights",
+      reason: err?.message ?? "Provider error",
+      errorCategory: err?.kind ?? "INTERNAL",
+    });
+    throw new JobExecutionError(err?.message ?? "Provider error", {
+      kind: err?.kind ?? "INTERNAL",
+      retryable: resolvedRetryable(err),
+      ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+    });
+  }
+
+  if (result.data === undefined) {
+    throw new JobExecutionError("Provider returned no insight data", { retryable: false });
+  }
+
+  const set = result.data;
+  const observedAt = result.observedAt;
+  const observationId = `insights:${account.username}@${observedAt}`;
+  const evidence = evidenceFrom(
+    source,
+    "account_insights",
+    observationId,
+    {
+      observedAt,
+      confidence: result.confidence,
+      ref: account.username,
+      ...(result.rawPayloadHash !== undefined
+        ? { rawPayloadHash: result.rawPayloadHash }
+        : {}),
+      ...(result.rawReference !== undefined
+        ? { rawReference: result.rawReference }
+        : {}),
+    },
+    set,
+    {
+      capabilityStatus: result.status,
+      jobId: job.id,
+      points: set.points.length,
+      absences: set.absences.length,
+      // The window the provider actually requested is evidence, not trivia:
+      // the platform's documented default is a 24-hour lookback, so an
+      // unrecorded window makes every stored point ambiguous.
+      ...(set.windowSince !== undefined ? { windowSince: set.windowSince } : {}),
+      ...(set.windowUntil !== undefined ? { windowUntil: set.windowUntil } : {}),
+    },
+  );
+
+  await recordInsightSet(db, {
+    account: accountRef(account),
+    sourceId: source.id,
+    evidence,
+    set,
+  });
+
+  await recordCapabilitySuccess(db, {
+    source,
+    capability: "getAccountInsights",
+  });
+
+  // AVAILABLE + zero points is an honest observation of absence when the
+  // absence rows carry the reasons; never conflated with UNAVAILABLE.
+  if (set.points.length === 0) return "succeeded-empty";
+  return "succeeded";
 }
 

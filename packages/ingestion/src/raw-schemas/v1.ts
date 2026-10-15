@@ -127,6 +127,33 @@ export const rawCommentsPageV1 = z.object({
   next_cursor: z.string().nullable(),
 });
 
+export const rawInsightPointV1 = z.object({
+  metric: z.string().min(1),
+  period: z.string().min(1),
+  timeframe: z.string().min(1).optional(),
+  dimension: z.string().min(1).optional(),
+  dimension_value: z.string().min(1).optional(),
+  end_time: isoDatetime.optional(),
+  value: z.number(),
+});
+
+// A metric the platform returned no data for. Reason is mandatory: an absence
+// without a reason would be indistinguishable from missing data.
+export const rawInsightAbsenceV1 = z.object({
+  metric: z.string().min(1),
+  period: z.string().min(1),
+  reason: z.string().min(1),
+});
+
+export const rawInsightsV1 = z.object({
+  schema_version: z.literal("v1"),
+  captured_at: isoDatetime,
+  window_since: isoDatetime.optional(),
+  window_until: isoDatetime.optional(),
+  points: z.array(rawInsightPointV1),
+  absences: z.array(rawInsightAbsenceV1),
+});
+
 export type RawProfileV1 = z.infer<typeof rawProfileV1>;
 export type RawStoriesV1 = z.infer<typeof rawStoriesV1>;
 export type RawStoryV1 = z.infer<typeof rawStoryV1>;
@@ -134,3 +161,4 @@ export type RawMentionV1 = z.infer<typeof rawMentionV1>;
 export type RawFollowPageV1 = z.infer<typeof rawFollowPageV1>;
 export type RawPostsPageV1 = z.infer<typeof rawPostsPageV1>;
 export type RawCommentsPageV1 = z.infer<typeof rawCommentsPageV1>;
+export type RawInsightsV1 = z.infer<typeof rawInsightsV1>;

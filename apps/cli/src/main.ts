@@ -12,10 +12,12 @@ import { runTargets, TARGETS_HELP } from "./commands/targets.js";
 import { runScans, runWork, SCANS_HELP } from "./commands/scans.js";
 import {
   CAPABILITIES_HELP,
+  INSIGHTS_HELP,
   LOOKUP_HELP,
   runActivity,
   runCapabilities,
   runEvidence,
+  runInsights,
   runLookup,
   runRelationships,
 } from "./commands/read.js";
@@ -52,6 +54,7 @@ Observe
   relationships <t>     Accounts ranked by observed signal, with provenance
   evidence              Evidence rows (audit trail) and --id chains
   lookup <username>     Ask the source what it can observe, persisting nothing
+  insights <target>     Account metrics this deployment recorded, with absences
 
 Know the limits
   capabilities          What can and cannot be observed, and exactly why
@@ -125,6 +128,12 @@ async function dispatch(args: ParsedArgs): Promise<number> {
         return 0;
       }
       return runLookup(args);
+    case "insights":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${INSIGHTS_HELP}\n`);
+        return 0;
+      }
+      return runInsights(args);
     case "capabilities":
       if (wantsHelp(args)) {
         process.stdout.write(`${CAPABILITIES_HELP}\n`);

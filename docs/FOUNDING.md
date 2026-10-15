@@ -310,3 +310,67 @@ the rest with tests.
 
 Deliberately NOT built: `igtrack bench` — no measured need for a benchmark
 surface yet (YAGNI); revisit if provider performance becomes a real question.
+
+---
+
+## 13. Phase D — own-account insights, informed by market research
+
+**Date:** 2026-10-15 · **Status:** adopted
+
+Four read-only research streams (vendor pricing pages, Meta's own documentation,
+Reddit threads read verbatim, GitHub, the official MCP registry) were run before
+this phase. The evidence lives in `docs/research/` — stream files 01–04 plus
+`00-synthesis.md` — and it changed what Phase D builds.
+
+What the research established, and what it meant here:
+
+- **The 90-day wall is the market's central wound, and Meta now charges to remove
+  it** ("Extended Insights History (Instagram)": a Meta One paid feature). History
+  cannot be bought retrospectively — every tool's backfill reads the same 90 days,
+  once. IGTrack's snapshots are already the honest answer; the pitch is "start
+  recording now".
+- **The lawful export-diff lane is where every honest competitor is converging**
+  (FollowBuddy, Unfollr, FANS, followsback, OSS SilentSnitch) — and it is exactly
+  Phase B's `import:v1` → snapshot → `follow_deltas` pipeline. The wedge is doing
+  it automatically, with evidence, and never touching a session cookie.
+- **"Absence is not zero" is a market differentiator, not just an invariant.**
+  Meta's API returns an *empty data set* for unavailable metrics; vendor analyses
+  concede that "a tool that plots zeros will invent fake crashes on your charts".
+- **MCP access is table stakes by now** (Metricool ships MCP on its free plan;
+  Sociality.io sells "for teams and AI agents"). The differentiator is what the
+  agent is allowed to claim — of ~78 surveyed Instagram MCP servers, none exposes
+  an append-only ledger, content hashes, or UNAVAILABLE-with-reason.
+- **The own-account insights edge is documented, lawful, and needs no App Review**
+  ("If your app only serves your Instagram professional account or an account you
+  manage, Standard Access is all your app needs", Meta, 2026-06-30). It observes
+  what the market's top-ranked unmet demands are about: follower-count history,
+  daily reach/engagement, and demographics — which the API exposes only as a
+  current-state snapshot, so a stored series is the *only* honest trend line.
+
+### Decision log (Phase D)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D36 | **New capability `ACCOUNT_INSIGHTS` + provider method `getAccountInsights` (graph)** on the documented IG User insights edge: daily time series for `follower_count`, `reach`, `views`, `accounts_engaged`, `total_interactions`, plus `follower_demographics` (country breakdown) as a lifetime `total_value` snapshot. One method, one scan kind (`INSIGHTS_SCAN`), one append-only table (`insight_points`), one executor, one op (`igtrack insights` CLI + MCP tool). | The research's #1/#3 demands (history beyond 90 days, hourly/country granularity, demographic trend lines) map onto exactly the metrics this edge exposes. The provider always supplies an explicit 30-day window because the documented default is a trap (24-hour lookback when `since`/`until` are omitted), and requests `views` (not deprecated `impressions`) under a docs-pinned metric set. **Correction (2026-10-15, after reading the Instagram Account Insights reference):** only `reach` and `follower_count` are documented `time_series`-capable; `accounts_engaged`, `total_interactions` and `views` are `total_value` only. Requesting a metric under a `metric_type` it does not support yields an empty data set — which the absence pipeline would have stored as a *false* absence. The provider therefore splits the scan into three documented calls by type: time series (`follower_count,reach`, explicit 30-day `since`/`until`), totals (`accounts_engaged,total_interactions,views`), and demographics (`follower_demographics`, `lifetime`, `timeframe=this_month`, `breakdown=country`). Pinned as constants in `graph-provider.ts` and covered by the graph provider tests. |
+| D37 | **A metric the platform does not return is stored as an ABSENCE row** — `insight_points.value` and `unavailable_reason` are XOR (schema CHECK): a row either carries a number or a reason, never both, never neither. Absences carry the documented rule (below 100 followers, 48 h demographic delay) when one applies. | Invariant 8's "empty data set, not 0" made structural. A metric going absent in scan N and present in scan N+1 is itself an observable event — and a value claim without a reason would be the exact zero-filling this project exists to prevent. |
+| D38 | **`import:v1` refuses insights honestly** — `getAccountInsights` returns UNAVAILABLE with "the data export carries no account insight metrics"; the capability map says false. | D29's rule applied to a new method: an export legitimately contains rosters and media, not insights. Silence or a zero would be a lie; the refusal names the fix (use the graph provider). |
+| D39 | **Fixture synthesizes a deterministic insight set and mirrors one documented rule**: a seeded daily series + country demographics, and — when the fixture account is below 100 followers — `follower_count` and `follower_demographics` come back as absences with the real platform reason verbatim. | The fixture path must exercise the absence pipeline, not just the happy path; mirroring the documented <100-follower rule keeps the synthetic data structurally faithful, which the conformance harness can then pin. |
+| D40 | **Business Discovery stays deferred as a scope decision, on the record.** It is the market's biggest paid category, but it requires changing the founding non-goal ("monitoring accounts you do not own"), a Facebook-Login product behind app review, and acceptance of a narrow, age-gate-prone edge. The synthesis records the evidence and the question for a founder pass with live credentials. | D4's authorized-observation line is a scope decision, not an accident; expanding it silently while "finishing features" is exactly how a project's stance erodes. |
+| D41 | **Insights cadence: every 6 hours**, `IGTRACK_SCAN_INSIGHTS_MS` overrides. | Insights move slowly but have perishable windows (metrics lag up to 48 h; story insights die at 24 h), and early capture is the entire value of a snapshot product. Matches PROFILE_SCAN's cadence. |
+
+### Verification for Phase D
+
+| Item | Evidence |
+|---|---|
+| Typecheck | `pnpm typecheck` — clean across all 5 workspace packages (2026-10-15) |
+| Tests | `pnpm test` — 56 files, 394 passed, 1 skipped, 0 failed; new suites `workers/monitoring/test/insights-scan.test.ts`, `graph-provider.test.ts` (metric-type split), `fixture-provider.test.ts` (<100-follower absence), `operations.test.ts` + `mcp.test.ts` (agent surface) |
+| End-to-end (fixture) | `igtrack setup` → `scans run` enqueues `INSIGHTS_SCAN` → `work` completes it → `insights target_a` prints 68 recorded values, 0 absences, 10 metric/breakdown rows oldest-value-first; `--json` carries `_meta` with `synthetic: true` |
+| Schema | `packages/database/migrations/0015_insight_points.sql`, journal idx 15 |
+| Docs | `docs/research/00-synthesis.md` (+ streams 01–04); `docs/CAPABILITIES.md` regenerated from the registry |
+
+Not claimed in this phase: no live Graph credential exists in this environment, so
+`ACCOUNT_INSIGHTS` is `NOT_VERIFIED` live; the request shape is docs-pinned against
+the IG User insights reference (updated 2026-06-16). The metric set is v1 — 
+`online_followers` (24 hourly buckets), `follows_and_unfollows` (breakdown-shaped),
+and media-level insights are deliberately not requested yet; the unlock path is
+recorded in the registry entry rather than guessed at here.

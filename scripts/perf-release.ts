@@ -57,6 +57,7 @@ function baseProvider(overrides: Partial<InstagramProvider>): InstagramProvider 
       getPublicPosts: true,
       getPublicComments: true,
       getPostChildren: false,
+      getAccountInsights: false,
     }),
     resolveAccount: notWired("resolveAccount"),
     getProfile: notWired("getProfile"),
@@ -66,6 +67,7 @@ function baseProvider(overrides: Partial<InstagramProvider>): InstagramProvider 
     getPublicPosts: notWired("getPublicPosts"),
     getPublicComments: notWired("getPublicComments"),
     getPostChildren: notWired("getPostChildren"),
+    getAccountInsights: notWired("getAccountInsights"),
     ...overrides,
   };
 }

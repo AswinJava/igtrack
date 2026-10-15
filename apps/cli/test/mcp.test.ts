@@ -17,6 +17,7 @@ const EXPECTED_TOOLS = [
   "igtrack_doctor",
   "igtrack_evidence",
   "igtrack_evidence_chain",
+  "igtrack_insights",
   "igtrack_lookup",
   "igtrack_relationships",
   "igtrack_scans_list",

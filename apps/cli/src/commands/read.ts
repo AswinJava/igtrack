@@ -15,7 +15,7 @@ import {
   type ParsedArgs,
 } from "../output.js";
 import { createContext } from "../context.js";
-import { opActivity, opEvidence, opLookup, opRelationships } from "../tools.js";
+import { opActivity, opEvidence, opInsights, opLookup, opRelationships } from "../tools.js";
 
 // ---------------------------------------------------------------------------
 // Read-only operations: activity, relationships, evidence, lookup.
@@ -206,6 +206,110 @@ export async function runLookup(args: ParsedArgs): Promise<number> {
         : "Nothing was persisted: `lookup` is a read-only probe.",
     ].join("\n");
     emit({ json, meta: ctx.meta, data: result, human });
+    return 0;
+  } finally {
+    await ctx.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// insights — the metrics this deployment recorded while the platform showed them
+// ---------------------------------------------------------------------------
+
+export const INSIGHTS_HELP = `igtrack insights <target id|username> [--metric M] [--limit N] [--json]
+
+What the platform reported about this account's own insights, as THIS
+deployment recorded them.
+
+Insights are the one observation family the platform does not keep for you: the
+Graph API answers only for a bounded recent window, and demographics only as a
+current-state snapshot. A series exists here only if a scan ran while the point
+was visible, so the accumulation window is printed with the data.
+
+A metric the platform did not return is listed as ABSENT with its reason — a
+documented platform rule ("fewer than 100 followers") when one applies. It is
+never shown as 0. \`--metric reach\` prints one metric's series oldest-first.
+
+Live insights require the official Graph API on an account you own. The fixture
+provider (default) answers with synthetic data.`;
+
+export async function runInsights(args: ParsedArgs): Promise<number> {
+  const json = isJson(args.flags);
+  const target = args.positionals[0];
+  if (target === undefined) {
+    throw new UsageError("Usage: igtrack insights <target id|username> [--metric M]");
+  }
+  const ctx = await createContext();
+  try {
+    const result = await opInsights(ctx, {
+      target,
+      metric: flagString(args.flags, "metric"),
+      limit: flagNumber(args.flags, "limit", 200),
+    });
+
+    const sections: string[] = [
+      `Target   @${result.target.username} (${result.target.status})`,
+      `Recorded ${result.state.points} values and ${result.state.absences} absences · last scan ${relativeTime(result.state.latestObservedAt)}`,
+    ];
+
+    if (result.state.latestAbsences.length > 0) {
+      sections.push(
+        "",
+        "Absent at the most recent scan:",
+        table(
+          ["metric", "period", "reason"],
+          result.state.latestAbsences.map((a) => [a.metric, a.period, a.reason]),
+        ),
+      );
+    }
+
+    sections.push(
+      "",
+      result.state.points === 0
+        ? "No insight values recorded for this account yet. Run `igtrack scans run --kind INSIGHTS_SCAN` and then `igtrack work`."
+        : "Latest recorded value per metric and breakdown:",
+    );
+    if (result.state.points > 0) {
+      sections.push(
+        table(
+          ["metric", "period", "timeframe", "breakdown", "value", "bucket end", "observed"],
+          result.latest.rows.map((r) => [
+            r.metric,
+            r.period,
+            display(r.timeframe),
+            r.dimension === null ? "none" : `${r.dimension}=${display(r.dimensionValue)}`,
+            String(r.value),
+            display(r.endTime),
+            r.observedAt.toISOString(),
+          ]),
+        ),
+      );
+      if (result.latest.truncated) {
+        sections.push(
+          "Note: more buckets exist than the limit shows; raise --limit to see them.",
+        );
+      }
+    }
+
+    if (result.series !== null) {
+      sections.push("", `Series for ${result.series.metric} (oldest first):`);
+      sections.push(
+        result.series.points.length === 0
+          ? result.series.absentReason === null
+            ? "No values recorded for this metric. The platform has not been observed to report it absent either — it may simply never have been recorded here."
+            : `No values recorded. The platform reported it absent: ${result.series.absentReason}`
+          : table(
+              ["bucket end", "period", "value"],
+              result.series.points.map((p) => [
+                display(p.endTime),
+                p.period,
+                String(p.value),
+              ]),
+            ),
+      );
+    }
+
+    emit({ json, meta: ctx.meta, data: result, human: sections.join("\n") });
     return 0;
   } finally {
     await ctx.close();

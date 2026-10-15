@@ -30,6 +30,7 @@ export const ObservationKind = {
   INTERACTION: "interaction",
   POST: "post",
   POST_COMMENT: "post_comment",
+  ACCOUNT_INSIGHTS: "account_insights",
 } as const;
 
 export type ObservationKind =

@@ -11,6 +11,7 @@
     "posts": ["posts/page-1.json"],
     "comments": {
       "post-1": "comments/post-1.json"
-    }
+    },
+    "insights": "insights.json"
   }
 }

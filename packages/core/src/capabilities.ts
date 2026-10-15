@@ -14,6 +14,7 @@ import type { CapabilityName } from "./provider.js";
 export const RegistryCapabilityId = {
   PROFILE: "PROFILE",
   COUNTS: "COUNTS",
+  ACCOUNT_INSIGHTS: "ACCOUNT_INSIGHTS",
   STORIES: "STORIES",
   STORY_METADATA: "STORY_METADATA",
   STORY_MENTIONS: "STORY_MENTIONS",
@@ -94,6 +95,22 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     liveState: "NOT_VERIFIED",
     liveEvidence:
       "Same outstanding live check as PROFILE; the follower/following lists themselves are DOCUMENTED_ABSENT (see FOLLOWERS).",
+  },
+  {
+    id: "ACCOUNT_INSIGHTS",
+    label: "Own-account insights over time",
+    providerMethods: ["getAccountInsights"],
+    permissions:
+      "Owned professional account only. The documented IG User insights edge; Standard Access covers an app used solely by the account's owner (Meta, 2026-06-30). No App Review for own-account observation.",
+    persistence: ["insightPoints", "evidence"],
+    ui: ["igtrack insights (CLI)", "insights (MCP tool)"],
+    howItWorks:
+      "Each INSIGHTS_SCAN calls the documented IG User insights edge once for a fixed, docs-pinned metric set: daily time series for follower_count, reach, views, accounts_engaged and total_interactions, plus follower_demographics (country breakdown) as a lifetime total_value point-in-time snapshot. Points are appended to insight_points (append-only), so repeated scans build the history the native 90-day window deletes and the demographic time line the API itself cannot produce (demographics are a current-state snapshot, never a series). A metric the platform does not return becomes an ABSENCE row with the documented reason (below 100 followers, 48 h demographic delay) — never a zero.",
+    whyUnavailable: null,
+    unlock: null,
+    liveState: "NOT_VERIFIED",
+    liveEvidence:
+      "No credentials in this environment. Request shape is docs-pinned against the IG User insights reference (updated 2026-06-16): metric names, period=today/day/lifetime tokens, metric_type=time_series|total_value, breakdown=country. Documented constraints carried into the pipeline: unavailable metrics return an empty data set (not 0); follower_count and online_followers are unavailable below 100 followers; demographics are top-45 with a 48 h delay; account insights default to a 24-hour lookback unless since/until are supplied (the provider always supplies an explicit 30-day window).",
   },
   {
     id: "STORIES",

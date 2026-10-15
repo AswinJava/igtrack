@@ -85,6 +85,7 @@ function stubSource(config: {
       getPublicPosts: config.postsCap ?? true,
       getPublicComments: config.commentsCap ?? true,
       getPostChildren: config.childrenCap ?? false,
+      getAccountInsights: false,
     }),
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
@@ -150,6 +151,9 @@ function stubSource(config: {
         source: sourceRef,
         confidence: Confidence.MEDIUM,
       });
+    },
+    getAccountInsights: async () => {
+      throw new Error("not wired");
     },
   };
   return { provider, source: { id: sourceId, kind: SourceKind.FIXTURE, name: "stub" } };
@@ -350,6 +354,9 @@ describe.runIf(dbAvailable)("worker POSTS_SCAN", () => {
         getPostChildren: async (...args: Parameters<InstagramProvider["getPostChildren"]>) => {
           calls += 1;
           return src.provider.getPostChildren(...args);
+        },
+        getAccountInsights: async () => {
+          throw new Error("not wired");
         },
       },
     };

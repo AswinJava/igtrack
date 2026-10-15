@@ -15,6 +15,9 @@ import {
   type NormalizedAccountRef,
   type NormalizedComment,
   type NormalizedFollowPage,
+  type NormalizedInsightAbsence,
+  type NormalizedInsightPoint,
+  type NormalizedInsightSet,
   type NormalizedPost,
   type NormalizedPostChild,
   type NormalizedProfile,
@@ -42,6 +45,107 @@ export const GRAPH_CHILD_FIELDS = "id,media_type,permalink,shortcode,timestamp";
 export const GRAPH_STORY_FIELDS = "id,timestamp,media_type,caption";
 export const GRAPH_COMMENT_FIELDS =
   "id,text,username,timestamp,parent_id,like_count,from{id,username},replies{id,text,username,timestamp,parent_id,like_count,from{id,username}}";
+
+// Documented IG User insights request shapes (Meta "Instagram Account
+// Insights", read 2026-10-15). The metric sets are split BY metric_type: the
+// API errors on a metric requested with a type it does not support, and the
+// reference lists reach as time_series-capable while
+// accounts_engaged/total_interactions/views are total_value only. Requesting
+// a metric under the wrong type silently yields an empty set, which would
+// become a false absence — so the split is pinned here, not guessed per call.
+export const GRAPH_INSIGHTS_TIME_SERIES_METRICS = "follower_count,reach";
+export const GRAPH_INSIGHTS_TOTAL_METRICS =
+  "accounts_engaged,total_interactions,views";
+export const GRAPH_INSIGHTS_DEMOGRAPHICS_METRIC = "follower_demographics";
+export const GRAPH_INSIGHTS_DEMOGRAPHICS_TIMEFRAME = "this_month";
+// Documented default when since/until are omitted is a 24-hour lookback — a
+// trap for a product whose entire value is a retained series — so the window
+// is always explicit.
+export const GRAPH_INSIGHTS_WINDOW_DAYS = 30;
+
+interface GraphInsightsValue {
+  value?: number;
+  end_time?: string;
+}
+
+interface GraphInsightsBreakdown {
+  dimension_keys?: string[];
+  results?: Array<{ dimension_values?: string[]; value?: number }>;
+}
+
+interface GraphInsightsItem {
+  name: string;
+  period?: string;
+  values?: GraphInsightsValue[];
+  total_value?: { value?: number; breakdowns?: GraphInsightsBreakdown[] };
+}
+
+interface GraphInsightsResponse {
+  data?: GraphInsightsItem[];
+}
+
+/**
+ * Documented reason text for a metric the platform returned nothing for.
+ * `follower_count` and `follower_demographics` carry the documented
+ * below-100-followers gate; every other metric gets the documented
+ * empty-data-set rule. Neither ever degrades to a zero claim.
+ */
+function insightAbsenceReason(metric: string): string {
+  if (metric === "follower_count" || metric === "follower_demographics") {
+    return "The platform returned no data for this metric (documented: not returned for accounts with fewer than 100 followers). Recorded as an absence, never as 0.";
+  }
+  return "The platform returned an empty data set for this metric in the requested window (documented behavior: the API returns an empty set instead of 0).";
+}
+
+/**
+ * Response item → normalized points. Handles all three documented shapes:
+ * time_series `values`, total_value `total_value.value`, and breakdown results
+ * under `total_value.breakdowns`. A breakdown whose keys are all "timeframe"
+ * is skipped: a timeframe with no dimension carries no dimension claim.
+ */
+function insightPointsFromItem(
+  item: GraphInsightsItem,
+  fallbackPeriod: string,
+  requestedTimeframe: string | undefined,
+): NormalizedInsightPoint[] {
+  const period = item.period ?? fallbackPeriod;
+  const out: NormalizedInsightPoint[] = [];
+  for (const value of item.values ?? []) {
+    if (typeof value.value !== "number") continue;
+    out.push({
+      metric: item.name,
+      period,
+      ...(value.end_time !== undefined ? { endTime: value.end_time } : {}),
+      value: value.value,
+    });
+  }
+  const total = item.total_value;
+  if (typeof total?.value === "number") {
+    out.push({ metric: item.name, period, value: total.value });
+  }
+  for (const breakdown of total?.breakdowns ?? []) {
+    const keys = breakdown.dimension_keys ?? [];
+    const dimensionIndex = keys.findIndex((key) => key !== "timeframe");
+    if (dimensionIndex < 0) continue;
+    const timeframeIndex = keys.indexOf("timeframe");
+    for (const result of breakdown.results ?? []) {
+      if (typeof result.value !== "number") continue;
+      const values = result.dimension_values ?? [];
+      const timeframe =
+        timeframeIndex >= 0 ? values[timeframeIndex] : requestedTimeframe;
+      const dimensionValue = values[dimensionIndex];
+      out.push({
+        metric: item.name,
+        period,
+        ...(timeframe !== undefined ? { timeframe } : {}),
+        dimension: keys[dimensionIndex] as string,
+        ...(dimensionValue !== undefined ? { dimensionValue } : {}),
+        value: result.value,
+      });
+    }
+  }
+  return out;
+}
 
 // Authorized Graph API provider: talks ONLY to Meta's official Instagram
 // Graph API, and ONLY about the owned Business/Creator account whose token
@@ -138,6 +242,8 @@ export class GraphProvider implements InstagramProvider {
       [CapabilityName.GET_PUBLIC_POSTS]: true,
       [CapabilityName.GET_PUBLIC_COMMENTS]: true,
       [CapabilityName.GET_POST_CHILDREN]: true,
+      // Documented IG User insights edge for the owned account (D36).
+      [CapabilityName.GET_ACCOUNT_INSIGHTS]: true,
     };
   }
 
@@ -448,6 +554,121 @@ export class GraphProvider implements InstagramProvider {
         ...(c.timestamp !== undefined ? { takenAt: c.timestamp } : {}),
       }));
       return available(children, { ...meta, confidence: Confidence.MEDIUM });
+    } catch (err) {
+      return providerFailure(meta, err);
+    }
+  }
+
+  async getAccountInsights(
+    account: NormalizedAccountRef,
+  ): Promise<CapabilityResult<NormalizedInsightSet>> {
+    const meta = this.meta(account);
+    const until = Math.floor(Date.now() / 1000);
+    const since = until - GRAPH_INSIGHTS_WINDOW_DAYS * 24 * 60 * 60;
+
+    const points: NormalizedInsightPoint[] = [];
+    const absences: NormalizedInsightAbsence[] = [];
+
+    // One documented call shape per block. A 400/404 is structural FOR THIS
+    // REQUEST (the platform refuses the shape, or the metric is unsupported at
+    // this API version): the call's metrics become absences carrying the
+    // platform's own message. Every other failure — auth, rate limit, network,
+    // 5xx — rethrows so the executor classifies it as a FAILURE: a temporary
+    // error must never be recorded as "the platform doesn't expose this"
+    // (invariant 2).
+    const runCall = async (
+      metrics: readonly string[],
+      period: string,
+      params: Record<string, string>,
+      requestedTimeframe?: string,
+    ): Promise<void> => {
+      let data: GraphInsightsResponse;
+      try {
+        data = await this.get<GraphInsightsResponse>(
+          `/${this.igUserId}/insights`,
+          params,
+        );
+      } catch (err) {
+        if (err instanceof GraphFailure && err.unavailable) {
+          for (const metric of metrics) {
+            absences.push({
+              metric,
+              period,
+              reason: `The platform refused this metric request (${err.message.slice(0, 200)}).`,
+            });
+          }
+          return;
+        }
+        throw err;
+      }
+      const seen = new Set<string>();
+      for (const item of data.data ?? []) {
+        seen.add(item.name);
+        const itemPoints = insightPointsFromItem(item, period, requestedTimeframe);
+        if (itemPoints.length === 0) {
+          absences.push({ metric: item.name, period, reason: insightAbsenceReason(item.name) });
+          continue;
+        }
+        points.push(...itemPoints);
+      }
+      // A metric named in the request but absent from the response is the
+      // documented "empty data set" case — an absence with a reason, never
+      // silence and never a zero.
+      for (const metric of metrics) {
+        if (!seen.has(metric)) {
+          absences.push({ metric, period, reason: insightAbsenceReason(metric) });
+        }
+      }
+    };
+
+    try {
+      await runCall(["follower_count", "reach"], "day", {
+        metric: GRAPH_INSIGHTS_TIME_SERIES_METRICS,
+        period: "day",
+        metric_type: "time_series",
+        since: String(since),
+        until: String(until),
+      });
+      await runCall(["accounts_engaged", "total_interactions", "views"], "day", {
+        metric: GRAPH_INSIGHTS_TOTAL_METRICS,
+        period: "day",
+        metric_type: "total_value",
+        since: String(since),
+        until: String(until),
+      });
+      await runCall(
+        ["follower_demographics"],
+        "lifetime",
+        {
+          metric: GRAPH_INSIGHTS_DEMOGRAPHICS_METRIC,
+          period: "lifetime",
+          timeframe: GRAPH_INSIGHTS_DEMOGRAPHICS_TIMEFRAME,
+          breakdown: "country",
+          metric_type: "total_value",
+        },
+        GRAPH_INSIGHTS_DEMOGRAPHICS_TIMEFRAME,
+      );
+
+      const set: NormalizedInsightSet = {
+        points,
+        absences,
+        windowSince: new Date(since * 1000).toISOString(),
+        windowUntil: new Date(until * 1000).toISOString(),
+        meta: {
+          category: ObservationCategory.OBSERVED,
+          confidence: Confidence.MEDIUM,
+          observedAt: meta.observedAt,
+        },
+      };
+      // No rawPayloadHash: three calls produced this set, so there is no
+      // single transported raw representation to hash (the normalized hash is
+      // computed by the executor from the set itself). sourceReference names
+      // the edge instead.
+      return available(set, {
+        ...meta,
+        confidence: Confidence.MEDIUM,
+        rawReference: `${this.sourceId}/insights?since=${since}&until=${until}`,
+      });
     } catch (err) {
       return providerFailure(meta, err);
     }

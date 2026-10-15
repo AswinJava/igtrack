@@ -1,0 +1,424 @@
+{
+  "schema_version": "v1",
+  "captured_at": "2026-08-27T09:15:00.000Z",
+  "window_since": "2026-07-28T09:15:00.000Z",
+  "window_until": "2026-08-27T09:15:00.000Z",
+  "points": [
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-07-30T00:00:00.000Z",
+      "value": 12159
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-07-30T00:00:00.000Z",
+      "value": 1737
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-07-31T00:00:00.000Z",
+      "value": 12175
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-07-31T00:00:00.000Z",
+      "value": 2703
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-01T00:00:00.000Z",
+      "value": 12185
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-01T00:00:00.000Z",
+      "value": 2822
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-02T00:00:00.000Z",
+      "value": 12193
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-02T00:00:00.000Z",
+      "value": 2887
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-03T00:00:00.000Z",
+      "value": 12204
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-03T00:00:00.000Z",
+      "value": 2115
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-04T00:00:00.000Z",
+      "value": 12216
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-04T00:00:00.000Z",
+      "value": 1764
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-05T00:00:00.000Z",
+      "value": 12231
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-05T00:00:00.000Z",
+      "value": 1992
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-06T00:00:00.000Z",
+      "value": 12239
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-06T00:00:00.000Z",
+      "value": 1732
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-07T00:00:00.000Z",
+      "value": 12248
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-07T00:00:00.000Z",
+      "value": 2091
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-08T00:00:00.000Z",
+      "value": 12264
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-08T00:00:00.000Z",
+      "value": 2477
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-09T00:00:00.000Z",
+      "value": 12275
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-09T00:00:00.000Z",
+      "value": 2554
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-10T00:00:00.000Z",
+      "value": 12285
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-10T00:00:00.000Z",
+      "value": 2891
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-11T00:00:00.000Z",
+      "value": 12300
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-11T00:00:00.000Z",
+      "value": 2505
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-12T00:00:00.000Z",
+      "value": 12308
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-12T00:00:00.000Z",
+      "value": 2494
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-13T00:00:00.000Z",
+      "value": 12323
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-13T00:00:00.000Z",
+      "value": 2520
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-14T00:00:00.000Z",
+      "value": 12338
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-14T00:00:00.000Z",
+      "value": 1891
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-15T00:00:00.000Z",
+      "value": 12346
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-15T00:00:00.000Z",
+      "value": 2982
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-16T00:00:00.000Z",
+      "value": 12352
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-16T00:00:00.000Z",
+      "value": 1953
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-17T00:00:00.000Z",
+      "value": 12367
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-17T00:00:00.000Z",
+      "value": 1800
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-18T00:00:00.000Z",
+      "value": 12377
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-18T00:00:00.000Z",
+      "value": 2806
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-19T00:00:00.000Z",
+      "value": 12385
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-19T00:00:00.000Z",
+      "value": 2925
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-20T00:00:00.000Z",
+      "value": 12393
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-20T00:00:00.000Z",
+      "value": 2298
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-21T00:00:00.000Z",
+      "value": 12404
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-21T00:00:00.000Z",
+      "value": 2614
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-22T00:00:00.000Z",
+      "value": 12415
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-22T00:00:00.000Z",
+      "value": 1648
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-23T00:00:00.000Z",
+      "value": 12431
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-23T00:00:00.000Z",
+      "value": 2100
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-24T00:00:00.000Z",
+      "value": 12438
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-24T00:00:00.000Z",
+      "value": 2419
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-25T00:00:00.000Z",
+      "value": 12446
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-25T00:00:00.000Z",
+      "value": 1965
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-26T00:00:00.000Z",
+      "value": 12455
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-26T00:00:00.000Z",
+      "value": 1732
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-27T00:00:00.000Z",
+      "value": 12469
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-27T00:00:00.000Z",
+      "value": 2244
+    },
+    {
+      "metric": "follower_count",
+      "period": "day",
+      "end_time": "2026-08-28T00:00:00.000Z",
+      "value": 12480
+    },
+    {
+      "metric": "reach",
+      "period": "day",
+      "end_time": "2026-08-28T00:00:00.000Z",
+      "value": 2343
+    },
+    {
+      "metric": "accounts_engaged",
+      "period": "day",
+      "value": 3421
+    },
+    {
+      "metric": "total_interactions",
+      "period": "day",
+      "value": 5187
+    },
+    {
+      "metric": "views",
+      "period": "day",
+      "value": 28450
+    },
+    {
+      "metric": "follower_demographics",
+      "period": "lifetime",
+      "timeframe": "THIS_MONTH",
+      "dimension": "country",
+      "dimension_value": "US",
+      "value": 4210
+    },
+    {
+      "metric": "follower_demographics",
+      "period": "lifetime",
+      "timeframe": "THIS_MONTH",
+      "dimension": "country",
+      "dimension_value": "DE",
+      "value": 2310
+    },
+    {
+      "metric": "follower_demographics",
+      "period": "lifetime",
+      "timeframe": "THIS_MONTH",
+      "dimension": "country",
+      "dimension_value": "GB",
+      "value": 1880
+    },
+    {
+      "metric": "follower_demographics",
+      "period": "lifetime",
+      "timeframe": "THIS_MONTH",
+      "dimension": "country",
+      "dimension_value": "SE",
+      "value": 1410
+    },
+    {
+      "metric": "follower_demographics",
+      "period": "lifetime",
+      "timeframe": "THIS_MONTH",
+      "dimension": "country",
+      "dimension_value": "JP",
+      "value": 980
+    }
+  ],
+  "absences": []
+}

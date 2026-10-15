@@ -476,3 +476,269 @@ describe("GraphProvider failure modes", () => {
     expect(resolved.status).toBe(CapabilityStatus.UNAVAILABLE);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Account insights (D36–D41). The contract under test is not "the numbers come
+// out" but "a metric the platform did not return becomes an ABSENCE with a
+// reason, and a temporary failure never masquerades as one".
+// ---------------------------------------------------------------------------
+
+describe("GraphProvider account insights", () => {
+  const account = { username: "owned.account" };
+
+  it("splits calls by documented metric_type and normalizes every response shape", async () => {
+    const seen: URL[] = [];
+    const fetchSpy = vi.fn(async (url: URL) => {
+      seen.push(url);
+      const metric = url.searchParams.get("metric") ?? "";
+      if (metric === "follower_count,reach") {
+        return jsonResponse({
+          data: [
+            {
+              name: "follower_count",
+              period: "day",
+              values: [
+                { value: 101, end_time: "2026-08-26T07:00:00+0000" },
+                { value: 102, end_time: "2026-08-27T07:00:00+0000" },
+              ],
+            },
+            {
+              name: "reach",
+              period: "day",
+              values: [{ value: 55, end_time: "2026-08-27T07:00:00+0000" }],
+            },
+          ],
+        });
+      }
+      if (metric === "accounts_engaged,total_interactions,views") {
+        return jsonResponse({
+          data: [
+            { name: "accounts_engaged", period: "day", total_value: { value: 3421 } },
+            { name: "total_interactions", period: "day", total_value: { value: 5187 } },
+            { name: "views", period: "day", total_value: { value: 28450 } },
+          ],
+        });
+      }
+      return jsonResponse({
+        data: [
+          {
+            name: "follower_demographics",
+            period: "lifetime",
+            total_value: {
+              breakdowns: [
+                {
+                  dimension_keys: ["timeframe", "country"],
+                  results: [
+                    { dimension_values: ["this_month", "US"], value: 4210 },
+                    { dimension_values: ["this_month", "DE"], value: 2310 },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const p = provider();
+    expect(p.capabilities().getAccountInsights).toBe(true);
+    const result = await p.getAccountInsights(account);
+    expect(result.status).toBe(CapabilityStatus.AVAILABLE);
+    // Three calls produced this set, so there is no single transported raw
+    // representation to hash — a normalized hash must not pretend to be one.
+    expect(result.rawPayloadHash).toBeUndefined();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+    const timeSeries = seen.find((u) => u.searchParams.get("metric_type") === "time_series");
+    expect(timeSeries?.searchParams.get("metric")).toBe("follower_count,reach");
+    expect(timeSeries?.searchParams.get("period")).toBe("day");
+    const since = Number(timeSeries?.searchParams.get("since"));
+    const until = Number(timeSeries?.searchParams.get("until"));
+    expect(until - since).toBe(30 * 24 * 60 * 60);
+
+    const totals = seen.find(
+      (u) => u.searchParams.get("metric") === "accounts_engaged,total_interactions,views",
+    );
+    expect(totals?.searchParams.get("metric_type")).toBe("total_value");
+
+    const demographics = seen.find(
+      (u) => u.searchParams.get("metric") === "follower_demographics",
+    );
+    expect(demographics?.searchParams.get("timeframe")).toBe("this_month");
+    expect(demographics?.searchParams.get("breakdown")).toBe("country");
+
+    const set = result.data!;
+    expect(set.windowSince).toBeDefined();
+    expect(set.windowUntil).toBeDefined();
+    expect(set.absences).toEqual([]);
+
+    const followerCount = set.points.filter((pt) => pt.metric === "follower_count");
+    expect(followerCount).toHaveLength(2);
+    expect(followerCount[1]).toMatchObject({
+      metric: "follower_count",
+      period: "day",
+      endTime: "2026-08-27T07:00:00+0000",
+      value: 102,
+    });
+
+    // total_value carries no bucket end: no fabricated timestamp.
+    expect(set.points.find((pt) => pt.metric === "views")).toEqual({
+      metric: "views",
+      period: "day",
+      value: 28450,
+    });
+
+    const breakdown = set.points.filter((pt) => pt.metric === "follower_demographics");
+    expect(breakdown).toHaveLength(2);
+    // The timeframe is a qualifier on the claim, not a dimension value.
+    expect(breakdown[0]).toEqual({
+      metric: "follower_demographics",
+      period: "lifetime",
+      timeframe: "this_month",
+      dimension: "country",
+      dimensionValue: "US",
+      value: 4210,
+    });
+  });
+
+  it("records a metric the platform did not return as an absence with a reason, never a zero", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: URL) => {
+        const metric = url.searchParams.get("metric") ?? "";
+        if (metric === "follower_count,reach") {
+          // reach is documented time_series-capable but is missing entirely.
+          return jsonResponse({
+            data: [
+              {
+                name: "follower_count",
+                period: "day",
+                values: [{ value: 12480, end_time: "2026-08-27T00:00:00+0000" }],
+              },
+            ],
+          });
+        }
+        if (metric === "accounts_engaged,total_interactions,views") {
+          // Documented behavior: an empty data set instead of 0.
+          return jsonResponse({ data: [] });
+        }
+        return jsonResponse({
+          data: [
+            {
+              name: "follower_demographics",
+              period: "lifetime",
+              total_value: { breakdowns: [{ dimension_keys: ["country"], results: [] }] },
+            },
+          ],
+        });
+      }),
+    );
+
+    const result = await provider().getAccountInsights(account);
+    expect(result.status).toBe(CapabilityStatus.AVAILABLE);
+    const set = result.data!;
+
+    expect(set.points.map((pt) => pt.metric)).toEqual(["follower_count"]);
+    expect(set.points[0]?.value).toBe(12480);
+    expect(set.absences.map((a) => a.metric).sort()).toEqual([
+      "accounts_engaged",
+      "follower_demographics",
+      "reach",
+      "total_interactions",
+      "views",
+    ]);
+    // Every absence carries a reason, and an absent metric has no point at all.
+    expect(set.absences.every((a) => a.reason.length > 20)).toBe(true);
+    for (const absence of set.absences) {
+      expect(set.points.some((pt) => pt.metric === absence.metric)).toBe(false);
+    }
+    // The documented below-100-followers gate is named where it applies.
+    expect(
+      set.absences.find((a) => a.metric === "follower_demographics")?.reason,
+    ).toContain("fewer than 100 followers");
+  });
+
+  it("turns a structural 400 on one call into absences for that call only", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: URL) => {
+        const metric = url.searchParams.get("metric") ?? "";
+        if (metric === "follower_count,reach") {
+          return jsonResponse(
+            { error: { message: "Unsupported metric follower_count", code: 100 } },
+            400,
+          );
+        }
+        if (metric === "accounts_engaged,total_interactions,views") {
+          return jsonResponse({
+            data: [{ name: "views", period: "day", total_value: { value: 28450 } }],
+          });
+        }
+        return jsonResponse({
+          data: [
+            {
+              name: "follower_demographics",
+              period: "lifetime",
+              total_value: {
+                breakdowns: [
+                  {
+                    dimension_keys: ["country"],
+                    results: [{ dimension_values: ["US"], value: 4210 }],
+                  },
+                ],
+              },
+            },
+          ],
+        });
+      }),
+    );
+
+    const result = await provider().getAccountInsights(account);
+    expect(result.status).toBe(CapabilityStatus.AVAILABLE);
+    const set = result.data!;
+    // The two calls that answered still contribute their claims.
+    expect(set.points.map((pt) => pt.metric).sort()).toEqual([
+      "follower_demographics",
+      "views",
+    ]);
+    const refused = set.absences.filter(
+      (a) => a.metric === "follower_count" || a.metric === "reach",
+    );
+    expect(refused).toHaveLength(2);
+    expect(refused.every((a) => a.reason.includes("refused this metric request"))).toBe(true);
+    expect(set.absences.map((a) => a.metric).sort()).toEqual([
+      "accounts_engaged",
+      "follower_count",
+      "reach",
+      "total_interactions",
+    ]);
+  });
+
+  it("never records a temporary failure as a platform absence", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: URL) => {
+        if (url.searchParams.get("metric_type") === "time_series") {
+          return jsonResponse({
+            data: [
+              {
+                name: "reach",
+                period: "day",
+                values: [{ value: 9, end_time: "2026-08-27T00:00:00+0000" }],
+              },
+            ],
+          });
+        }
+        return jsonResponse({ error: { message: "throttled" } }, 429);
+      }),
+    );
+
+    const result = await provider().getAccountInsights(account);
+    // "Could not look" is not "the platform does not expose this" (invariant 2).
+    expect(result.status).toBe(CapabilityStatus.ERROR);
+    expect(result.error?.kind).toBe(CapabilityErrorKind.RATE_LIMITED);
+    expect(result.error?.retryable).toBe(true);
+    expect(result.data).toBeUndefined();
+  });
+});
