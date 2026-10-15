@@ -96,7 +96,14 @@ async function guarded(fn: () => Promise<unknown>): Promise<ToolResult> {
   try {
     return jsonResult(await fn());
   } catch (err) {
-    const code = err instanceof CliError ? err.code : "INTERNAL";
+    // Typed codes, three honest classes: the operation's own refusal (CliError),
+    // "could not look" when the database itself is unreachable (same predicate
+    // that discards the cached context), and everything else INTERNAL.
+    const code = err instanceof CliError
+      ? err.code
+      : isConnectionFailure(err)
+        ? "DB_UNAVAILABLE"
+        : "INTERNAL";
     const message = err instanceof Error ? err.message : String(err);
     return {
       content: [

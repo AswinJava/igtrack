@@ -98,6 +98,9 @@ describe("igtrack mcp", () => {
       const text = (result.content as Array<{ text: string }>)[0]?.text ?? "";
       const payload = JSON.parse(text) as { ok: boolean; error: { code: string; message: string } };
       expect(payload.ok).toBe(false);
+      // "could not look" is its own typed class, distinct from a bug (INTERNAL)
+      // and from an operation's own refusal (a CliError code like USAGE).
+      expect(payload.error.code).toBe("DB_UNAVAILABLE");
       expect(payload.error.message.length).toBeGreaterThan(0);
     } finally {
       await close();
@@ -116,4 +119,47 @@ describe("igtrack mcp", () => {
       await close();
     }
   });
+
+  it("gates target deletion behind explicit confirmation, before any dependency", async () => {
+    const { client, close } = await connect();
+    try {
+      // Without confirm the input schema refuses the call itself: no guarded
+      // error envelope appears, proving the handler — and the deletion it
+      // would perform — was never reached.
+      const missing = await client.callTool({
+        name: "igtrack_target_remove",
+        arguments: { target: "x" },
+      });
+      expect(missing.isError).toBe(true);
+      expect(errCode(missing)).toBeNull();
+
+      // confirm: true passes the schema and reaches the context, which fails on
+      // the unreachable database — a different gate, with the typed code.
+      const confirmed = await client.callTool({
+        name: "igtrack_target_remove",
+        arguments: { target: "x", confirm: true },
+      });
+      expect(confirmed.isError).toBe(true);
+      expect(errCode(confirmed)).toBe("DB_UNAVAILABLE");
+    } finally {
+      await close();
+    }
+  });
 });
+
+/** The typed error code in a tool result's envelope, or null when absent. */
+function errCode(result: unknown): string | null {
+  const content = (result as { content?: unknown }).content;
+  const first = Array.isArray(content) ? content[0] : undefined;
+  const text =
+    typeof first === "object" && first !== null && "text" in first
+      ? String((first as { text?: unknown }).text ?? "")
+      : "";
+  if (text === "") return null;
+  try {
+    const payload = JSON.parse(text) as { error?: { code?: string } };
+    return typeof payload.error?.code === "string" ? payload.error.code : null;
+  } catch {
+    return null; // not our envelope (e.g. an SDK schema-rejection message)
+  }
+}

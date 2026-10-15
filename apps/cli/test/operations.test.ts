@@ -2,6 +2,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, runMigrations, seed, type DatabaseHandle } from "@igtrack/database";
 import { createContext, type CliContext } from "../src/context.js";
+import { UsageError } from "../src/output.js";
 import {
   opActivity,
   opEvidence,
@@ -178,5 +179,35 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     );
     const resolved = await resolveTarget(ctx.db, ctx.userId, FIXTURE_USERNAME);
     expect(resolved.id).toBe(targetId);
+  });
+
+  it("rejects an unknown scan kind with USAGE before anything is enqueued", async () => {
+    try {
+      await opScanRun(ctx, { target: FIXTURE_USERNAME, kinds: ["nonsense"] });
+      expect.unreachable("opScanRun must reject an unknown kind");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UsageError);
+      expect((err as UsageError).code).toBe("USAGE");
+      expect((err as Error).message).toContain('Unknown scan kind "nonsense"');
+      expect((err as Error).message).toContain("PROFILE_SCAN");
+    }
+  });
+
+  it("rejects an unknown activity type instead of silently answering empty", async () => {
+    // The MCP schema accepts free strings for types, so the operations layer is
+    // the guarantee: an unknown filter must fail loudly with the allowed list.
+    try {
+      await opActivity(ctx, { types: ["TOTALLY_MADE_UP"] });
+      expect.unreachable("opActivity must reject an unknown type");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UsageError);
+      expect((err as UsageError).code).toBe("USAGE");
+      expect((err as Error).message).toContain('Unknown activity type "TOTALLY_MADE_UP"');
+      expect((err as Error).message).toContain("PROFILE_CHANGED");
+    }
+
+    // A valid filter still resolves, and every returned row matches it.
+    const filtered = await opActivity(ctx, { types: ["NEW_FOLLOWER"] });
+    expect(filtered.items.every((i) => i.type === "NEW_FOLLOWER")).toBe(true);
   });
 });

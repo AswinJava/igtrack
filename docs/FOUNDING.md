@@ -284,3 +284,29 @@ Not claimed: no live Graph token exists in this environment, so FOLLOWERS and
 FOLLOWING stay `DOCUMENTED_ABSENT` for the live API edge — import supplies the
 roster through the owner's export, which is not an edge at all. `LIVE_VERIFIED`
 remains out of reach until a live provider check actually runs.
+
+---
+
+## 12. Phase C — pinning the agent-facing refusals
+
+The surface an autonomous agent leans on hardest is not the happy path; it is
+the refusals. Phase C closes the two honesty gaps those paths exposed and pins
+the rest with tests.
+
+### Decision log (Phase C)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D33 | **`opActivity` validates activity types at the operations layer** — unknown type → `UsageError` (`USAGE`) listing the allowed values | The old predicate claimed `t is ActivityType` after checking only nonemptiness, and the MCP schema accepts free strings: a junk filter was dropped downstream, so "no events of that type" read as "no events" — empty data posed as an answer. One validation site serves both consumers, per AGENTS.md §4. |
+| D34 | **`guarded` classifies connection failures as `DB_UNAVAILABLE`**, not `INTERNAL` | "Could not look" is a different claim from "we broke," and an agent retries them differently. The predicate is the same one that already discards the cached context, so the classification reuses the codebase's own definition of a connection failure. Three honest classes remain: the operation's own `CliError` code, `DB_UNAVAILABLE`, `INTERNAL`. |
+| D35 | **The refusals themselves get tests** — `resolveUser` precedence matrix (NO_USER on empty db and on an unmatched email, AMBIGUOUS_USER listing every candidate and the flag to resolve it, explicit beats env beats single-user default, case-insensitive); unknown scan kind → `USAGE` before anything enqueues; MCP deletion gated by `confirm` at the schema, proven by the absence of the guarded envelope; `error.code` asserted on the typed path | A refusal an agent cannot distinguish from empty data it will fill with guesses. These are the exact paths where that could happen. |
+
+### Verification for Phase C
+
+| Item | Evidence |
+|---|---|
+| Typecheck | `pnpm typecheck` clean across the 5 workspace packages |
+| Tests | `pnpm test` — 55 files, 381 passed, 1 skipped (new: `resolve-user.test.ts` 6, operations +2, MCP +1 with code assertions) |
+
+Deliberately NOT built: `igtrack bench` — no measured need for a benchmark
+surface yet (YAGNI); revisit if provider performance becomes a real question.

@@ -6,6 +6,7 @@ import {
   type RegistryCapabilityId,
 } from "@igtrack/core";
 import {
+  ACTIVITY_TYPES,
   createTarget,
   deleteOwnedTarget,
   enqueueJob,
@@ -465,7 +466,19 @@ export async function opActivity(ctx: CliContext, input: ActivityQuery): Promise
   const targetFilter = input.target === undefined
     ? null
     : (await resolveTarget(ctx.db, ctx.userId, input.target)).username.toLowerCase();
-  const types = (input.types ?? []).filter((t): t is ActivityType => t.length > 0);
+  // An unknown filter value must be an error, never a silent drop: downstream
+  // filtering would show "no events of that type" as if the type had matched
+  // nothing, which is exactly the empty-data-as-answer lie the surface forbids.
+  const types: ActivityType[] = [];
+  for (const t of input.types ?? []) {
+    if (t.length === 0) continue;
+    if (!(ACTIVITY_TYPES as readonly string[]).includes(t)) {
+      throw new UsageError(
+        `Unknown activity type "${t}". Allowed: ${ACTIVITY_TYPES.join(", ")}.`,
+      );
+    }
+    types.push(t as ActivityType);
+  }
 
   const fetchLimit = since !== null || targetFilter !== null ? Math.min(limit * 10, 500) : limit;
   const items = await getUserActivityFeed(ctx.db, ctx.userId, fetchLimit, {
