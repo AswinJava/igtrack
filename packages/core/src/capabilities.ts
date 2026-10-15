@@ -252,16 +252,17 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     id: "FOLLOWERS",
     label: "Follower roster and history",
     providerMethods: ["getFollowers"],
-    permissions: "Fixture exposes synthetic rosters. Graph exposes counts only, never lists.",
+    permissions:
+      "Fixture exposes synthetic rosters; import:v1 reads the operator's own Instagram export for the real one. Graph exposes counts only, never lists.",
     persistence: ["followSnapshots", "followSnapshotMembers", "followDeltas", "evidence"],
     ui: ["/targets/[id] (followers tab)", "/relationships", "activity timeline"],
     howItWorks:
-      "Each scan appends a snapshot (COMPLETE or PARTIAL) with stable member rows. Diffs derive only between two COMPLETE snapshots: a newcomer is 'newly observed', a disappearance 'no longer observed' — never 'followed at 14:03' unless the provider supplies the event. PARTIAL scans are recorded but never diffed, so truncation cannot fabricate losses.",
+      "Each scan appends a snapshot (COMPLETE or PARTIAL) with stable member rows. Diffs derive only between two COMPLETE snapshots: a newcomer is 'newly observed', a disappearance 'no longer observed' — never 'followed at 14:03' unless the provider supplies the event. PARTIAL scans are recorded but never diffed, so truncation cannot fabricate losses. import:v1 pages the export's followers_*.json files — one raw file per page with a genuine payload hash — so real rosters run the identical snapshot/diff machinery.",
     whyUnavailable: null,
     unlock: "A supported list endpoint (the Graph API has none by design).",
     liveState: "DOCUMENTED_ABSENT",
     liveEvidence:
-      "The exhaustive Meta IG User edge reference lists no roster edge — counts-only is provider design, not an auth tier away. Fixture rosters exercise the full pipeline synthetically.",
+      "The exhaustive Meta IG User edge reference lists no roster edge — counts-only is provider design, not an auth tier away. Fixture rosters exercise the full pipeline synthetically. The operator's own export (import:v1) carries REAL rosters lawfully: Instagram ships them to the account owner directly, so no live edge is involved.",
   },
   {
     id: "FOLLOWING",

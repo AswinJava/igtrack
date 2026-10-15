@@ -67,8 +67,9 @@ export function renderCapabilityMatrixDocument(): string {
   lines.push(
     "A capability can be available **and** documented-absent at the same time, and saying so is " +
       "the point of this table: follower and following rosters are `DOCUMENTED_ABSENT` for any " +
-      "real interface, while the synthetic fixture provider exposes rosters so the pipeline can " +
-      "be built and tested end to end.",
+      "live interface — no roster edge exists — while the synthetic fixture provider exposes " +
+      "rosters so the pipeline can be built and tested end to end, and the operator's own " +
+      "Instagram export (`import:v1`) supplies the real roster lawfully.",
   );
   lines.push("");
   lines.push("## How to read this");

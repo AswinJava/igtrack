@@ -251,3 +251,36 @@ Deliberately NOT changed: multi-page follow evidence keeps `raw_hash: null`
 (composite evidence honestly carries no single raw payload), and deployment-
 level queue counts in `igtrack status` stay global — they describe the
 deployment, not a tenant.
+
+---
+
+## 11. Phase B — the lawful real-data path (import:v1)
+
+Instagram ships every account owner their own data export ("Download your
+information", JSON). Phase B reads it: the first path to a REAL
+follower/following roster that touches no access control, because the platform
+hands the bytes to the operator itself.
+
+### Decision log (Phase B)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D27 | **New `import:v1` provider** reading `connections/followers_and_following/{followers_N.json,following.json}` (`string_list_data` shape), wired via `IGTRACK_PROVIDER=import` + `IGTRACK_IMPORT_DIR` + `IGTRACK_IMPORT_USERNAME` | Invariant 3's lawful line: the export reaches no one else's data and circumvents nothing — Instagram delivers it to the account owner. Rosters were the one capability fixture could only fake; now the full pipeline runs on real bytes. |
+| D28 | **Import observes exactly one account: its owner** — `resolveAccount` matches only `IGTRACK_IMPORT_USERNAME` (case-insensitive); every other username is a typed `ACCOUNT_NOT_FOUND` | The export contains one account's roster. Claiming more would fabricate scope; probing others would be scraping. Mirrors Graph's owned-account-only rule. |
+| D29 | **Everything outside the roster answers UNAVAILABLE with the reason** — profile ("the export carries no profile snapshot"), stories (exports never contain them), posts/comments/children ("not read by this provider version"), and a missing roster file names the fix | Invariant 2's three cases honored exactly: structurally absent from an export ≠ not-yet-read by v1 ≠ genuinely empty. Never zero, never a guessed profile. |
+| D30 | **One page = one raw export file** — cursor is the next filename, genuine sha256 per file, `COMPLETE` only on the last file; within-file usernames deduped; malformed entries fail loudly (SCHEMA_MISMATCH) instead of silently shrinking the roster | Per-file provenance keeps `raw_hash` genuine — no synthetic concatenation masquerading as a transported payload — and Phase A's last-page confidence rules apply unchanged. |
+| D31 | **Fail-fast configuration** — missing `IGTRACK_IMPORT_DIR`/`IGTRACK_IMPORT_USERNAME` or a nonexistent directory throws a configuration error whose message never mentions UNAVAILABLE | Invariant 7: misconfiguration must never look like "no data". |
+| D32 | **Registry, generated matrix, and the shared conformance harness all updated** — FOLLOWERS/FOLLOWING entries name the import source; `pnpm docs:capabilities` regenerated; `import:v1` passes the same C1–C5 contract as fixture | The registry stays the single source of truth (drift test enforced), and a second provider proving the harness keeps the contract honest. |
+
+### Verification for Phase B
+
+| Item | Evidence |
+|---|---|
+| Typecheck | `pnpm typecheck` clean across the 5 workspace packages |
+| Tests | `pnpm test` — 54 files, 372 passed, 1 skipped (new: import-provider 10, import conformance 5, provider-config +4; CAPABILITIES.md drift test green post-regen) |
+| Sample | `packages/ingestion/fixtures/import-sample/` — synthetic two-file export, checked in, used by tests |
+
+Not claimed: no live Graph token exists in this environment, so FOLLOWERS and
+FOLLOWING stay `DOCUMENTED_ABSENT` for the live API edge — import supplies the
+roster through the owner's export, which is not an edge at all. `LIVE_VERIFIED`
+remains out of reach until a live provider check actually runs.

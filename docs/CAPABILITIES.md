@@ -6,7 +6,7 @@
 
 13 of 18 capabilities are obtainable from a lawful source; 5 have no provider method at all. Separately, 7 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
 
-A capability can be available **and** documented-absent at the same time, and saying so is the point of this table: follower and following rosters are `DOCUMENTED_ABSENT` for any real interface, while the synthetic fixture provider exposes rosters so the pipeline can be built and tested end to end.
+A capability can be available **and** documented-absent at the same time, and saying so is the point of this table: follower and following rosters are `DOCUMENTED_ABSENT` for any live interface — no roster edge exists — while the synthetic fixture provider exposes rosters so the pipeline can be built and tested end to end, and the operator's own Instagram export (`import:v1`) supplies the real roster lawfully.
 
 ## How to read this
 
@@ -188,15 +188,15 @@ A capability can be available **and** documented-absent at the same time, and sa
 ### Follower roster and history — `available`
 
 - **Registry id:** `FOLLOWERS`
-- **Live state:** `DOCUMENTED_ABSENT` — The exhaustive Meta IG User edge reference lists no roster edge — counts-only is provider design, not an auth tier away. Fixture rosters exercise the full pipeline synthetically.
-- **Permissions:** Fixture exposes synthetic rosters. Graph exposes counts only, never lists.
+- **Live state:** `DOCUMENTED_ABSENT` — The exhaustive Meta IG User edge reference lists no roster edge — counts-only is provider design, not an auth tier away. Fixture rosters exercise the full pipeline synthetically. The operator's own export (import:v1) carries REAL rosters lawfully: Instagram ships them to the account owner directly, so no live edge is involved.
+- **Permissions:** Fixture exposes synthetic rosters; import:v1 reads the operator's own Instagram export for the real one. Graph exposes counts only, never lists.
 - **Provider methods:** `getFollowers`
 - **Persists to:** `followSnapshots`, `followSnapshotMembers`, `followDeltas`, `evidence`
 - **Surfaced in:** `/targets/[id] (followers tab)`, `/relationships`, `activity timeline`
 
 **What would unlock it.** A supported list endpoint (the Graph API has none by design).
 
-**Pipeline.** Each scan appends a snapshot (COMPLETE or PARTIAL) with stable member rows. Diffs derive only between two COMPLETE snapshots: a newcomer is 'newly observed', a disappearance 'no longer observed' — never 'followed at 14:03' unless the provider supplies the event. PARTIAL scans are recorded but never diffed, so truncation cannot fabricate losses.
+**Pipeline.** Each scan appends a snapshot (COMPLETE or PARTIAL) with stable member rows. Diffs derive only between two COMPLETE snapshots: a newcomer is 'newly observed', a disappearance 'no longer observed' — never 'followed at 14:03' unless the provider supplies the event. PARTIAL scans are recorded but never diffed, so truncation cannot fabricate losses. import:v1 pages the export's followers_*.json files — one raw file per page with a genuine payload hash — so real rosters run the identical snapshot/diff machinery.
 
 ### Following roster and history — `available`
 

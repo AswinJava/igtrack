@@ -1,13 +1,15 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { FixtureProvider, GraphProvider, graphConfigFromEnv } from "@igtrack/ingestion";
+import { FixtureProvider, GraphProvider, ImportProvider, graphConfigFromEnv } from "@igtrack/ingestion";
 import type { InstagramProvider } from "@igtrack/core";
 import { buildSource, type ExecutionSource } from "./executors.js";
 
 export interface ProviderConfig {
-  name: "fixture" | "graph";
+  name: "fixture" | "graph" | "import";
   fixturesDir?: string;
   fixtureVersion?: string;
+  importDir?: string;
+  importUsername?: string;
 }
 
 export function createExecutionSource(config: ProviderConfig): ExecutionSource {
@@ -27,6 +29,20 @@ export function createExecutionSource(config: ProviderConfig): ExecutionSource {
       // credential is a fail-fast configuration error, never UNAVAILABLE.
       provider = new GraphProvider(graphConfigFromEnv());
       break;
+    case "import": {
+      // Lawful real data: the operator's own Instagram export. Missing path
+      // or owner username is a configuration error, never UNAVAILABLE —
+      // providerFromEnv validates both before reaching here.
+      const dir = config.importDir;
+      const owner = config.importUsername;
+      if (dir === undefined || dir === "" || owner === undefined || owner === "") {
+        throw new Error(
+          "igtrack worker: import provider requires importDir (IGTRACK_IMPORT_DIR) and importUsername (IGTRACK_IMPORT_USERNAME)",
+        );
+      }
+      provider = new ImportProvider({ importDir: dir, username: owner });
+      break;
+    }
     default:
       throw new Error(`igtrack worker: unknown provider "${config.name}"`);
   }
@@ -51,9 +67,24 @@ export function providerFromEnv(): ExecutionSource {
   if (name === "graph") {
     return createExecutionSource({ name: "graph" });
   }
+  if (name === "import") {
+    const importDir = process.env.IGTRACK_IMPORT_DIR;
+    const importUsername = process.env.IGTRACK_IMPORT_USERNAME;
+    if (importDir === undefined || importDir === "") {
+      throw new Error(
+        "igtrack worker: missing required env IGTRACK_IMPORT_DIR when IGTRACK_PROVIDER=import — point it at your Instagram data-export directory (its root, connections/, or followers_and_following/).",
+      );
+    }
+    if (importUsername === undefined || importUsername === "") {
+      throw new Error(
+        "igtrack worker: missing required env IGTRACK_IMPORT_USERNAME when IGTRACK_PROVIDER=import — the account the export belongs to (the only account this provider observes).",
+      );
+    }
+    return createExecutionSource({ name: "import", importDir, importUsername });
+  }
   if (name !== "fixture") {
     const expected =
-      'IGTRACK_PROVIDER=fixture|graph (allowed values: "fixture", "graph"; the Graph API provider requires an owned Business/Creator account + Meta app + token via env: IGTRACK_GRAPH_ACCESS_TOKEN, IGTRACK_GRAPH_IG_USER_ID, IGTRACK_GRAPH_USERNAME)';
+      'IGTRACK_PROVIDER=fixture|graph|import (allowed values: "fixture", "graph", "import"; the Graph API provider requires an owned Business/Creator account + Meta app + token via env: IGTRACK_GRAPH_ACCESS_TOKEN, IGTRACK_GRAPH_IG_USER_ID, IGTRACK_GRAPH_USERNAME; the import provider requires IGTRACK_IMPORT_DIR + IGTRACK_IMPORT_USERNAME)';
     throw new Error(
       `igtrack worker: no provider implementation for "${name}". Expected ${expected}.`,
     );

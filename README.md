@@ -137,6 +137,23 @@ pnpm igtrack scans run && pnpm igtrack work
 There is no provider, now or planned, that reaches around access controls. See
 [docs/CAPABILITIES.md](docs/CAPABILITIES.md) and the non-goals below.
 
+## Real rosters from your own export (import provider)
+
+Instagram ships your account's data to you directly ("Download your
+information", JSON form). Point IGTrack at it and the **real**
+follower/following roster runs the same evidence pipeline as everything else —
+no cookies, no scraping, no session:
+
+```bash
+IGTRACK_PROVIDER=import
+IGTRACK_IMPORT_DIR=/path/to/export   # its root, connections/, or followers_and_following/
+IGTRACK_IMPORT_USERNAME=yourhandle   # the export's owner — the only account observed
+```
+
+The export carries rosters and nothing else: profile, stories, and posts
+answer `UNAVAILABLE` with the reason, never zero. A synthetic example layout
+lives at `packages/ingestion/fixtures/import-sample/`.
+
 ## Running the worker
 
 ```bash
