@@ -6,6 +6,8 @@ import {
   RegistryCapabilityId,
   type CapabilityResult,
   type InstagramProvider,
+  type NormalizedAccountRef,
+  type NormalizedMentionedComment,
 } from "@igtrack/core";
 import {
   ACTIVITY_TYPES,
@@ -22,11 +24,13 @@ import {
   insightLatest,
   insightState,
   isScanKindAllowedForMode,
+  latestTagsListingEvidence,
   listInsightSeries,
   listJobsForTarget,
   listProviderMetrics,
   listQueueJobs,
   listScopedEvidence,
+  listTaggedMedia,
   listTargets,
   listTargetsForUser,
   RELATIONSHIP_RECENCY_WINDOW_DAYS,
@@ -77,6 +81,7 @@ const SCAN_KINDS = [
   "STORY_SCAN",
   "POSTS_SCAN",
   "INSIGHTS_SCAN",
+  "TAGS_SCAN",
   "DISCOVERY_SCAN",
 ] as const;
 export type ScanKind = (typeof SCAN_KINDS)[number];
@@ -379,7 +384,8 @@ export async function opScanRun(
   ctx: CliContext,
   input: { target?: string | undefined; kinds?: string[] | undefined; force?: boolean | undefined },
 ): Promise<ScanRunResult> {
-  const all = await listTargetsForUser(ctx.db, ctx.userId);  if (all.length === 0) {
+  const all = await listTargetsForUser(ctx.db, ctx.userId);
+  if (all.length === 0) {
     throw new CliError(
       "NO_TARGETS",
       "This deployment tracks nothing yet. Add one with `igtrack targets add <username>`.",
@@ -699,6 +705,12 @@ const CAPABILITY_SURFACES: Partial<
   REPLIES: ["postComments"],
   FOLLOWERS: ["followerSnapshots", "followDeltas"],
   FOLLOWING: ["followingSnapshots", "followDeltas"],
+  // FOUNDING §17: tagged-media rows are their own surface (media by other
+  // accounts), never folded into the posts surface. REPOSTS is written only by
+  // posts that carry a provider-supplied repost count, so its observedRows
+  // counts exactly those rows — zero is "never returned", not "no reposts".
+  TAGS: ["taggedMedia"],
+  REPOSTS: ["repostsObserved"],
 };
 
 export interface DossierCoverageRow {
@@ -782,6 +794,8 @@ export interface DossierResult {
       firstObservedAt: string | null;
       likeCount: number | null;
       commentCount: number | null;
+      /** Provider-supplied repost count when present; null = not returned, never zero-filled (FOUNDING §17). */
+      repostsCount: number | null;
       mediaType: string | null;
       mediaProductType: string | null;
       commentsState: string;
@@ -911,7 +925,7 @@ export async function opDossier(
     );
   }
   notes.push(
-    "Capabilities this product refuses by decision (likers, other accounts' rosters, highlights, reposts) are recorded in FOUNDING §14 — they are platform-absent, not unimplemented.",
+    "Capabilities this product refuses by decision (likers, other accounts' rosters, highlights) are recorded in FOUNDING §14 — they are platform-absent, not unimplemented.",
   );
 
   return {
@@ -986,6 +1000,7 @@ export async function opDossier(
               firstObservedAt: isoOrNull(r.firstObservedAt),
               likeCount: r.likeCount,
               commentCount: r.commentCount,
+              repostsCount: r.repostsCount,
               mediaType: r.mediaType,
               mediaProductType: r.mediaProductType,
               commentsState: r.commentsState,
@@ -1000,6 +1015,93 @@ export async function opDossier(
       note: u.note,
       updatedAt: u.updatedAt.toISOString(),
     })),
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// tags — media by OTHER accounts in which the tracked account was tagged
+// (FOUNDING §17). Read-only over stored rows; the live edge is read by
+// TAGS_SCAN.
+// ---------------------------------------------------------------------------
+
+export interface TaggedMediaRowView {
+  mediaId: string;
+  ownerUsername: string | null;
+  caption: string | null;
+  permalink: string | null;
+  mediaType: string | null;
+  /** Provider-published time of the tagged media; null when not returned. */
+  takenAt: string | null;
+  /** When THIS deployment first observed the row. Never conflated with takenAt. */
+  observedAt: string;
+  confidence: string;
+  evidenceId: string | null;
+}
+
+export interface TaggedMediaResult {
+  target: Pick<ResolvedTarget, "id" | "username" | "status">;
+  rowCount: number;
+  /**
+   * How complete the most recent tags listing read was; null when no listing
+   * has ever been read. A PARTIAL listing must say so where the rows are.
+   */
+  listing: {
+    observedAt: string;
+    completion: string | null;
+    pages: number | null;
+    pageCap: number | null;
+  } | null;
+  rows: TaggedMediaRowView[];
+  truncated: boolean;
+  notes: string[];
+}
+
+export async function opTaggedMedia(
+  ctx: CliContext,
+  input: { target: string; limit?: number | undefined },
+): Promise<TaggedMediaResult> {
+  const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
+  const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
+  const [rows, listing] = await Promise.all([
+    listTaggedMedia(ctx.db, resolved.igAccountId, limit + 1),
+    latestTagsListingEvidence(ctx.db, resolved.igAccountId),
+  ]);
+  const truncated = rows.length > limit;
+  const notes = [
+    "Every row references media owned by ANOTHER account (the documented tags edge); these are never this account's own media.",
+    "First-observation-wins: a row absent from a later listing is never reported as removed.",
+    "The platform excludes media from private accounts from the tags edge.",
+  ];
+  if (listing !== null && listing.completion === "PARTIAL") {
+    notes.push(
+      "The most recent tags listing completed PARTIAL (capped or truncated): more tagged media may exist than the platform returned. A later scan extends the record.",
+    );
+  }
+  return {
+    target: { id: resolved.id, username: resolved.username, status: resolved.status },
+    rowCount: Math.min(rows.length, limit),
+    listing:
+      listing === null
+        ? null
+        : {
+            observedAt: listing.observedAt.toISOString(),
+            completion: listing.completion,
+            pages: listing.pages,
+            pageCap: listing.pageCap,
+          },
+    rows: rows.slice(0, limit).map((r) => ({
+      mediaId: r.mediaId,
+      ownerUsername: r.ownerUsername,
+      caption: r.caption,
+      permalink: r.permalink,
+      mediaType: r.mediaType,
+      takenAt: r.takenAt === null ? null : r.takenAt.toISOString(),
+      observedAt: r.observedAt.toISOString(),
+      confidence: r.confidence,
+      evidenceId: r.evidenceId,
+    })),
+    truncated,
     notes,
   };
 }
@@ -1356,6 +1458,112 @@ export async function opLookup(
     return asLookupResult(username, provider.sourceId, "discovery", probe);
   }
   return asLookupResult(username, provider.sourceId, "resolve", resolved);
+}
+
+// ---------------------------------------------------------------------------
+// mention read — one webhook-keyed mentioned comment, on demand (FOUNDING
+// §17). Stateless: nothing is persisted, mirroring the lookup/discovery split
+// (D53). The platform publishes no listing edge, so an id is required and the
+// answer is only about that id.
+// ---------------------------------------------------------------------------
+
+export interface MentionedCommentProbeResult {
+  /** The account the mention belongs to (the read is scoped to its node). */
+  account: string;
+  sourceId: string;
+  status: string;
+  confidence: string | null;
+  observedAt: string | null;
+  comment: unknown;
+  note: string | null;
+  error: { kind: string; message: string; retryable: boolean } | null;
+}
+
+/**
+ * Default the read's account to the deployment's single owned target. Several
+ * owned targets (or none) is an ambiguity the operator resolves explicitly,
+ * never a guess.
+ */
+async function resolveMentionAccount(
+  ctx: CliContext,
+  explicit: string | undefined,
+): Promise<string> {
+  const cleaned = explicit?.trim().replace(/^@/, "") ?? "";
+  if (cleaned !== "") return cleaned;
+  const owned = (await listTargetsForUser(ctx.db, ctx.userId)).filter(
+    (t) => t.observationMode === "OWNED",
+  );
+  const first = owned[0];
+  if (first === undefined) {
+    throw new UsageError(
+      "No owned target exists to attribute this read to. Pass --account <username>.",
+    );
+  }
+  if (owned.length > 1) {
+    throw new UsageError(
+      `This deployment tracks ${owned.length} owned accounts; pass --account <username> to name the account the mention belongs to.`,
+    );
+  }
+  return first.username;
+}
+
+function asMentionProbe(
+  account: string,
+  sourceId: string,
+  result: CapabilityResult<unknown>,
+): MentionedCommentProbeResult {
+  return {
+    account,
+    sourceId,
+    status: result.status,
+    confidence:
+      result.status === CapabilityStatus.ERROR ? null : (result.confidence as string),
+    observedAt: result.status === CapabilityStatus.ERROR ? null : result.observedAt,
+    comment:
+      result.status === CapabilityStatus.AVAILABLE || result.status === CapabilityStatus.PARTIAL
+        ? result.data
+        : null,
+    note: result.note ?? null,
+    error:
+      result.error === undefined
+        ? null
+        : {
+            kind: result.error.kind,
+            message: result.error.message,
+            retryable: result.error.retryable,
+          },
+  };
+}
+
+export async function opMentionedCommentProbe(
+  ctx: CliContext,
+  input: { commentId: string; account?: string | undefined },
+): Promise<MentionedCommentProbeResult> {
+  const commentId = input.commentId.trim();
+  if (commentId === "") {
+    throw new UsageError(
+      "A comment id is required — it arrives in the app's webhook notification payload.",
+    );
+  }
+  const provider = ctx.provider.provider;
+  if (provider === null) {
+    throw new CliError(
+      "PROVIDER_UNAVAILABLE",
+      `Provider "${ctx.provider.name}" is not usable: ${ctx.provider.error ?? "unknown reason"}`,
+      3,
+    );
+  }
+  const account = await resolveMentionAccount(ctx, input.account);
+  // The read is scoped to the account's node: resolve first so a username this
+  // provider cannot observe is refused here, with the provider's own reason,
+  // instead of being attributed to an account that was never checked.
+  const resolved = await provider.resolveAccount(account);
+  if (resolved.status !== CapabilityStatus.AVAILABLE || resolved.data === undefined) {
+    return asMentionProbe(account, provider.sourceId, resolved);
+  }
+  const result: CapabilityResult<NormalizedMentionedComment> =
+    await provider.getMentionedComment(resolved.data, commentId);
+  return asMentionProbe(account, provider.sourceId, result);
 }
 
 // ---------------------------------------------------------------------------

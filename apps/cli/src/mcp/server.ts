@@ -11,10 +11,12 @@ import {
   opEvidence,
   opInsights,
   opLookup,
+  opMentionedCommentProbe,
   opRelationships,
   opScanList,
   opScanRun,
   opStatus,
+  opTaggedMedia,
   opTargetAdd,
   opTargetList,
   opTargetRemove,
@@ -41,7 +43,7 @@ const INSTRUCTIONS = `IGTrack is an evidence-first observation engine for Instag
 How to use these tools:
 1. Call \`igtrack_status\` first. It names the active provider and whether data is synthetic.
 2. \`igtrack_scans_run\` only QUEUES work. \`igtrack_work\` executes it. Nothing is observed until a worker runs.
-3. Read with \`igtrack_activity\`, \`igtrack_relationships\`, \`igtrack_insights\`, \`igtrack_evidence\`. Every row carries its source id, confidence, and evidence id — quote them when you report a claim.
+3. Read with \`igtrack_activity\`, \`igtrack_relationships\`, \`igtrack_insights\`, \`igtrack_tags\`, \`igtrack_evidence\`. Every row carries its source id, confidence, and evidence id — quote them when you report a claim.
 4. \`igtrack_dossier\` is the read-back of everything recorded about ONE account, including per-capability coverage and the gaps. Use it instead of assembling a profile from several calls.
 5. \`igtrack_capabilities\` lists what can and cannot be observed, with the reason. Never present an unavailable capability as a zero/empty result.
 
@@ -468,6 +470,59 @@ export function buildServer(): McpServer {
     async (args) =>
       guarded(async () =>
         withContext(async (ctx) => withMeta(ctx, await opLookup(ctx, { username: args.username }))),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_tags",
+    {
+      title: "Tagged media",
+      description:
+        "Media owned by OTHER accounts in which a tracked account was tagged, read back from what TAGS_SCAN recorded via the documented IG User tags edge. Rows are references to other accounts' media — never this account's own posts — and are first observations: a row absent from a later listing is never reported as removed. The completeness of the most recent listing read (COMPLETE or PARTIAL) is returned with the rows, and the platform excludes media from private accounts. Read-only: nothing is fetched.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        target: z.string().describe("Target id or username"),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(ctx, await opTaggedMedia(ctx, { target: args.target, limit: args.limit })),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_mention_read",
+    {
+      title: "Read one mentioned comment",
+      description:
+        "Read ONE mentioned comment (@mention of the owned account on another account's media) by its id, persisting nothing. The platform publishes no listing edge for these: ids arrive through Meta webhook notifications, and the documented read answers only for ids the app already holds. A comment id the platform does not recognize answers UNAVAILABLE with the platform's reason — which never means \"no mention exists\". Reading a media whose comments are disabled returns that error with its reason. Nothing is written.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        commentId: z
+          .string()
+          .describe("Comment id from the app's webhook notification payload"),
+        account: z
+          .string()
+          .optional()
+          .describe(
+            "The account the mention belongs to; defaults to this deployment's single owned target",
+          ),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(
+            ctx,
+            await opMentionedCommentProbe(ctx, {
+              commentId: args.commentId,
+              account: args.account,
+            }),
+          ),
+        ),
       ),
   );
 

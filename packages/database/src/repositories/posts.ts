@@ -92,6 +92,9 @@ export async function recordPost(
         ...(post.permalink !== undefined ? { permalink: post.permalink } : {}),
         ...(post.likeCount !== undefined ? { likeCount: post.likeCount } : {}),
         ...(post.commentCount !== undefined ? { commentCount: post.commentCount } : {}),
+        // FOUNDING §17: a provider-supplied repost count is stored when it
+        // arrived — absence stays absent (null), never zero.
+        ...(post.repostsCount !== undefined ? { repostsCount: post.repostsCount } : {}),
         ...(post.mediaType !== undefined ? { mediaType: post.mediaType } : {}),
         ...(post.mediaProductType !== undefined
           ? { mediaProductType: post.mediaProductType }

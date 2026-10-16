@@ -2,6 +2,11 @@
   "name": "igtrack",
   "private": true,
   "version": "0.1.0",
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AswinJava/igtrack.git"
+  },
   "type": "module",
   "description": "Evidence-driven public Instagram monitoring and relationship intelligence platform",
   "packageManager": "pnpm@11.21.0",

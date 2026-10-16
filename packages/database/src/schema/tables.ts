@@ -370,6 +370,10 @@ export const posts = pgTable(
     permalink: text("permalink"),
     likeCount: integer("like_count"),
     commentCount: integer("comment_count"),
+    // Documented IG Media reposts_count (top-level media only) when a provider
+    // returned it. NULL = not returned (never requested, owner disabled
+    // reposts display, or a carousel child) — never zero-filled (FOUNDING §17).
+    repostsCount: integer("reposts_count"),
     // Provider-declared media typing (IMAGE/VIDEO/CAROUSEL) and raw product
     // classifier (FEED/REELS/...) — null when the provider did not declare it.
     mediaType: text("media_type"),
@@ -525,6 +529,53 @@ export const postChanges = pgTable(
       table.detectedAt,
     ),
     index("post_changes_target_time_idx").on(table.targetId, table.detectedAt),
+  ],
+);
+
+// FOUNDING §17: the documented IG User `tags` edge — media owned by OTHER
+// accounts in which this account was tagged. Append-only references with
+// first-observation-wins semantics: one row per (account, media, source), and
+// deliberately NO removal claim — another account's edit history is not an
+// observation stream. A tag row is never rendered as this account's own
+// media and never diffed against the posts table.
+export const taggedMedia = pgTable(
+  "tagged_media",
+  {
+    id: uuid(),
+    igAccountId: text("ig_account_id")
+      .notNull()
+      .references(() => igAccounts.id, { onDelete: "restrict" }),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => sources.id, { onDelete: "restrict" }),
+    mediaId: text("media_id").notNull(),
+    // Owner of the tagged media (the tagging account), when returned.
+    ownerUsername: text("owner_username"),
+    caption: text("caption"),
+    // Provider-supplied permalink of the tagged media; rendered only as a
+    // user-initiated outbound link behind an http(s) guard (no server fetch).
+    permalink: text("permalink"),
+    mediaType: text("media_type"),
+    // Provider-published time of the tagged media; NULL when not returned.
+    // Distinct from observed_at: "published then" is not "seen then".
+    takenAt: timestamptz("taken_at"),
+    observedAt: timestamptz("observed_at").notNull(),
+    confidence: confidenceLevelEnum("confidence").notNull(),
+    evidenceId: text("evidence_id").references(() => evidence.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("tagged_media_idempotency_idx").on(
+      table.igAccountId,
+      table.mediaId,
+      table.sourceId,
+    ),
+    index("tagged_media_account_time_idx").on(
+      table.igAccountId,
+      table.observedAt,
+    ),
   ],
 );
 

@@ -6,6 +6,8 @@
 // `documented` cites the Meta IG Platform reference as of v21.0–v26.0.
 // Statuses:
 //   MAPPED — requested, normalized, persisted, displayed.
+//   READ_THROUGH — requested and mapped to a normalized slot, but delivered to
+//     the caller only: a stateless probe persists nothing by design (D53).
 //   INTENTIONALLY_IGNORED — exposed but deliberately not stored, with reason.
 //   PROVIDER_ABSENT — no documented field/edge exposes it; never inferred.
 //   UNVERIFIED — documented with availability caveats; requesting it blind
@@ -16,12 +18,15 @@ import {
   GRAPH_CHILD_FIELDS,
   GRAPH_COMMENT_FIELDS,
   GRAPH_MEDIA_FIELDS,
+  GRAPH_MENTIONED_COMMENT_FIELDS,
   GRAPH_PROFILE_FIELDS,
   GRAPH_STORY_FIELDS,
+  GRAPH_TAG_FIELDS,
 } from "./graph-provider.js";
 
 export const FieldCoverageStatus = {
   MAPPED: "MAPPED",
+  READ_THROUGH: "READ_THROUGH",
   INTENTIONALLY_IGNORED: "INTENTIONALLY_IGNORED",
   PROVIDER_ABSENT: "PROVIDER_ABSENT",
   UNVERIFIED: "UNVERIFIED",
@@ -36,6 +41,8 @@ export type FieldCoverageArea =
   | "children"
   | "comments"
   | "stories"
+  | "tags"
+  | "mentions"
   | "rosters"
   | "highlights"
   | "likes"
@@ -64,6 +71,8 @@ export const REQUESTED_FIELDS_BY_AREA: Record<string, string> = {
   children: GRAPH_CHILD_FIELDS,
   comments: GRAPH_COMMENT_FIELDS,
   stories: GRAPH_STORY_FIELDS,
+  tags: GRAPH_TAG_FIELDS,
+  mentions: GRAPH_MENTIONED_COMMENT_FIELDS,
 };
 
 const IG_USER = "Meta IG User reference (v21.0–v26.0)";
@@ -71,6 +80,8 @@ const IG_MEDIA = "Meta IG Media reference (v21.0–v26.0)";
 const IG_COMMENT = "Meta IG Comment reference (v25.0–v26.0)";
 const IG_STORIES = "Meta Stories edge reference (2026-08)";
 const IG_USER_MEDIA = "Meta IG User Media reference (2026-08)";
+const IG_TAGS = "Meta IG User tags edge reference (read 2026-10-16)";
+const IG_MENTIONED = "Meta Mentioned Comment reference (read 2026-10-16)";
 
 export const GRAPH_FIELD_COVERAGE: readonly FieldCoverageRow[] = [
   // ---- profile (GET /{ig-user-id}) ----
@@ -107,7 +118,7 @@ export const GRAPH_FIELD_COVERAGE: readonly FieldCoverageRow[] = [
   { area: "media", graphField: "media_audio_type", documented: true, docsRef: IG_MEDIA, requested: false, status: "INTENTIONALLY_IGNORED", reason: "No model slot; low monitoring signal. Unlock: trivial." },
   { area: "media", graphField: "alt_text", documented: true, docsRef: IG_MEDIA, requested: false, status: "INTENTIONALLY_IGNORED", reason: "Accessibility text; no model slot. Unlock: trivial." },
   { area: "media", graphField: "view_count", documented: true, docsRef: IG_MEDIA, requested: false, status: "INTENTIONALLY_IGNORED", reason: "Reels-only and availability varies; like/comment counts already cover engagement metadata. Unlock: live verification." },
-  { area: "media", graphField: "reposts_count", documented: true, docsRef: IG_MEDIA, requested: false, status: "UNVERIFIED", reason: "Documented but top-level-only, owner-gated, and unverified under this integration's credentials; a bad field fails the whole listing. Unlock: live verification, then a nullable column plus first-class reshare relationship." },
+  { area: "media", graphField: "reposts_count", documented: true, docsRef: IG_MEDIA, requested: false, mappedTo: "repostsCount", persistedIn: ["posts"], displayedIn: ["media", "dossier"], status: "UNVERIFIED", reason: "Owner-gated and unverified under this integration's credentials; a bad field fails the whole listing, so it is not in GRAPH_MEDIA_FIELDS yet. The nullable posts.reposts_count column exists and normalizes the field whenever a provider returns it (fixtures do). Unlock: the single-node probe in scripts/verify-graph-provider.ts (media.reposts_count), then move the field into the requested set; a first-class reshare relationship comes after that." },
   { area: "media", graphField: "shares_count", documented: true, docsRef: IG_MEDIA, requested: false, status: "UNVERIFIED", reason: "Same caveats as reposts_count. Unlock: live verification." },
   { area: "media", graphField: "saved_count", documented: true, docsRef: IG_MEDIA, requested: false, status: "UNVERIFIED", reason: "Same caveats as reposts_count. Unlock: live verification." },
   { area: "media", graphField: "total_like_count", documented: true, docsRef: IG_MEDIA, requested: false, status: "UNVERIFIED", reason: "Aggregated (ads-inclusive) variant; same verification caveats. Unlock: live verification." },
@@ -141,6 +152,20 @@ export const GRAPH_FIELD_COVERAGE: readonly FieldCoverageRow[] = [
   { area: "stories", graphField: "user_tags (read)", documented: false, docsRef: IG_USER_MEDIA, requested: false, status: "PROVIDER_ABSENT", reason: "user_tags is a publish-time parameter only; no read field exposes story stickers, mentions, polls, questions, locations, music, or links. The fixture path implements the full pipeline synthetically; graph stays degraded." },
   { area: "stories", graphField: "expiry", documented: false, docsRef: IG_STORIES, requested: false, status: "PROVIDER_ABSENT", reason: "No expiry field; the 24h rule is documented behavior and lifetime derives from sightings (first/last seen)." },
   { area: "stories", graphField: "reshared stories", documented: true, docsRef: IG_STORIES, requested: false, status: "PROVIDER_ABSENT", reason: "Documented limitation: stories created by reshare are not returned." },
+  // ---- tags (GET /{ig-user-id}/tags; media by other accounts) ----
+  { area: "tags", graphField: "id", documented: true, docsRef: IG_TAGS, requested: true, mappedTo: "mediaId", persistedIn: ["taggedMedia"], displayedIn: ["tags"], status: "MAPPED", reason: "Media identity; append-only rows keyed (account, media, source), first-observation-wins." },
+  { area: "tags", graphField: "username", documented: true, docsRef: IG_TAGS, requested: true, mappedTo: "ownerUsername", persistedIn: ["taggedMedia"], displayedIn: ["tags"], status: "MAPPED", reason: "The tagging account (the media owner); rows are never rendered as the tracked account's own media (FOUNDING §17)." },
+  { area: "tags", graphField: "caption", documented: true, docsRef: IG_TAGS, requested: true, mappedTo: "caption", persistedIn: ["taggedMedia"], displayedIn: ["tags"], status: "MAPPED", reason: "Reference copy at first observation: later edits on another account's media are not an observation stream this product consumes." },
+  { area: "tags", graphField: "permalink", documented: true, docsRef: IG_TAGS, requested: true, mappedTo: "permalink", persistedIn: ["taggedMedia"], displayedIn: ["tags"], status: "MAPPED", reason: "Outbound link behind the same http(s) guard as posts." },
+  { area: "tags", graphField: "media_type", documented: true, docsRef: IG_TAGS, requested: true, mappedTo: "mediaType", persistedIn: ["taggedMedia"], displayedIn: ["tags"], status: "MAPPED", reason: "IMAGE/VIDEO/CAROUSEL_ALBUM mapped; unknown tokens stay UNKNOWN." },
+  { area: "tags", graphField: "timestamp", documented: true, docsRef: IG_TAGS, requested: true, mappedTo: "takenAt", persistedIn: ["taggedMedia"], displayedIn: ["tags"], status: "MAPPED", reason: "The media's publish time; kept distinct from our first observation." },
+  // ---- mentions (GET /{ig-user-id}?fields=mentioned_comment...) ----
+  { area: "mentions", graphField: "id", documented: true, docsRef: IG_MENTIONED, requested: true, mappedTo: "commentId", status: "READ_THROUGH", reason: "The webhook-supplied comment id, echoed back by the platform. The read is stateless: nothing is persisted (D53)." },
+  { area: "mentions", graphField: "text", documented: true, docsRef: IG_MENTIONED, requested: true, mappedTo: "text", status: "READ_THROUGH", reason: "Comment body, returned verbatim; never stored." },
+  { area: "mentions", graphField: "timestamp", documented: true, docsRef: IG_MENTIONED, requested: true, mappedTo: "createdAt", status: "READ_THROUGH", reason: "Provider-verbatim time; the reference's format is not guaranteed strict ISO 8601, so it is never re-rendered as one." },
+  { area: "mentions", graphField: "like_count", documented: true, docsRef: IG_MENTIONED, requested: true, mappedTo: "likeCount", status: "READ_THROUGH", reason: "Documented as String, sample shows a number: both accepted, a non-numeric string stays absent, never 0." },
+  { area: "mentions", graphField: "media", documented: true, docsRef: IG_MENTIONED, requested: true, mappedTo: "mediaId", status: "READ_THROUGH", reason: "The media the comment sits on, as a node reference (string or {id}). No further read is issued from it — the platform id is never a lookup key (D44)." },
+  { area: "mentions", graphField: "mentioned_media", documented: true, docsRef: IG_MENTIONED, requested: false, status: "UNVERIFIED", reason: "Same webhook-keyed shape as mentioned_comment but for tags of the owned account on other media. Recorded as a candidate only: not built, nothing requested. Unlock: webhook subscription plus live verification." },
   // ---- structural absences (no documented edge at all) ----
   { area: "rosters", graphField: "followers/following list edges", documented: false, docsRef: IG_USER, requested: false, status: "PROVIDER_ABSENT", reason: "The exhaustive IG User edge list contains no roster edge. Counts via profile only; the diff engine activates if a lawful list ever appears." },
   { area: "highlights", graphField: "highlights edge", documented: false, docsRef: IG_USER, requested: false, status: "PROVIDER_ABSENT", reason: "The exhaustive IG User edge list contains no highlights edge. The only known alternative is the undocumented private reels_media endpoint, which is forbidden." },
@@ -175,6 +200,8 @@ export const COVERAGE_AREA_BY_CAPABILITY: Record<string, FieldCoverageArea> = {
   getPostChildren: "children",
   getPublicComments: "comments",
   getStories: "stories",
+  getTags: "tags",
+  getMentionedComment: "mentions",
 };
 
 function normalizedKeyOf(mappedTo: string): string {
@@ -188,7 +215,11 @@ export function coverageKeysForArea(
 ): Set<string> {
   const keys = new Set<string>();
   for (const row of GRAPH_FIELD_COVERAGE) {
-    if (row.area !== area || row.status !== "MAPPED") continue;
+    // READ_THROUGH rows (stateless probes) still name a normalized slot: the
+    // drift guard must know those keys too, or a probe's field would read as
+    // unmapped the moment it is added.
+    if (row.area !== area) continue;
+    if (row.status !== "MAPPED" && row.status !== "READ_THROUGH") continue;
     if (keySpace === "provider") {
       keys.add(row.graphField);
     } else if (row.mappedTo !== undefined) {

@@ -23,6 +23,8 @@ export interface StubConfig {
   getFollowers?: () => Promise<CapabilityResult<NormalizedFollowPage>>;
   getFollowing?: () => Promise<CapabilityResult<NormalizedFollowPage>>;
   getPostChildren?: () => Promise<CapabilityResult<NormalizedPostChild[]>>;
+  getTags?: InstagramProvider["getTags"];
+  getMentionedComment?: InstagramProvider["getMentionedComment"];
   getAccountInsights?: () => Promise<CapabilityResult<NormalizedInsightSet>>;
   discoverAccount?: () => Promise<CapabilityResult<NormalizedDiscoveredAccount>>;
 }
@@ -50,6 +52,8 @@ export function stubSource(config: StubConfig = {}): ExecutionSource {
       getPublicPosts: true,
       getPublicComments: true,
       getPostChildren: true,
+      getTags: false,
+      getMentionedComment: false,
       getAccountInsights: true,
       discoverAccount: false,
       ...config.capabilities,
@@ -90,6 +94,16 @@ export function stubSource(config: StubConfig = {}): ExecutionSource {
       config.getPostChildren ??
       (async () => {
         throw new Error("stub: getPostChildren not wired");
+      }),
+    getTags:
+      config.getTags ??
+      (async () => {
+        throw new Error("stub: getTags not wired");
+      }),
+    getMentionedComment:
+      config.getMentionedComment ??
+      (async () => {
+        throw new Error("stub: getMentionedComment not wired");
       }),
     getAccountInsights:
       config.getAccountInsights ??

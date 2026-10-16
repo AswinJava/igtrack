@@ -4,12 +4,16 @@ import {
   type MediaType,
   type NormalizedComment,
   type NormalizedFollowPage,
+  type NormalizedMentionedComment,
   type NormalizedPost,
+  type NormalizedTagPage,
 } from "@igtrack/core";
 import type {
   RawCommentsPageV1,
   RawFollowPageV1,
+  RawMentionedCommentV1,
   RawPostsPageV1,
+  RawTagsPageV1,
 } from "../raw-schemas/v1.js";
 
 export function normalizeFollowPage(raw: RawFollowPageV1): NormalizedFollowPage {
@@ -37,6 +41,7 @@ export function normalizePosts(raw: RawPostsPageV1): NormalizedPost[] {
     ...(p.caption !== undefined ? { caption: p.caption } : {}),
     ...(p.like_count !== undefined ? { likeCount: p.like_count } : {}),
     ...(p.comment_count !== undefined ? { commentCount: p.comment_count } : {}),
+    ...(p.reposts_count !== undefined ? { repostsCount: p.reposts_count } : {}),
     ...(p.media_type !== undefined
       ? { mediaType: mapRawMediaType(p.media_type) }
       : {}),
@@ -79,4 +84,52 @@ export function normalizeComments(raw: RawCommentsPageV1): NormalizedComment[] {
       observedAt: raw.captured_at,
     },
   }));
+}
+
+// Tagged media (IG User `tags` edge). Per-item confidence is HIGH wherever the
+// provider returned the row — completeness is a PAGE-level fact and travels in
+// `complete`, so a partial listing can never masquerade as a complete one.
+export function normalizeTagPage(raw: RawTagsPageV1): NormalizedTagPage {
+  return {
+    items: raw.tags.map((t) => ({
+      mediaId: t.id,
+      ...(t.username !== undefined ? { ownerUsername: t.username } : {}),
+      ...(t.caption !== undefined ? { caption: t.caption } : {}),
+      ...(t.permalink !== undefined ? { permalink: t.permalink } : {}),
+      ...(t.media_type !== undefined
+        ? { mediaType: mapRawMediaType(t.media_type) }
+        : {}),
+      ...(t.taken_at !== undefined ? { takenAt: t.taken_at } : {}),
+      meta: {
+        category: ObservationCategory.OBSERVED,
+        confidence: Confidence.HIGH,
+        observedAt: raw.captured_at,
+      },
+    })),
+    ...(raw.next_cursor !== null ? { nextCursor: raw.next_cursor } : {}),
+    complete: raw.next_cursor === null,
+    meta: {
+      category: ObservationCategory.OBSERVED,
+      confidence: raw.next_cursor === null ? Confidence.HIGH : Confidence.MEDIUM,
+      observedAt: raw.captured_at,
+    },
+  };
+}
+
+export function normalizeMentionedComment(
+  raw: RawMentionedCommentV1,
+  capturedAt: string,
+): NormalizedMentionedComment {
+  return {
+    commentId: raw.id,
+    text: raw.text,
+    createdAt: raw.created_at,
+    ...(raw.like_count !== undefined ? { likeCount: raw.like_count } : {}),
+    ...(raw.media_id !== undefined ? { mediaId: raw.media_id } : {}),
+    meta: {
+      category: ObservationCategory.OBSERVED,
+      confidence: Confidence.HIGH,
+      observedAt: capturedAt,
+    },
+  };
 }

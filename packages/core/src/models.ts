@@ -151,6 +151,45 @@ export interface NormalizedPost {
    * distinction.
    */
   children?: NormalizedPostChild[];
+  /**
+   * IG Media `reposts_count` when the provider returned it. Documented as a
+   * top-level-only, owner-gated scalar (carousel children never carry it, and
+   * a media owner can disable reposts/shares display, in which case the
+   * platform omits or zeroes it). Absent means the provider did not return a
+   * value — never zero-filled, never inferred from similar-looking content.
+   */
+  repostsCount?: number;
+  meta: ObservationMeta;
+}
+
+// ---------------------------------------------------------------------------
+// Tagged media (documented IG User `tags` edge). Media owned by OTHER accounts
+// in which the observed account was tagged. A reference, not the account's
+// media: never diffed against posts and never rendered as "the account's
+// posts". Provider-verbatim fields; a field the platform withheld stays
+// absent (FOUNDING §17).
+// ---------------------------------------------------------------------------
+
+export interface NormalizedTaggedMedia {
+  /** Provider media id of the media the account was tagged in. */
+  mediaId: string;
+  /** Owner of that media (the tagging account) when the provider returned it. */
+  ownerUsername?: string;
+  caption?: string;
+  /** Full provider-supplied permalink; never reconstructed or guessed. */
+  permalink?: string;
+  /** Provider-declared media typing; absent means the provider did not say. */
+  mediaType?: MediaType;
+  /** Provider-published time of the tagged media, when returned. */
+  takenAt?: string;
+  meta: ObservationMeta;
+}
+
+export interface NormalizedTagPage {
+  items: NormalizedTaggedMedia[];
+  nextCursor?: string;
+  /** True when the provider declares the listing complete (no further pages). */
+  complete: boolean;
   meta: ObservationMeta;
 }
 
@@ -175,6 +214,22 @@ export interface NormalizedComment {
   // Provider-supplied like count on the comment (IG Comment like_count).
   // Absent when the provider omits it (hidden counts, no permission) — never zero-filled.
   likeCount?: number;
+  meta: ObservationMeta;
+}
+
+// The documented IG User `mentioned_comment` field expansion: one comment on
+// someone else's media in which the observed account was @mentioned. The
+// platform publishes no listing edge — the comment id arrives via Meta
+// webhook notifications — so this model is only ever produced for a caller-
+// supplied id. Only the documented fields exist here; no author is returned
+// by the expansion, so none is invented.
+export interface NormalizedMentionedComment {
+  commentId: string;
+  text?: string;
+  createdAt?: string;
+  likeCount?: number;
+  /** Id of the media the comment was made on, when returned. */
+  mediaId?: string;
   meta: ObservationMeta;
 }
 

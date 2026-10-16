@@ -8,6 +8,7 @@ import {
   CapabilityErrorKind,
   isRetryableCapabilityKind,
   type CapabilityResult,
+  type Cursor,
   type InstagramProvider,
   type NormalizedAccountRef,
   type NormalizedProfile,
@@ -16,6 +17,8 @@ import {
   type NormalizedComment,
   type NormalizedDiscoveredAccount,
   type NormalizedStory,
+  type NormalizedTaggedMedia,
+  type NormalizedTagPage,
   type NormalizedInsightSet,
 } from "@igtrack/core";
 import {
@@ -32,6 +35,7 @@ import {
   recordPostComment,
   recordPostPresence,
   finalizePostPresence,
+  recordTaggedMedia,
   recordInsightSet,
   latestFollowSnapshot,
   persistFollowDiff,
@@ -1009,6 +1013,158 @@ export async function runStoryScan(
     return "succeeded-empty";
   }
   return completion === "PARTIAL" ? "succeeded-partial" : "succeeded";
+}
+
+// ---------------------------------------------------------------------------
+// TAGS_SCAN (FOUNDING §17)
+//
+// The documented IG User `tags` edge of the OWNED account: media owned by
+// OTHER accounts in which this account was tagged. A reference listing — rows
+// are append-only first-observations, never diffed against the posts table,
+// never rendered as the account's own media, and no removal is ever claimed
+// (another account's edit history is not an observation stream). Pages resume
+// via CapabilityResult.nextCursor under a hard page cap; a capped or truncated
+// listing reports PARTIAL and records that fact in the evidence metadata, so
+// it can never read as "these are all the tags".
+// ---------------------------------------------------------------------------
+
+const TAGS_MAX_PAGES = 25;
+
+export async function runTagsScan(
+  db: Database,
+  job: JobRecord,
+  src: ExecutionSource,
+): Promise<JobResult> {
+  const { account, target } = await loadAccountForTarget(db, job);
+  const source = src.source;
+
+  // Execute-time mode guard (D47): the queue refuses an owned kind for a
+  // DISCOVERY target; a mode that changed after enqueue must not let this
+  // scan run under the wrong contract.
+  if (target.observationMode !== "OWNED") {
+    throw new JobExecutionError(
+      `TAGS_SCAN requires an OWNED target; @${account.username} is observed as DISCOVERY`,
+      { retryable: false },
+    );
+  }
+
+  const caps = src.provider.capabilities();
+  if (caps.getTags !== true) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "getTags",
+      coverageNote: "Provider declares the getTags capability unavailable.",
+    });
+    return "unavailable";
+  }
+
+  const scanObservedAt = new Date(job.startedAt ?? Date.now());
+  const items: NormalizedTaggedMedia[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: Cursor | undefined;
+  let pages = 0;
+  let complete = false;
+  let capped = false;
+
+  for (;;) {
+    const page: CapabilityResult<NormalizedTagPage> = await providerCall(
+      db,
+      source,
+      "getTags",
+      () => src.provider.getTags(accountRef(account), cursor),
+    );
+
+    if (page.status === CapabilityStatus.UNAVAILABLE) {
+      if (pages === 0 && items.length === 0) {
+        // A structural absence, not an empty listing: nothing is stored.
+        await markCapabilityUnavailable(db, {
+          source,
+          capability: "getTags",
+          coverageNote: page.note ?? "Tags unavailable from this source.",
+        });
+        return "unavailable";
+      }
+      // The tail of the listing is unavailable; what was read is still real.
+      break;
+    }
+
+    if (page.status === CapabilityStatus.ERROR) {
+      // Throw (retryable per kind) instead of storing a half listing: the
+      // edge is bounded and rows are idempotent, so a clean retry re-lists
+      // from scratch.
+      const err = page.error;
+      await recordCapabilityFailure(db, {
+        source,
+        capability: "getTags",
+        reason: err?.message ?? "Provider error",
+        errorCategory: err?.kind ?? "INTERNAL",
+      });
+      throw new JobExecutionError(err?.message ?? "Provider error", {
+        kind: err?.kind ?? "INTERNAL",
+        retryable: resolvedRetryable(err),
+        ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+      });
+    }
+
+    if (page.data !== undefined) items.push(...page.data.items);
+    pages += 1;
+
+    if (page.status === CapabilityStatus.AVAILABLE) {
+      complete = true;
+      break;
+    }
+
+    const next = page.nextCursor;
+    if (next === undefined || seenCursors.has(next)) {
+      // PARTIAL without a usable (or with a repeating) cursor: stop, and the
+      // evidence says PARTIAL.
+      break;
+    }
+    if (pages >= TAGS_MAX_PAGES) {
+      capped = true;
+      break;
+    }
+    seenCursors.add(next);
+    cursor = { value: next };
+    await renewLease(db, job);
+  }
+
+  const completion = complete ? "COMPLETE" : "PARTIAL";
+  if (items.length > 0) {
+    const evidence = evidenceFrom(
+      source,
+      "tagged_media_listing",
+      `tagged_media:${account.username}@${scanObservedAt.toISOString()}`,
+      {
+        observedAt: scanObservedAt.toISOString(),
+        confidence: complete ? Confidence.HIGH : Confidence.MEDIUM,
+        ref: account.username,
+      },
+      { items },
+      {
+        completion,
+        pages,
+        jobId: job.id,
+        ...(capped ? { pageCap: TAGS_MAX_PAGES } : {}),
+      },
+    );
+    await recordTaggedMedia(db, {
+      owner: accountRef(account),
+      sourceId: source.id,
+      evidence,
+      tags: items,
+    });
+  }
+
+  await recordCapabilitySuccess(db, { source, capability: "getTags" });
+
+  if (!complete) return "succeeded-partial";
+  if (items.length === 0) {
+    // AVAILABLE + zero tags is an honest positive observation of absence —
+    // never conflated with UNAVAILABLE.
+    return "succeeded-empty";
+  }
+  return "succeeded";
 }
 
 // ---------------------------------------------------------------------------

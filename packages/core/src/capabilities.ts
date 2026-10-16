@@ -20,6 +20,8 @@ export const RegistryCapabilityId = {
   STORY_METADATA: "STORY_METADATA",
   STORY_MENTIONS: "STORY_MENTIONS",
   MENTION_INTELLIGENCE: "MENTION_INTELLIGENCE",
+  TAGS: "TAGS",
+  MENTIONED_COMMENTS: "MENTIONED_COMMENTS",
   HIGHLIGHTS: "HIGHLIGHTS",
   POSTS: "POSTS",
   REELS: "REELS",
@@ -31,6 +33,7 @@ export const RegistryCapabilityId = {
   LIKES: "LIKES",
   INTERACTIONS: "INTERACTIONS",
   REPOSTS: "REPOSTS",
+  RESHARES: "RESHARES",
   MEDIA: "MEDIA",
 } as const;
 
@@ -195,6 +198,48 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
       "Aggregation is pure and covered by packages/core/test/mention-intelligence.test.ts; the fixture path exercises the full pipeline end to end. The underlying mentions are provider-exposed only — the Graph read path has no story-mention field (see STORY_MENTIONS), so live data yields no mentions by provider design, and this roll-up can only ever surface what a provider actually exposed.",
   },
   {
+    id: "TAGS",
+    label: "Tagged media (media owned by others in which the account is tagged)",
+    providerMethods: ["getTags"],
+    permissions:
+      "Owned account only; the documented IG User tags edge. Media from private accounts are excluded by the platform, and the edge is subject to Platform Rate Limits.",
+    persistence: ["taggedMedia", "evidence"],
+    ui: [
+      "igtrack tags (CLI)",
+      "igtrack_tags (MCP tool)",
+      "dossier counts (taggedMedia)",
+      "activity timeline (TAG_OBSERVED)",
+    ],
+    howItWorks:
+      "TAGS_SCAN pages the documented tags edge (cursor paging, hard page cap, lease renewal between pages) and stores one append-only row per (account, media, source) with first-observation-wins semantics: a re-scan never rewrites a stored observation, no removal is ever claimed (another account's edit history is not an observation stream), and the rows are never rendered as the account's own media nor diffed against the posts table. Each scan records one scan-keyed evidence row carrying the completeness of that listing; a capped or truncated listing completes PARTIAL and says so — never 'these are all the tags'. The tags edge is a reference listing: it answers 'this account appears tagged in that media', which is a fact about the media owner as much as about this account.",
+    whyUnavailable: null,
+    unlock:
+      "Live verification of the tags edge under this integration's credentials; the pipeline, table, scan kind, and CLI are already in place.",
+    liveState: "NOT_VERIFIED",
+    liveEvidence:
+      "Fixture v1 implements the full pipeline synthetically (tagged-media listing, idempotent re-scan, PARTIAL on truncation). Request shape is docs-pinned (Meta tags reference, read 2026-10-16): GET /{ig-user-id}/tags with documented media fields, no limit parameter (the reference documents cursor paging only), private media excluded by the platform. No credentials in this environment, so the live edge has never been observed.",
+  },
+  {
+    id: "MENTIONED_COMMENTS",
+    label: "Mentioned comments (@mentions of the owned account on other media)",
+    providerMethods: ["getMentionedComment"],
+    permissions:
+      "Owned account; the documented mentioned_comment read. The platform publishes no listing edge — comment ids arrive through Meta webhook notifications — so the read answers only for ids this app already holds. The call errors when comments are disabled on the underlying media.",
+    persistence: [],
+    ui: [
+      "igtrack mention <id> (CLI)",
+      "igtrack_mention_read (MCP tool)",
+    ],
+    howItWorks:
+      "An on-demand, stateless single read: the operator supplies a comment id (from the app's webhook notification payload), the provider expands mentioned_comment.comment_id(<id>){id,text,timestamp,like_count,media} on the documented IG User node, and the normalized comment is returned without persisting anything — a probe is not a claim of record, mirroring the DISCOVERY lookup split (D53). There is deliberately no stored mentions table: the platform delivers these ids through the webhook channel, not a pollable edge, and manufacturing a listing from re-probing ids would present a feed that does not exist.",
+    whyUnavailable: null,
+    unlock:
+      "A Meta webhook subscription on the comments field (the ids' only lawful source) plus live verification under this integration's credentials; the read and CLI/MCP surfaces are already in place. Until then the probe answers UNAVAILABLE with its reason for any id, and nothing is stored.",
+    liveState: "NOT_VERIFIED",
+    liveEvidence:
+      "Request shape is docs-pinned (Meta Mentioned Comment reference, read 2026-10-16): fields id, text, timestamp, like_count, media; the comment id is required and documented as arriving in webhook notification payloads; the read errors when comments are disabled on the underlying media. No credentials in this environment, so the live read has never been observed.",
+  },
+  {
     id: "HIGHLIGHTS",
     label: "Story highlights",
     providerMethods: [],
@@ -353,20 +398,37 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
   },
   {
     id: "REPOSTS",
-    label: "Reposts and reshares",
+    label: "Repost count metadata",
+    providerMethods: ["getPublicPosts"],
+    permissions:
+      "reposts_count is a documented IG Media scalar, top-level media only; the owner can hide counts.",
+    persistence: ["posts"],
+    ui: ["/targets/[id] (content tab, repost count where the provider returned one)"],
+    howItWorks:
+      "Parse-when-present (FOUNDING §17): a reposts_count returned by any provider is stored on the post row under the same first-observation semantics as like and comment counts — absent stays absent, never zero-filled. No reshare relationship is ever inferred, and a post is never classified a repost without evidence; naming repost actors is a separate, structurally unavailable capability (RESHARES). The graph media request deliberately does not ask for the field yet: an unknown field name fails the whole listing call, and this scalar has never been observed live.",
+    whyUnavailable: null,
+    unlock:
+      "Live verification of reposts_count under this integration's credentials (harness scripts/verify-graph-provider.ts); then add it to GRAPH_MEDIA_FIELDS so the default live path surfaces it.",
+    liveState: "NOT_VERIFIED",
+    liveEvidence:
+      "Fixture v1 carries reposts_count and exercises persist/read end-to-end. Live: never observed (no credentials). Documented shape: top-level media only, owner-hideable; carousel children cannot carry it.",
+  },
+  {
+    id: "RESHARES",
+    label: "Reshare relations (who reposted media)",
     providerMethods: [],
-    permissions: "Would require explicit repost metadata under this integration's credentials.",
+    permissions: "Would require a repost object or reshare edge.",
     persistence: [],
     ui: [],
     howItWorks:
-      "No verified provider surface in this integration returns repost counts, reshare edges, or original-author attribution, so no repost relationship is stored or shown. Similar-looking content is never classified as a repost without evidence.",
+      "There is no writer and no reader for reshare relations: no account is ever named as having reposted media in which this account is tagged, and no post is ever classified as a repost without provider evidence. The reposts_count scalar on IG Media is a count without actors — surfaced as provider metadata under the REPOSTS capability, never as a relation.",
     whyUnavailable:
-      "reposts_count (with shares_count/saved_count/total_*) is documented on IG Media but top-level-only, owner-gated, and unverified under this integration's credentials — and an unknown fields name fails the entire listing call, so it is not requested speculatively. There is no repost object or reshare edge at all.",
+      "No repost object or reshare edge exists anywhere in the IG Platform reference — cross-account attribution is structurally unavailable, not unimplemented. This is the repost-identities refusal recorded in FOUNDING §14: the count scalar carries no actors, so no lawful source can name who reposted what.",
     unlock:
-      "Live verification of repost metadata under this integration's credentials (harness scripts/verify-graph-provider.ts); then persist attribution and render reshare relationships.",
+      "A documented repost object or reshare edge. No credential can unlock a node that does not exist.",
     liveState: "DOCUMENTED_ABSENT",
     liveEvidence:
-      "No repost object or reshare edge in the reference; the scalar alone is UNVERIFIED (see field-coverage audit). Deliberately not probed blind: a failed fields name would break the working media call.",
+      "The exhaustive IG Media and IG User references expose reposts_count only — no repost node and no reshare edge. No credential could unlock an edge that does not exist.",
   },
   {
     id: "MEDIA",

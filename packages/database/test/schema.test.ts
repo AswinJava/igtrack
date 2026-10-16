@@ -58,14 +58,15 @@ describe.runIf(available)("schema & migrations", () => {
       SELECT tgname AS name FROM pg_trigger
       WHERE tgname LIKE '%_no_update' ORDER BY tgname
     `;
-    // 15 as of migration 0017: post_changes joined the append-only family
-    // (14 after migration 0015; the count pin catches any dropped trigger).
+    // 16 as of migration 0018: tagged_media joined the append-only family
+    // (15 after migration 0017; the count pin catches any dropped trigger).
     // post_presence is deliberately NOT in the family: it is mutable current
     // state, not a claim (FOUNDING §16 D54).
-    expect(rows.length).toBe(15);
+    expect(rows.length).toBe(16);
     expect(rows.map((r) => r.name)).toContain("story_sightings_no_update");
     expect(rows.map((r) => r.name)).toContain("insight_points_no_update");
     expect(rows.map((r) => r.name)).toContain("post_changes_no_update");
+    expect(rows.map((r) => r.name)).toContain("tagged_media_no_update");
   });
 
   it("rejects updates to append-only profile_snapshots", async () => {

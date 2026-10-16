@@ -4,7 +4,7 @@
 > from `CAPABILITY_REGISTRY` (`packages/core/src/capabilities.ts`); a test fails if it
 > is stale. Prose cannot drift from the product because there is no prose.
 
-15 of 20 capabilities are obtainable from a lawful source; 5 have no provider method at all. Separately, 7 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
+18 of 23 capabilities are obtainable from a lawful source; 5 have no provider method at all. Separately, 7 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
 
 A capability can be available **and** documented-absent at the same time, and saying so is the point of this table: follower and following rosters are `DOCUMENTED_ABSENT` for any live interface — no roster edge exists — while the synthetic fixture provider exposes rosters so the pipeline can be built and tested end to end, and the operator's own Instagram export (`import:v1`) supplies the real roster lawfully.
 
@@ -30,6 +30,8 @@ A capability can be available **and** documented-absent at the same time, and sa
 | **Story metadata** | available · `NOT_VERIFIED` | `getStories` | `stories` |
 | **Story mentions and tags** | available · `NOT_VERIFIED` | `getStories` | `storyMentions`, `evidence` |
 | **Mention roll-up (not-established-visible accounts)** | available · `NOT_VERIFIED` | `getStories` | `storyMentions`, `evidence` |
+| **Tagged media (media owned by others in which the account is tagged)** | available · `NOT_VERIFIED` | `getTags` | `taggedMedia`, `evidence` |
+| **Mentioned comments (@mentions of the owned account on other media)** | available · `NOT_VERIFIED` | `getMentionedComment` | — |
 | **Story highlights** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | — |
 | **Public posts** | available · `NOT_VERIFIED` | `getPublicPosts` | `posts`, `postPresence`, `postChanges`, `evidence` |
 | **Reels as a distinct type** | available · `NOT_VERIFIED` | `getPublicPosts` | `posts` |
@@ -40,7 +42,8 @@ A capability can be available **and** documented-absent at the same time, and sa
 | **Following roster and history** | available · `DOCUMENTED_ABSENT` | `getFollowing` | `followSnapshots`, `followSnapshotMembers`, `followDeltas`, `evidence` |
 | **Public like data** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | — |
 | **Interaction history** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | `interactions` |
-| **Reposts and reshares** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | — |
+| **Repost count metadata** | available · `NOT_VERIFIED` | `getPublicPosts` | `posts` |
+| **Reshare relations (who reposted media)** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | — |
 | **Media bytes and assets** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | `mediaAssets` |
 
 ## The detail
@@ -134,6 +137,32 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Surfaced in:** `/targets/[id] (stories tab, hidden-mention roll-up with /lookup?username= pivot)`
 
 **Pipeline.** A pure read-side aggregation over stored story_mentions rows: per mentioned account, how many distinct stories named it, how many of those named it through a class that did not establish on-canvas rendering (POSSIBLY_HIDDEN, OFF_CANVAS, METADATA_ONLY), and which story ids those were. It fetches nothing, adds no provider method, and writes no new table. Merging is case-insensitive and per story, so one story naming an account twice counts once but stays hidden if any of its rows was hidden-class. UNKNOWN is deliberately excluded from the hidden classes: a missing visibility signal is absence of evidence, never a finding, and a classification is never proof of intent to hide.
+
+### Tagged media (media owned by others in which the account is tagged) — `available`
+
+- **Registry id:** `TAGS`
+- **Live state:** `NOT_VERIFIED` — Fixture v1 implements the full pipeline synthetically (tagged-media listing, idempotent re-scan, PARTIAL on truncation). Request shape is docs-pinned (Meta tags reference, read 2026-10-16): GET /{ig-user-id}/tags with documented media fields, no limit parameter (the reference documents cursor paging only), private media excluded by the platform. No credentials in this environment, so the live edge has never been observed.
+- **Permissions:** Owned account only; the documented IG User tags edge. Media from private accounts are excluded by the platform, and the edge is subject to Platform Rate Limits.
+- **Provider methods:** `getTags`
+- **Persists to:** `taggedMedia`, `evidence`
+- **Surfaced in:** `igtrack tags (CLI)`, `igtrack_tags (MCP tool)`, `dossier counts (taggedMedia)`, `activity timeline (TAG_OBSERVED)`
+
+**What would unlock it.** Live verification of the tags edge under this integration's credentials; the pipeline, table, scan kind, and CLI are already in place.
+
+**Pipeline.** TAGS_SCAN pages the documented tags edge (cursor paging, hard page cap, lease renewal between pages) and stores one append-only row per (account, media, source) with first-observation-wins semantics: a re-scan never rewrites a stored observation, no removal is ever claimed (another account's edit history is not an observation stream), and the rows are never rendered as the account's own media nor diffed against the posts table. Each scan records one scan-keyed evidence row carrying the completeness of that listing; a capped or truncated listing completes PARTIAL and says so — never 'these are all the tags'. The tags edge is a reference listing: it answers 'this account appears tagged in that media', which is a fact about the media owner as much as about this account.
+
+### Mentioned comments (@mentions of the owned account on other media) — `available`
+
+- **Registry id:** `MENTIONED_COMMENTS`
+- **Live state:** `NOT_VERIFIED` — Request shape is docs-pinned (Meta Mentioned Comment reference, read 2026-10-16): fields id, text, timestamp, like_count, media; the comment id is required and documented as arriving in webhook notification payloads; the read errors when comments are disabled on the underlying media. No credentials in this environment, so the live read has never been observed.
+- **Permissions:** Owned account; the documented mentioned_comment read. The platform publishes no listing edge — comment ids arrive through Meta webhook notifications — so the read answers only for ids this app already holds. The call errors when comments are disabled on the underlying media.
+- **Provider methods:** `getMentionedComment`
+- **Persists to:** —
+- **Surfaced in:** `igtrack mention <id> (CLI)`, `igtrack_mention_read (MCP tool)`
+
+**What would unlock it.** A Meta webhook subscription on the comments field (the ids' only lawful source) plus live verification under this integration's credentials; the read and CLI/MCP surfaces are already in place. Until then the probe answers UNAVAILABLE with its reason for any id, and nothing is stored.
+
+**Pipeline.** An on-demand, stateless single read: the operator supplies a comment id (from the app's webhook notification payload), the provider expands mentioned_comment.comment_id(<id>){id,text,timestamp,like_count,media} on the documented IG User node, and the normalized comment is returned without persisting anything — a probe is not a claim of record, mirroring the DISCOVERY lookup split (D53). There is deliberately no stored mentions table: the platform delivers these ids through the webhook channel, not a pollable edge, and manufacturing a listing from re-probing ids would present a feed that does not exist.
 
 ### Story highlights — `UNAVAILABLE`
 
@@ -265,20 +294,33 @@ A capability can be available **and** documented-absent at the same time, and sa
 
 **Pipeline.** The interactions table exists as a typed landing zone with a documented rationale in schema comments, but has no writer: no supported source provides interaction actors, counts with history, or timestamps. The relationships page derives association signals from mentions and deltas instead, labeled as observed association — never 'favorite people'.
 
-### Reposts and reshares — `UNAVAILABLE`
+### Repost count metadata — `available`
 
 - **Registry id:** `REPOSTS`
-- **Live state:** `DOCUMENTED_ABSENT` — No repost object or reshare edge in the reference; the scalar alone is UNVERIFIED (see field-coverage audit). Deliberately not probed blind: a failed fields name would break the working media call.
-- **Permissions:** Would require explicit repost metadata under this integration's credentials.
+- **Live state:** `NOT_VERIFIED` — Fixture v1 carries reposts_count and exercises persist/read end-to-end. Live: never observed (no credentials). Documented shape: top-level media only, owner-hideable; carousel children cannot carry it.
+- **Permissions:** reposts_count is a documented IG Media scalar, top-level media only; the owner can hide counts.
+- **Provider methods:** `getPublicPosts`
+- **Persists to:** `posts`
+- **Surfaced in:** `/targets/[id] (content tab, repost count where the provider returned one)`
+
+**What would unlock it.** Live verification of reposts_count under this integration's credentials (harness scripts/verify-graph-provider.ts); then add it to GRAPH_MEDIA_FIELDS so the default live path surfaces it.
+
+**Pipeline.** Parse-when-present (FOUNDING §17): a reposts_count returned by any provider is stored on the post row under the same first-observation semantics as like and comment counts — absent stays absent, never zero-filled. No reshare relationship is ever inferred, and a post is never classified a repost without evidence; naming repost actors is a separate, structurally unavailable capability (RESHARES). The graph media request deliberately does not ask for the field yet: an unknown field name fails the whole listing call, and this scalar has never been observed live.
+
+### Reshare relations (who reposted media) — `UNAVAILABLE`
+
+- **Registry id:** `RESHARES`
+- **Live state:** `DOCUMENTED_ABSENT` — The exhaustive IG Media and IG User references expose reposts_count only — no repost node and no reshare edge. No credential could unlock an edge that does not exist.
+- **Permissions:** Would require a repost object or reshare edge.
 - **Provider methods:** —
 - **Persists to:** —
 - **Surfaced in:** —
 
-**Why it is unavailable.** reposts_count (with shares_count/saved_count/total_*) is documented on IG Media but top-level-only, owner-gated, and unverified under this integration's credentials — and an unknown fields name fails the entire listing call, so it is not requested speculatively. There is no repost object or reshare edge at all.
+**Why it is unavailable.** No repost object or reshare edge exists anywhere in the IG Platform reference — cross-account attribution is structurally unavailable, not unimplemented. This is the repost-identities refusal recorded in FOUNDING §14: the count scalar carries no actors, so no lawful source can name who reposted what.
 
-**What would unlock it.** Live verification of repost metadata under this integration's credentials (harness scripts/verify-graph-provider.ts); then persist attribution and render reshare relationships.
+**What would unlock it.** A documented repost object or reshare edge. No credential can unlock a node that does not exist.
 
-**Pipeline.** No verified provider surface in this integration returns repost counts, reshare edges, or original-author attribution, so no repost relationship is stored or shown. Similar-looking content is never classified as a repost without evidence.
+**Pipeline.** There is no writer and no reader for reshare relations: no account is ever named as having reposted media in which this account is tagged, and no post is ever classified as a repost without provider evidence. The reposts_count scalar on IG Media is a count without actors — surfaced as provider metadata under the REPOSTS capability, never as a relation.
 
 ### Media bytes and assets — `UNAVAILABLE`
 

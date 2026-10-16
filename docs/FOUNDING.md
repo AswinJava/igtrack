@@ -653,3 +653,85 @@ Not claimed: caption edits and disappearances are verified against a mutable
 provider double and the worker boundary — not live. No Graph credential exists
 in this environment, so a real account's edit cycle remains `NOT_VERIFIED`
 live, same standing as every other Graph route.
+
+---
+
+## 17. Phase H — the tags edge, the mentioned-comment read, and the repost scalar
+
+**Date:** 2026-10-16 · **Status:** adopted (Phase H built; tag claims only where the listing says what it read)
+
+§16 closed the mission's change-detection clause and named the `tags`/`mentions`
+edges as the next lawful increment (D46, restated in §16.2). This phase builds
+that increment as far as the platform actually offers a route, and records the
+places where it does not: the tags edge is a listing the owned account may page,
+`mentioned_comment` is a single-item read with no listing edge at all, and
+`reposts_count` is a scalar with no relation behind it.
+
+**Changed:**
+
+1. Owned-target `TAGS_SCAN` (24h cadence, `IGTRACK_SCAN_TAGS_MS`): pages the
+   documented IG User `tags` edge (cursor paging, 25-page cap, lease renewal
+   between pages), stores append-only `tagged_media` rows unique per
+   `(account, media, source)` with first-observation-wins, and records one
+   scan-keyed `tagged_media_listing` evidence row per read carrying that
+   listing's completeness (COMPLETE/PARTIAL + pages). A capped or truncated
+   read completes PARTIAL and says so where the rows live.
+2. `igtrack tags` (CLI) and `igtrack_tags` (MCP): read back the rows with the
+   owning account, the provider's published time and our first observation kept
+   distinct, the shared evidence link, and the latest listing's completeness.
+3. `igtrack mention <id> [--account]` (CLI) and `igtrack_mention_read` (MCP):
+   on-demand read of one mentioned comment; persists nothing.
+4. `reposts_count` parity: parsed when any provider returns it, stored on the
+   new nullable `posts.reposts_count` under the same first-observation
+   semantics as every other count; the dossier gains a REPOSTS coverage row
+   that counts posts which actually carried the value (never zero-filled).
+5. Registry: REPOSTS becomes the observable scalar; RESHARES is added as the
+   structurally absent relation, so the two repost facts cannot be read as one
+   claim.
+6. The Graph request set is unchanged: `reposts_count` stays OUT of
+   `GRAPH_MEDIA_FIELDS` until the live one-node probe in
+   `scripts/verify-graph-provider.ts` returns; an unknown field name fails the
+   whole listing call, so a speculative request is how a working scan becomes a
+   broken one.
+
+### 17.1 Decision log (Phase H)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D60 | **Tagged media are first-observation references.** `tagged_media` is append-only, unique per `(account, media, source)`; a re-scan never rewrites a stored row, a row absent from a later listing is never "removed", and the rows are never diffed against `posts`. Each row carries the evidence of the listing that observed it. | Another account's edit/delete history is not our observation stream; the only observable facts are "this media listed this account at T" and what that listing returned. |
+| D61 | **One listing evidence row per scan carries the listing's completeness**, and a capped/truncated read completes PARTIAL. No surface may present a bounded or truncated read as "all the tags". | D48's rule applied where the claim lives: the row count alone cannot say whether the platform returned everything. |
+| D62 | **`TAGS_SCAN` is owned-only, guarded at enqueue AND at execution** (schedulable kind list + `OWNED_ONLY_KINDS` + executor gate). | D47/D59 extended: a job that arrives another way still cannot produce a claim for a target class it does not describe. |
+| D63 | **Mentions: an on-demand stateless read, never a listing.** `mentioned_comment` is keyed by webhook-supplied comment ids; the read persists nothing (mirrors the D53 lookup), and with more than one owned target it refuses to guess which account a notification belongs to (`--account` required). The MENTIONED_COMMENTS capability reports UNAVAILABLE with the webhook note until a notification feed exists; mentions are never inferred locally. | There is no listing edge to page; inventing one — or backfilling ids from crawled comments — would be traversal by another name (§14.1 A10). |
+| D64 | **`reposts_count` parses when present and is requested only after live verification.** Nullable column, first-observation semantics, coverage row states the unlock. The field is not added to `GRAPH_MEDIA_FIELDS` on documentation alone. | A wrong field name fails the whole listing; docs-pinning a request would trade a working scan for a speculative one. Absence stays absent — never zero-filled. |
+| D65 | **REPOSTS is the scalar; RESHARES is the relation.** The registry entry for the count is obtainable (`getPublicPosts` supplies it when the platform does); naming repost actors gets its own entry marked structurally absent. | One entry claiming both would either overclaim the relation or hide the datum; the split keeps each claim exactly as strong as its evidence (repost identities stay refused, §14). |
+| D66 | **Relationship ranking does not consume tags, mentions, or reposts yet.** The ranking inputs remain story mentions, comment authorship on owned media, and follow deltas (§15.1). Any future inclusion needs stored rows behind it and a dated entry here. | Ranking is a claim about association; a new input without a filed decision would be the quiet scope creep this document exists to prevent. |
+
+### 17.2 What was deliberately NOT added
+
+- Any removal claim for tagged media (D60); any tag diffing against posts or
+  against earlier tag listings.
+- A mentions listing, local mention inference, or comment-crawl backfill (D63).
+- Repost relations, repost-actor identities, or post classification from
+  counts (D64/D65).
+- Relationship-ranking weights over the new rows (D66).
+- Recursive traversal of tagging accounts: a tag row names a media owner; it
+  never creates a target (§14.1 A10).
+
+### 17.3 Verification for Phase H
+
+| Item | Evidence |
+|---|---|
+| Typecheck | `pnpm typecheck` — all five workspaces (`core`, `ingestion`, `database`, `monitoring`, `cli`) `tsc --noEmit` clean, exit 0 |
+| Tests | `pnpm test` — 60 files, 443 passed, 1 skipped (the Postgres-down suite skips loudly), exit 0. New `workers/monitoring/test/tags-scan.test.ts` (TG1–TG8) pins: append-only rows sharing one listing evidence row, a re-scan never rewriting a stored observation and an absent row never claimed as removed, cursor paging with the top-level `nextCursor` contract, PARTIAL-on-truncation recorded in the listing metadata, UNAVAILABLE storing nothing, a page ERROR throwing retryably without a half listing, capability-off with zero provider calls, and the DISCOVERY execution gate |
+| CLI surface | `apps/cli/test/operations.test.ts` pins tags read-back (owner account, published vs first-observed, a null permalink stays null, the ANOTHER-account note), the mention read incl. the multi-owned-target ambiguity refusal, and the dossier rows (TAGS OBSERVED 2, MENTIONED_COMMENTS UNAVAILABLE with its reason, REPOSTS OBSERVED 1, repostsCount 128 / null) |
+| End-to-end (fixture) | `targets add aurora.wilde` → `scans run --kind TAGS_SCAN` → `work` (COMPLETED) → `tags aurora.wilde` (listing COMPLETE, 1 page, two rows sharing one evidence id) → `mention mentioned-comment-1 --account aurora.wilde` (AVAILABLE, likeCount 12, media other-media-77) → `mention no-such-id` (UNAVAILABLE with the fixture's reason); the read persists nothing |
+| Capability registry + docs | `pnpm docs:capabilities` regenerated `docs/CAPABILITIES.md` from the registry (REPOSTS/RESHARES split reflected); the capability-matrix drift test and the schema-consistency test are green |
+| Docs-pinned requests | `packages/ingestion/src/graph/field-coverage.ts` — tags area: 6 requested fields all present in `GRAPH_TAG_FIELDS`; mentions rows `READ_THROUGH` (requested and delivered to the caller only, never persisted); `media.reposts_count` UNVERIFIED with the one-node probe as the named unlock |
+
+Not claimed: every Graph route in this phase is docs-pinned and
+fixture-verified, not live — no Graph credential exists in this environment.
+The one-node `reposts_count` probe (`pnpm verify:graph`), and the tags/mentions
+reads against a real account, remain `NOT_VERIFIED` live until an operator with
+credentials runs them. The mentioned-comment webhook subscription remains the
+recorded activation step; until then `MENTIONED_COMMENTS` is UNAVAILABLE by
+design.

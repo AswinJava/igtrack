@@ -98,6 +98,9 @@ export const rawPostV1 = z.object({
   caption: z.string().optional(),
   like_count: z.number().int().nonnegative().optional(),
   comment_count: z.number().int().nonnegative().optional(),
+  // Documented IG Media reposts_count (top-level media only; the owner can
+  // disable reposts display). Optional: absence is an absence, never a zero.
+  reposts_count: z.number().int().nonnegative().optional(),
   // Optional provider-declared media typing (v1 fixture files omit these;
   // future sets and live adapters may carry them). IMAGE/VIDEO/CAROUSEL only.
   media_type: z.string().optional(),
@@ -175,6 +178,42 @@ export const rawDiscoveryV1 = z.object({
   recent_media: z.array(rawPostV1),
 });
 
+// Tagged media (documented IG User `tags` edge): media owned by OTHER
+// accounts in which the observed account was tagged. The owner username is
+// optional — the platform omits what it does not return.
+export const rawTaggedMediaV1 = z.object({
+  id: z.string().min(1),
+  username: z.string().min(1).optional(),
+  caption: z.string().optional(),
+  permalink: z.string().optional(),
+  media_type: z.string().optional(),
+  taken_at: isoDatetime.optional(),
+});
+
+export const rawTagsPageV1 = z.object({
+  schema_version: z.literal("v1"),
+  captured_at: isoDatetime,
+  tags: z.array(rawTaggedMediaV1),
+  next_cursor: z.string().nullable(),
+});
+
+// Mentioned comments (the webhook-keyed `mentioned_comment` read). No listing
+// edge exists, so the fixture set is a set of readable ids; an id the set does
+// not declare is UNAVAILABLE, never fabricated.
+export const rawMentionedCommentV1 = z.object({
+  id: z.string().min(1),
+  text: z.string(),
+  created_at: isoDatetime,
+  like_count: z.number().int().nonnegative().optional(),
+  media_id: z.string().min(1).optional(),
+});
+
+export const rawMentionedCommentsV1 = z.object({
+  schema_version: z.literal("v1"),
+  captured_at: isoDatetime,
+  comments: z.array(rawMentionedCommentV1),
+});
+
 export type RawProfileV1 = z.infer<typeof rawProfileV1>;
 export type RawStoriesV1 = z.infer<typeof rawStoriesV1>;
 export type RawStoryV1 = z.infer<typeof rawStoryV1>;
@@ -184,3 +223,7 @@ export type RawPostsPageV1 = z.infer<typeof rawPostsPageV1>;
 export type RawCommentsPageV1 = z.infer<typeof rawCommentsPageV1>;
 export type RawInsightsV1 = z.infer<typeof rawInsightsV1>;
 export type RawDiscoveryV1 = z.infer<typeof rawDiscoveryV1>;
+export type RawTaggedMediaV1 = z.infer<typeof rawTaggedMediaV1>;
+export type RawTagsPageV1 = z.infer<typeof rawTagsPageV1>;
+export type RawMentionedCommentV1 = z.infer<typeof rawMentionedCommentV1>;
+export type RawMentionedCommentsV1 = z.infer<typeof rawMentionedCommentsV1>;

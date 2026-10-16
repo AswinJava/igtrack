@@ -15,7 +15,16 @@ import {
   type ParsedArgs,
 } from "../output.js";
 import { createContext } from "../context.js";
-import { opActivity, opDossier, opEvidence, opInsights, opLookup, opRelationships } from "../tools.js";
+import {
+  opActivity,
+  opDossier,
+  opEvidence,
+  opInsights,
+  opLookup,
+  opMentionedCommentProbe,
+  opRelationships,
+  opTaggedMedia,
+} from "../tools.js";
 
 // ---------------------------------------------------------------------------
 // Read-only operations: activity, relationships, evidence, lookup.
@@ -229,7 +238,7 @@ export async function runLookup(args: ParsedArgs): Promise<number> {
       ["capability status", result.status],
       ["confidence", display(result.confidence)],
       ["observed at", display(result.observedAt)],
-      ["note", display(result.note)],
+      ["note", result.note ?? "none"],
       ["error", result.error === null ? "none" : `${result.error.kind}: ${result.error.message}`],
     ];
     const probe =
@@ -276,6 +285,78 @@ export async function runLookup(args: ParsedArgs): Promise<number> {
         : "Nothing was persisted: `lookup` is a read-only probe.";
     const human = [...sections, "", footer].join("\n");
     emit({ json, meta: ctx.meta, data: result, human });
+    return 0;
+  } finally {
+    await ctx.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// mention — one webhook-keyed mentioned comment, read on demand
+// ---------------------------------------------------------------------------
+
+export const MENTION_HELP = `igtrack mention <commentId> [--account <username>] [--json]
+
+Read ONE mentioned comment (@mention of the owned account on another account's
+media) by its id, WITHOUT persisting anything.
+
+The platform publishes no listing edge for mentioned comments: ids arrive
+through Meta webhook notifications (the app's \`comments\` field subscription),
+and the documented read answers only for ids the app already holds. The read
+errors when comments are disabled on the underlying media — that error is
+reported with its reason. An UNAVAILABLE answer means the platform returned
+nothing for this id; it never means "no mention exists". Nothing is written:
+this is a probe, not a record.`;
+
+interface MentionedCommentView {
+  commentId?: string;
+  text?: string;
+  createdAt?: string;
+  likeCount?: number;
+  mediaId?: string;
+}
+
+export async function runMention(args: ParsedArgs): Promise<number> {
+  const json = isJson(args.flags);
+  const commentId = args.positionals[0];
+  if (commentId === undefined) {
+    throw new UsageError("Usage: igtrack mention <commentId> [--account <username>]");
+  }
+  const ctx = await createContext();
+  try {
+    const result = await opMentionedCommentProbe(ctx, {
+      commentId,
+      account: flagString(args.flags, "account"),
+    });
+    const comment =
+      result.status === "AVAILABLE"
+        ? (result.comment as MentionedCommentView | null)
+        : null;
+    const sections: string[] = [
+      table(["field", "value"], [
+        ["account", `@${result.account}`],
+        ["source", result.sourceId],
+        ["capability status", result.status],
+        ["confidence", display(result.confidence)],
+        ["observed at", display(result.observedAt)],
+        ["note", result.note ?? "none"],
+        ["error", result.error === null ? "none" : `${result.error.kind}: ${result.error.message}`],
+      ]),
+    ];
+    if (comment !== null && comment !== undefined) {
+      sections.push(
+        "",
+        table(["field", "value"], [
+          ["comment", display(comment.commentId ?? null)],
+          ["text", display(comment.text ?? null)],
+          ["created at (provider)", display(comment.createdAt ?? null)],
+          ["likes", display(comment.likeCount ?? null)],
+          ["media", display(comment.mediaId ?? null)],
+        ]),
+      );
+    }
+    sections.push("", "Nothing was persisted: `mention` is a read-only probe.");
+    emit({ json, meta: ctx.meta, data: result, human: sections.join("\n") });
     return 0;
   } finally {
     await ctx.close();
@@ -369,7 +450,7 @@ export async function runDossier(args: ParsedArgs): Promise<number> {
         "",
         `Stored media rows (${result.media.storedCount})${result.media.bounded === true ? " — bounded preview" : ""}:`,
         table(
-          ["post", "published", "first observed", "type", "likes", "comments", "comments state"],
+          ["post", "published", "first observed", "type", "likes", "comments", "reposts", "comments state"],
           result.media.rows.map((m) => [
             m.postId,
             display(m.publishedAt),
@@ -377,6 +458,7 @@ export async function runDossier(args: ParsedArgs): Promise<number> {
             display(m.mediaType),
             display(m.likeCount),
             display(m.commentCount),
+            display(m.repostsCount),
             m.commentsState,
           ]),
         ),
@@ -407,6 +489,77 @@ export async function runDossier(args: ParsedArgs): Promise<number> {
 
     sections.push("", "Notes:", ...result.notes.map((n) => `  · ${n}`));
 
+    emit({ json, meta: ctx.meta, data: result, human: sections.join("\n") });
+    return 0;
+  } finally {
+    await ctx.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// tags — media by OTHER accounts in which the tracked account was tagged
+// ---------------------------------------------------------------------------
+
+export const TAGS_HELP = `igtrack tags <target id|username> [--limit N] [--json]
+
+Media by OTHER accounts in which this account was tagged, as THIS deployment
+recorded it from the documented IG User tags edge (TAGS_SCAN). Every row is a
+reference to another account's media — never this account's own posts — and
+rows are first observations: a row absent from a later listing is never
+reported as removed. The platform excludes media from private accounts, and
+the completeness of the most recent listing read (COMPLETE or PARTIAL) is
+printed with the rows so a bounded read never reads as the whole truth.
+
+Read-only. Nothing is fetched; this is a report over stored observations.`;
+
+export async function runTags(args: ParsedArgs): Promise<number> {
+  const json = isJson(args.flags);
+  const target = args.positionals[0];
+  if (target === undefined) {
+    throw new UsageError("Usage: igtrack tags <target id|username> [--limit N]");
+  }
+  const ctx = await createContext();
+  try {
+    const result = await opTaggedMedia(ctx, {
+      target,
+      limit: flagNumber(args.flags, "limit", 50),
+    });
+
+    const sections: string[] = [
+      `Target   @${result.target.username} (${result.target.status})`,
+      result.listing === null
+        ? "Listing  never read — run `igtrack scans run --kind TAGS_SCAN` and then `igtrack work`."
+        : `Listing  last read ${result.listing.observedAt} · ${display(result.listing.completion)}${
+            result.listing.pages === null ? "" : ` · ${result.listing.pages} page(s)`
+          }${result.listing.pageCap === null ? "" : ` · page-capped at ${result.listing.pageCap}`}`,
+    ];
+
+    if (result.rows.length === 0) {
+      sections.push("", "No tagged media stored for this account.");
+    } else {
+      sections.push(
+        "",
+        table(
+          ["media", "owner", "type", "published", "first observed", "confidence", "evidence"],
+          result.rows.map((r) => [
+            r.mediaId,
+            display(r.ownerUsername),
+            display(r.mediaType),
+            display(r.takenAt),
+            r.observedAt,
+            r.confidence,
+            r.evidenceId ?? "none",
+          ]),
+        ),
+      );
+      if (result.truncated) {
+        sections.push(
+          `Note: ${result.rowCount} of more stored rows shown; raise --limit to see more.`,
+        );
+      }
+    }
+
+    sections.push("", "Notes:", ...result.notes.map((n) => `  · ${n}`));
     emit({ json, meta: ctx.meta, data: result, human: sections.join("\n") });
     return 0;
   } finally {

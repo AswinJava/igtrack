@@ -23,10 +23,12 @@ import {
   type NormalizedInsightAbsence,
   type NormalizedInsightPoint,
   type NormalizedInsightSet,
+  type NormalizedMentionedComment,
   type NormalizedPost,
   type NormalizedPostChild,
   type NormalizedProfile,
   type NormalizedStory,
+  type NormalizedTagPage,
   type ProviderCapabilities,
   type SourceRef,
 } from "@igtrack/core";
@@ -35,23 +37,29 @@ import {
   rawDiscoveryV1,
   rawFollowPageV1,
   rawInsightsV1,
+  rawMentionedCommentsV1,
   rawPostsPageV1,
   rawProfileV1,
   rawStoriesV1,
+  rawTagsPageV1,
   type RawCommentsPageV1,
   type RawDiscoveryV1,
   type RawFollowPageV1,
   type RawInsightsV1,
+  type RawMentionedCommentsV1,
   type RawPostsPageV1,
   type RawProfileV1,
   type RawStoriesV1,
+  type RawTagsPageV1,
 } from "../raw-schemas/v1.js";
 import { normalizeProfile } from "../normalize/profile.js";
 import { normalizeStory } from "../normalize/story.js";
 import {
   normalizeComments,
   normalizeFollowPage,
+  normalizeMentionedComment,
   normalizePosts,
+  normalizeTagPage,
 } from "../normalize/collections.js";
 
 const fixtureManifestSchema = z.object({
@@ -73,6 +81,10 @@ const fixtureManifestSchema = z.object({
     // Same rule for the discovery probe (D42): optional, and its absence is
     // an UNAVAILABLE with a reason, never a schema rejection.
     discovery: z.string().min(1).optional(),
+    // Same rule for the tags edge and the webhook-keyed mentioned-comment
+    // read (FOUNDING §17): optional; absence is UNAVAILABLE with a reason.
+    tags: z.string().min(1).optional(),
+    mentioned_comments: z.string().min(1).optional(),
   }),
 });
 
@@ -162,6 +174,11 @@ export class FixtureProvider implements InstagramProvider {
       // set actually declares a discovery file is answered per call with an
       // UNAVAILABLE + reason, like insights.
       [CapabilityName.DISCOVER_ACCOUNT]: true,
+      // Tags + mentioned-comment reads: the set declares the payloads per
+      // call; whether it actually carries them is answered with an UNAVAILABLE
+      // + reason, like insights and discovery.
+      [CapabilityName.GET_TAGS]: true,
+      [CapabilityName.GET_MENTIONED_COMMENT]: true,
       // No child-media source ships in the v1 fixture set: honest
       // UNAVAILABLE from getPostChildren, never an empty album masquerading
       // as observed structure.
@@ -404,6 +421,112 @@ export class FixtureProvider implements InstagramProvider {
       this.meta(),
       `No child-media source for post ${post.postId} in this fixture set`,
     );
+  }
+
+  /**
+   * Synthetic counterpart of the documented IG User `tags` edge (FOUNDING
+   * §17): media by OTHER accounts in which the fixture target was tagged. An
+   * undeclared file is UNAVAILABLE with a reason; a payload declaring pages
+   * this set cannot serve is PARTIAL, never a complete listing in disguise.
+   */
+  async getTags(
+    account: NormalizedAccountRef,
+    cursor?: Cursor,
+  ): Promise<CapabilityResult<NormalizedTagPage>> {
+    const meta = this.meta(account);
+    try {
+      if (cursor !== undefined) {
+        return errored(meta, {
+          kind: CapabilityErrorKind.INTERNAL,
+          message:
+            "Tag pagination is not supported by fixture:v1; request without a cursor",
+          retryable: false,
+        });
+      }
+      const manifest = await this.loadManifest();
+      const file = manifest.files.tags;
+      if (file === undefined) {
+        return unavailable(
+          meta,
+          "This fixture set declares no tags file, so it carries no tagged-media data. Add files.tags to the manifest to exercise the tags pipeline.",
+        );
+      }
+      const rawText = await this.readFixture(file);
+      const json = this.parseJson(rawText);
+      if (!("value" in json)) return json;
+      const parsed = rawTagsPageV1.safeParse(json.value);
+      if (!parsed.success) return this.schemaError(meta, parsed.error.message);
+
+      const raw: RawTagsPageV1 = parsed.data;
+      const page = normalizeTagPage(raw);
+      if (raw.next_cursor !== null) {
+        return {
+          status: CapabilityStatus.PARTIAL,
+          data: page,
+          ...meta,
+          observedAt: raw.captured_at,
+          confidence: Confidence.MEDIUM,
+          note: "Fixture:v1 serves one tags page; the payload declares further pages this source cannot serve.",
+          rawPayloadHash: sha256(rawText),
+          rawReference: this.manifestRef(file),
+        };
+      }
+      return available(page, {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: Confidence.HIGH,
+        rawPayloadHash: sha256(rawText),
+        rawReference: this.manifestRef(file),
+      });
+    } catch (err) {
+      return toProviderError(meta, err);
+    }
+  }
+
+  /**
+   * Synthetic counterpart of the webhook-keyed `mentioned_comment` read
+   * (FOUNDING §17): the set declares a small number of readable comment ids.
+   * There is no listing edge, so an id the set does not declare is
+   * UNAVAILABLE with the reason — never a fabricated comment.
+   */
+  async getMentionedComment(
+    account: NormalizedAccountRef,
+    commentId: string,
+  ): Promise<CapabilityResult<NormalizedMentionedComment>> {
+    const meta = this.meta(account);
+    try {
+      const manifest = await this.loadManifest();
+      const file = manifest.files.mentioned_comments;
+      if (file === undefined) {
+        return unavailable(
+          meta,
+          "This fixture set declares no mentioned-comments file, so it carries no readable mentioned-comment ids. Add files.mentioned_comments to the manifest to exercise the mentioned-comment read.",
+        );
+      }
+      const rawText = await this.readFixture(file);
+      const json = this.parseJson(rawText);
+      if (!("value" in json)) return json;
+      const parsed = rawMentionedCommentsV1.safeParse(json.value);
+      if (!parsed.success) return this.schemaError(meta, parsed.error.message);
+
+      const raw: RawMentionedCommentsV1 = parsed.data;
+      const found = raw.comments.find((c) => c.id === commentId);
+      if (found === undefined) {
+        return unavailable(
+          meta,
+          `The fixture set declares no mentioned comment with id ${commentId}.`,
+        );
+      }
+      return available(normalizeMentionedComment(found, raw.captured_at), {
+        ...meta,
+        observedAt: raw.captured_at,
+        confidence: Confidence.HIGH,
+        rawPayloadHash: sha256(rawText),
+        rawReference: this.manifestRef(file),
+      });
+    } catch (err) {
+      return toProviderError(meta, err);
+    }
   }
 
   // Documented platform rule, mirrored verbatim so the synthetic absence is

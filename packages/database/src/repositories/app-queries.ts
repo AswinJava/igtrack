@@ -229,6 +229,10 @@ export const ACTIVITY_TYPES = [
   "POST_REMOVED",
   "COMMENT_POSTED",
   "MENTION_OBSERVED",
+  // FOUNDING §17: first observation of a row in the documented tags edge. The
+  // row is insert-once, so the feed item means "first observed in the tag
+  // listing", never "tagged you just now".
+  "TAG_OBSERVED",
 ] as const;
 
 export type ActivityType = (typeof ACTIVITY_TYPES)[number];
@@ -374,6 +378,17 @@ export async function getUserActivityFeed(
      WHERE EXISTS (SELECT 1 FROM targets t
        WHERE t.user_id = ${userId} AND t.ig_account_id = s.ig_account_id)
      ORDER BY sm.observed_at DESC LIMIT ${limit})
+    UNION ALL
+    (SELECT tm.id::text AS id, 'TAG_OBSERVED'::text AS type,
+            owner.username || ' — tagged media by ' || COALESCE(tm.owner_username, 'an unknown account') AS summary,
+            tm.observed_at AS occurred_at, owner.username,
+            'OBSERVED'::text AS category, tm.confidence::text AS confidence,
+            tm.evidence_id AS evidence_id
+     FROM tagged_media tm
+     JOIN ig_accounts owner ON owner.id = tm.ig_account_id
+     WHERE EXISTS (SELECT 1 FROM targets t
+       WHERE t.user_id = ${userId} AND t.ig_account_id = tm.ig_account_id)
+     ORDER BY tm.observed_at DESC LIMIT ${limit})
     ) AS feed
     ${types !== null || like !== null
       ? sql`WHERE ${sql.join(
@@ -1009,6 +1024,8 @@ export interface DossierMediaRow {
   firstObservedAt: Date | null;
   likeCount: number | null;
   commentCount: number | null;
+  /** Provider-supplied reposts_count when the platform returned one; null = not returned (never zero-filled). */
+  repostsCount: number | null;
   mediaType: string | null;
   mediaProductType: string | null;
   commentsState: string;
@@ -1051,11 +1068,18 @@ export interface TargetDossier {
     stories: DossierCount;
     storyMentions: DossierCount;
     storySightings: DossierCount;
+    // FOUNDING §17: rows from the documented tags edge (media owned by others
+    // in which this account was tagged), first-observation-wins.
+    taggedMedia: DossierCount;
     posts: DossierCount;
     postComments: DossierCount;
     postChildren: DossierCount;
     // Phase G: media change events (caption edits, no-longer-observed).
     postChanges: DossierCount;
+    // FOUNDING §17: posts that actually carry a provider-supplied reposts
+    // count. This is the writer behind the REPOSTS capability: zero such rows
+    // means "the platform never returned one", never "no reposts".
+    repostsObserved: DossierCount;
     insightPoints: DossierCount;
     interactions: DossierCount;
   };
@@ -1115,6 +1139,8 @@ export async function getTargetDossier(
               WHERE s.ig_account_id = ${account.id}) AS story_sightings,
             (SELECT max(ss.observed_at) FROM story_sightings ss JOIN stories s ON s.id = ss.story_db_id
               WHERE s.ig_account_id = ${account.id}) AS story_sightings_at,
+            (SELECT count(*)::int FROM tagged_media WHERE ig_account_id = ${account.id}) AS tagged_media,
+            (SELECT max(observed_at) FROM tagged_media WHERE ig_account_id = ${account.id}) AS tagged_media_at,
             (SELECT count(*)::int FROM posts WHERE target_id = ${owned.id}) AS posts,
             (SELECT max(observed_at) FROM posts WHERE target_id = ${owned.id}) AS posts_at,
             (SELECT count(*)::int FROM post_comments pc JOIN posts p ON p.id = pc.post_db_id
@@ -1127,6 +1153,8 @@ export async function getTargetDossier(
               WHERE p.target_id = ${owned.id}) AS post_children_at,
             (SELECT count(*)::int FROM post_changes WHERE target_id = ${owned.id}) AS post_changes,
             (SELECT max(detected_at) FROM post_changes WHERE target_id = ${owned.id}) AS post_changes_at,
+            (SELECT count(*)::int FROM posts WHERE target_id = ${owned.id} AND reposts_count IS NOT NULL) AS reposts_observed,
+            (SELECT max(observed_at) FROM posts WHERE target_id = ${owned.id} AND reposts_count IS NOT NULL) AS reposts_observed_at,
             (SELECT count(*)::int FROM insight_points WHERE ig_account_id = ${account.id}) AS insight_points,
             (SELECT max(observed_at) FROM insight_points WHERE ig_account_id = ${account.id}) AS insight_points_at,
             (SELECT count(*)::int FROM interactions WHERE target_id = ${owned.id}) AS interactions,
@@ -1142,6 +1170,7 @@ export async function getTargetDossier(
         observed_at: Date | string | null;
         like_count: number | null;
         comment_count: number | null;
+        reposts_count: number | null;
         media_type: string | null;
         media_product_type: string | null;
         comments_state: string;
@@ -1152,7 +1181,7 @@ export async function getTargetDossier(
         db,
         sql`
           SELECT p.post_id, p.caption, p.permalink, p.taken_at, p.observed_at,
-                 p.like_count, p.comment_count, p.media_type::text AS media_type,
+                 p.like_count, p.comment_count, p.reposts_count, p.media_type::text AS media_type,
                  p.media_product_type, p.comments_state::text AS comments_state,
                  p.source_id, p.evidence_id, e.metadata
           FROM posts p
@@ -1191,6 +1220,7 @@ export async function getTargetDossier(
             UNION SELECT source_id FROM posts WHERE target_id = ${owned.id}
             UNION SELECT source_id FROM follow_snapshots WHERE target_id = ${owned.id}
             UNION SELECT source_id FROM interactions WHERE target_id = ${owned.id}
+            UNION SELECT source_id FROM tagged_media WHERE ig_account_id = ${account.id}
           ) s
           ORDER BY source_id
         `,
@@ -1227,6 +1257,7 @@ export async function getTargetDossier(
             firstObservedAt: nullableDate(r.observed_at),
             likeCount: r.like_count === null ? null : int(r.like_count),
             commentCount: r.comment_count === null ? null : int(r.comment_count),
+            repostsCount: r.reposts_count === null ? null : int(r.reposts_count),
             mediaType: r.media_type,
             mediaProductType: r.media_product_type,
             commentsState: r.comments_state,
@@ -1250,10 +1281,12 @@ export async function getTargetDossier(
       stories: { count: count("stories"), latestAt: at("stories_at") },
       storyMentions: { count: count("story_mentions"), latestAt: at("story_mentions_at") },
       storySightings: { count: count("story_sightings"), latestAt: at("story_sightings_at") },
+      taggedMedia: { count: count("tagged_media"), latestAt: at("tagged_media_at") },
       posts: { count: count("posts"), latestAt: at("posts_at") },
       postComments: { count: count("post_comments"), latestAt: at("post_comments_at") },
       postChildren: { count: count("post_children"), latestAt: at("post_children_at") },
       postChanges: { count: count("post_changes"), latestAt: at("post_changes_at") },
+      repostsObserved: { count: count("reposts_observed"), latestAt: at("reposts_observed_at") },
       insightPoints: { count: count("insight_points"), latestAt: at("insight_points_at") },
       interactions: { count: count("interactions"), latestAt: at("interactions_at") },
     },

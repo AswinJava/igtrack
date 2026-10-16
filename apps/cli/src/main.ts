@@ -15,13 +15,17 @@ import {
   DOSSIER_HELP,
   INSIGHTS_HELP,
   LOOKUP_HELP,
+  MENTION_HELP,
   runActivity,
   runCapabilities,
   runDossier,
   runEvidence,
   runInsights,
   runLookup,
+  runMention,
   runRelationships,
+  runTags,
+  TAGS_HELP,
 } from "./commands/read.js";
 import { runMcp } from "./mcp/server.js";
 
@@ -58,6 +62,8 @@ Observe
   evidence              Evidence rows (audit trail) and --id chains
   lookup <username>     Ask the source what it can observe, persisting nothing
   insights <target>     Account metrics this deployment recorded, with absences
+  tags <target>         Media by other accounts this account is tagged in
+  mention <commentId>   Read one mentioned comment by id, persisting nothing
 
 Know the limits
   capabilities          What can and cannot be observed, and exactly why
@@ -137,6 +143,18 @@ async function dispatch(args: ParsedArgs): Promise<number> {
         return 0;
       }
       return runLookup(args);
+    case "tags":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${TAGS_HELP}\n`);
+        return 0;
+      }
+      return runTags(args);
+    case "mention":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${MENTION_HELP}\n`);
+        return 0;
+      }
+      return runMention(args);
     case "insights":
       if (wantsHelp(args)) {
         process.stdout.write(`${INSIGHTS_HELP}\n`);

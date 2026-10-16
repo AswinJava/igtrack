@@ -51,6 +51,10 @@ describe("ImportProvider (import:v1)", () => {
       // The export describes one account; other-account public data has no
       // route through it (D42) — the method says so with the reason.
       discoverAccount: false,
+      // FOUNDING §17: an export carries no tags edge and no mentioned-comment
+      // read; both refuse with the reason, never with empty data.
+      getTags: false,
+      getMentionedComment: false,
     });
   });
 
@@ -127,7 +131,19 @@ describe("ImportProvider (import:v1)", () => {
     const children = await sample.getPostChildren();
     const insights = await sample.getAccountInsights();
     const discovered = await sample.discoverAccount("mira.codes");
-    for (const r of [profile, stories, posts, comments, children, insights, discovered]) {
+    const tags = await sample.getTags();
+    const mentioned = await sample.getMentionedComment();
+    for (const r of [
+      profile,
+      stories,
+      posts,
+      comments,
+      children,
+      insights,
+      discovered,
+      tags,
+      mentioned,
+    ]) {
       expect(r.status).toBe(CapabilityStatus.UNAVAILABLE);
       expect(r.confidence).toBe(Confidence.UNKNOWN);
       expect(r.data).toBeUndefined();
@@ -140,6 +156,10 @@ describe("ImportProvider (import:v1)", () => {
     // An export can never describe another account; the refusal names the one
     // lawful route rather than implying the data does not exist (D42).
     expect(discovered.note).toMatch(/Business Discovery/);
+    // FOUNDING §17: neither the tags edge nor the mentioned-comment read has
+    // an export equivalent; the refusal names the route that does.
+    expect(tags.note).toMatch(/tags/);
+    expect(mentioned.note).toMatch(/webhook/i);
   });
 
   it("accepts the roster directory directly as the import dir", async () => {

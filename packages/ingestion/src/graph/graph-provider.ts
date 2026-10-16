@@ -20,10 +20,13 @@ import {
   type NormalizedInsightAbsence,
   type NormalizedInsightPoint,
   type NormalizedInsightSet,
+  type NormalizedMentionedComment,
   type NormalizedPost,
   type NormalizedPostChild,
   type NormalizedProfile,
   type NormalizedStory,
+  type NormalizedTaggedMedia,
+  type NormalizedTagPage,
   type ProviderCapabilities,
   type SourceRef,
 } from "@igtrack/core";
@@ -53,6 +56,20 @@ export const GRAPH_CHILD_FIELDS = "id,media_type,permalink,shortcode,timestamp";
 export const GRAPH_STORY_FIELDS = "id,timestamp,media_type,caption";
 export const GRAPH_COMMENT_FIELDS =
   "id,text,username,timestamp,parent_id,like_count,from{id,username},replies{id,text,username,timestamp,parent_id,like_count,from{id,username}}";
+// The documented IG User `tags` edge (Meta "Tags" reference, read 2026-10-16):
+// media in which the owned account was tagged by other accounts. username is
+// the media owner (the tagging account). No limit parameter is sent — the
+// edge's reference documents cursor paging only, so the platform default page
+// size is used rather than an invented bound.
+export const GRAPH_TAG_FIELDS =
+  "id,username,caption,permalink,media_type,timestamp";
+
+// The documented `mentioned_comment` expansion (Mentioned Comment reference,
+// read 2026-10-16): one webhook-keyed comment on another account's media.
+// `media` arrives as a node reference; `like_count` is documented as String
+// but the reference sample shows a number — the read accepts both and never
+// coerces a non-numeric string.
+export const GRAPH_MENTIONED_COMMENT_FIELDS = "timestamp,like_count,text,id,media";
 
 // Documented IG User insights request shapes (Meta "Instagram Account
 // Insights", read 2026-10-15). The metric sets are split BY metric_type: the
@@ -269,6 +286,13 @@ export class GraphProvider implements InstagramProvider {
       [CapabilityName.GET_PUBLIC_POSTS]: true,
       [CapabilityName.GET_PUBLIC_COMMENTS]: true,
       [CapabilityName.GET_POST_CHILDREN]: true,
+      // Documented IG User `tags` edge — owned account only, and NOT verified
+      // live in this environment (no credentials). The request shape follows
+      // the reference; a mismatch surfaces as a typed capability failure, and
+      // nothing is inferred from it (FOUNDING §17).
+      [CapabilityName.GET_TAGS]: true,
+      // The documented `mentioned_comment` read (webhook-keyed single read).
+      [CapabilityName.GET_MENTIONED_COMMENT]: true,
       // Documented IG User insights edge for the owned account (D36).
       [CapabilityName.GET_ACCOUNT_INSIGHTS]: true,
       // The documented business_discovery edge, opt-in (D42). Off by default
@@ -456,6 +480,10 @@ export class GraphProvider implements InstagramProvider {
           shortcode?: string;
           media_type?: string;
           media_product_type?: string;
+          // Documented top-level-only scalar. Never requested on this edge
+          // until live verification (FOUNDING §17); parsed when a deployment
+          // (or fixture) actually returns it — absence stays absent.
+          reposts_count?: number;
         }>;
         paging?: { cursors?: { after?: string } };
       }>(
@@ -566,6 +594,161 @@ export class GraphProvider implements InstagramProvider {
         ...(c.timestamp !== undefined ? { takenAt: c.timestamp } : {}),
       }));
       return available(children, { ...meta, confidence: Confidence.MEDIUM });
+    } catch (err) {
+      return providerFailure(meta, err);
+    }
+  }
+
+  /**
+   * The documented IG User `tags` edge (owned account only): media owned by
+   * OTHER accounts in which this account was tagged. Documented limitations
+   * kept as-is: private media are not returned, and the response carries no
+   * previous/next links — paging travels in paging.cursors.after, like the
+   * media edge. Rows are references; they are never rendered as this
+   * account's own media (FOUNDING §17).
+   */
+  async getTags(
+    account: NormalizedAccountRef,
+    cursor?: Cursor,
+  ): Promise<CapabilityResult<NormalizedTagPage>> {
+    const meta = this.meta(account);
+    try {
+      const data = await this.get<{
+        data?: Array<{
+          id: string;
+          username?: string;
+          caption?: string;
+          permalink?: string;
+          media_type?: string;
+          timestamp?: string;
+        }>;
+        paging?: { cursors?: { after?: string } };
+      }>(`/${this.igUserId}/tags`, {
+        fields: GRAPH_TAG_FIELDS,
+        ...(cursor !== undefined ? { after: cursor.value } : {}),
+      });
+      const observedAt = meta.observedAt;
+      const items: NormalizedTaggedMedia[] = (data.data ?? []).map((t) => ({
+        mediaId: t.id,
+        ...(t.username !== undefined ? { ownerUsername: t.username } : {}),
+        ...(t.caption !== undefined ? { caption: t.caption } : {}),
+        ...(t.permalink !== undefined ? { permalink: t.permalink } : {}),
+        ...(t.media_type !== undefined
+          ? { mediaType: mapGraphMediaType(t.media_type) }
+          : {}),
+        ...(t.timestamp !== undefined ? { takenAt: t.timestamp } : {}),
+        meta: {
+          category: ObservationCategory.OBSERVED,
+          confidence: Confidence.HIGH,
+          observedAt,
+        },
+      }));
+      const after = data.paging?.cursors?.after;
+      if (after === undefined) {
+        return available(
+          {
+            items,
+            complete: true,
+            meta: {
+              category: ObservationCategory.OBSERVED,
+              confidence: Confidence.HIGH,
+              observedAt,
+            },
+          },
+          { ...meta, confidence: Confidence.HIGH },
+        );
+      }
+      return {
+        status: CapabilityStatus.PARTIAL,
+        data: {
+          items,
+          nextCursor: after,
+          complete: false,
+          meta: {
+            category: ObservationCategory.OBSERVED,
+            confidence: Confidence.MEDIUM,
+            observedAt,
+          },
+        },
+        ...meta,
+        confidence: Confidence.MEDIUM,
+        note: "More tag pages available; continue with the returned cursor",
+        rawReference: `graph:v1/tags?after=${after}`,
+        nextCursor: after,
+      };
+    } catch (err) {
+      return providerFailure(meta, err);
+    }
+  }
+
+  /**
+   * The documented `mentioned_comment` read (Mentioned Comment reference,
+   * read 2026-10-16): one comment on someone else's media in which this
+   * account was @mentioned. The platform publishes no listing edge — ids
+   * arrive via Meta webhook notifications — so this is an on-demand read of a
+   * caller-supplied id. Documented limitations kept as-is: the call errors
+   * when comments are disabled on the underlying media. This read persists
+   * nothing.
+   */
+  async getMentionedComment(
+    account: NormalizedAccountRef,
+    commentId: string,
+  ): Promise<CapabilityResult<NormalizedMentionedComment>> {
+    const meta = this.meta(account);
+    try {
+      const data = await this.get<{
+        mentioned_comment?: {
+          id?: string;
+          text?: string;
+          timestamp?: string;
+          // Documented as String; the reference sample shows a number. Accept
+          // both, never coerce a non-numeric string.
+          like_count?: number | string;
+          media?: string | { id?: string };
+        };
+      }>(`/${this.igUserId}`, {
+        fields: `mentioned_comment.comment_id(${commentId}){${GRAPH_MENTIONED_COMMENT_FIELDS}}`,
+      });
+      const raw = data.mentioned_comment;
+      if (raw === undefined || raw.id === undefined) {
+        return unavailable(
+          meta,
+          `The platform returned no mentioned_comment for id ${commentId}: the documented read answers only for ids this app holds (webhook-delivered) that remain readable. Nothing was persisted.`,
+        );
+      }
+      const likeCount =
+        typeof raw.like_count === "number"
+          ? raw.like_count
+          : typeof raw.like_count === "string" &&
+              raw.like_count !== "" &&
+              Number.isFinite(Number(raw.like_count))
+            ? Number(raw.like_count)
+            : undefined;
+      const mediaId =
+        typeof raw.media === "string" ? raw.media : raw.media?.id;
+      const observedAt = meta.observedAt;
+      const read = available(
+        {
+          commentId: raw.id,
+          ...(raw.text !== undefined ? { text: raw.text } : {}),
+          // Provider-verbatim timestamp (the reference's format is not
+          // guaranteed to be strict ISO 8601 with colon offsets).
+          ...(raw.timestamp !== undefined ? { createdAt: raw.timestamp } : {}),
+          ...(likeCount !== undefined ? { likeCount } : {}),
+          ...(mediaId !== undefined ? { mediaId } : {}),
+          meta: {
+            category: ObservationCategory.OBSERVED,
+            confidence: Confidence.HIGH,
+            observedAt,
+          },
+        },
+        // `available` has no note slot; the note rides on the result itself.
+        { ...meta, confidence: Confidence.HIGH },
+      );
+      return {
+        ...read,
+        note: "On-demand read of one webhook-keyed mentioned comment; nothing is persisted by this call.",
+      };
     } catch (err) {
       return providerFailure(meta, err);
     }
@@ -785,6 +968,29 @@ export class GraphProvider implements InstagramProvider {
       return providerFailure(meta, err);
     }
   }
+
+  /**
+   * Live-verification probe for documented-but-unrequested media fields
+   * (scripts/verify-graph-provider.ts, read-only). One node, one caller-named
+   * field list.
+   *
+   * Why this exists: an unknown `fields` name fails the WHOLE Graph request,
+   * so `reposts_count` and its siblings stay out of GRAPH_MEDIA_FIELDS until
+   * this probe shows the configured app actually sees them. No executor calls
+   * this; it returns the raw provider answer for the harness to summarize.
+   */
+  async probeMediaNode(
+    mediaId: string,
+    fields: string,
+  ): Promise<CapabilityResult<Record<string, unknown>>> {
+    const meta = this.meta();
+    try {
+      const data = await this.get<Record<string, unknown>>(`/${mediaId}`, { fields });
+      return available(data, { ...meta, confidence: Confidence.HIGH });
+    } catch (err) {
+      return providerFailure(meta, err);
+    }
+  }
 }
 
 interface GraphRawMedia {
@@ -793,6 +999,7 @@ interface GraphRawMedia {
   timestamp?: string;
   like_count?: number;
   comments_count?: number;
+  reposts_count?: number;
   permalink?: string;
   shortcode?: string;
   media_type?: string;
@@ -819,6 +1026,9 @@ function mapGraphMediaItem(p: GraphRawMedia, observedAt: string): NormalizedPost
     ...(p.caption !== undefined ? { caption: p.caption } : {}),
     ...(p.like_count !== undefined ? { likeCount: p.like_count } : {}),
     ...(p.comments_count !== undefined ? { commentCount: p.comments_count } : {}),
+    // Documented top-level-only scalar, parsed when the provider returns it.
+    // Absent stays absent — never zero-filled, never inferred.
+    ...(p.reposts_count !== undefined ? { repostsCount: p.reposts_count } : {}),
     ...(p.media_type !== undefined ? { mediaType: mapGraphMediaType(p.media_type) } : {}),
     ...(p.media_product_type !== undefined
       ? { mediaProductType: p.media_product_type }

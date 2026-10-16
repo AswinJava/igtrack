@@ -13,6 +13,8 @@
       "post-1": "comments/post-1.json"
     },
     "insights": "insights.json",
-    "discovery": "discovery.json"
+    "discovery": "discovery.json",
+    "tags": "tags.json",
+    "mentioned_comments": "mentioned-comments.json"
   }
 }

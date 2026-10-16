@@ -20,6 +20,7 @@ import {
   runFollowingScan,
   runInsightsScan,
   runPostScan,
+  runTagsScan,
   runProfileScan,
   runStoryScan,
   type ExecutionSource,
@@ -176,6 +177,8 @@ export async function executeOne(
       result = await runPostScan(db, job, src);
     } else if (job.kind === "INSIGHTS_SCAN") {
       result = await runInsightsScan(db, job, src);
+    } else if (job.kind === "TAGS_SCAN") {
+      result = await runTagsScan(db, job, src);
     } else if (job.kind === "DISCOVERY_SCAN") {
       result = await runDiscoveryScan(db, job, src);
     } else {

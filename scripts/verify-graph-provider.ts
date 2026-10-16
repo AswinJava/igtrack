@@ -24,7 +24,7 @@ import {
   findUnmappedFields,
 } from "../packages/ingestion/src/graph/field-coverage.js";
 
-const MAX_REQUESTS = 10;
+const MAX_REQUESTS = 11;
 
 // Normalizer envelope keys: pipeline shape, not provider fields — excluded
 // from new-field detection.
@@ -146,6 +146,19 @@ async function main(): Promise<void> {
     }
   }
   if (budget() && firstPostId !== undefined) {
+    // One-node probe for the documented-but-unrequested media metrics. An
+    // unknown field name fails the WHOLE Graph call, which is exactly why
+    // reposts_count stays out of GRAPH_MEDIA_FIELDS until this row says LIVE.
+    requests += 1;
+    const metricProbe = summarize(
+      "media.reposts_count",
+      await provider.probeMediaNode(firstPostId, "id,reposts_count"),
+    );
+    metricProbe.note =
+      "Single-node probe of reposts_count (owner-gated). Success unlocks requesting it in GRAPH_MEDIA_FIELDS; a documented refusal keeps the parse-when-present path and the UNVERIFIED rows honest.";
+    probes.push(metricProbe);
+  }
+  if (budget() && firstPostId !== undefined) {
     requests += 1;
     probes.push(
       summarize(
@@ -182,6 +195,20 @@ async function main(): Promise<void> {
     requests += 1;
     probes.push(summarize("getStories", await provider.getStories(account)));
   }
+  if (budget()) {
+    requests += 1;
+    probes.push(summarize("getTags", await provider.getTags(account)));
+  }
+  // getMentionedComment is webhook-keyed: without a comment id taken from the
+  // notification feed there is nothing to read, so the harness reports it as
+  // deferred by input rather than skipping it silently.
+  probes.push({
+    capability: "getMentionedComment",
+    provenance: "NOT_VERIFIED",
+    status: "NOT_VERIFIED",
+    note:
+      "Webhook-keyed read: needs a comment id from the notification feed. Unlock: subscribe the webhook, then read one notification's id through `igtrack mention read`.",
+  });
   // Roster lists are declared unavailable by the provider contract: probing
   // them performs no network call and pins the honest state.
   probes.push(summarize("getFollowers", await provider.getFollowers(account)));

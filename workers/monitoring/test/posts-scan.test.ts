@@ -85,9 +85,17 @@ function stubSource(config: {
       getPublicPosts: config.postsCap ?? true,
       getPublicComments: config.commentsCap ?? true,
       getPostChildren: config.childrenCap ?? false,
+      getTags: false,
+      getMentionedComment: false,
       getAccountInsights: false,
       discoverAccount: false,
     }),
+    getTags: async () => {
+      throw new Error("stub: not wired");
+    },
+    getMentionedComment: async () => {
+      throw new Error("stub: not wired");
+    },
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
     },

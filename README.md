@@ -33,7 +33,7 @@ The gap is not more data. The gap is **epistemic integrity**: record what was ob
 
 ## What it does
 
-- **Observes** — profile, active stories, story mentions, following/follower counts, public posts, comments, carousels, and **own-account insights** (follower-count series, daily reach/views/engagement, country demographics). Each observation is stored with source id, observation id, observed vs. captured time, confidence, and SHA-256 hashes in an append-only evidence ledger. When explicitly enabled, `igtrack lookup <username>` also **probes** another public professional account's public profile and recent media through the documented Business Discovery edge — read-through, persisted nowhere. Recording such an account is a second, explicit act: `igtrack targets add <username> --observed` probes the route once, refuses with the platform's reason if it cannot answer, and only then tracks it; `igtrack dossier <username>` reads the recorded profile, its bounded media preview (the ceiling is stated, never shown as "the account's posts"), the per-capability coverage, and the refusals, each with its reason.
+- **Observes** — profile, active stories, story mentions, following/follower counts, public posts, comments, carousels, **tagged media** (media by other accounts that tag the owned account, through the documented tags edge — stored first-observed-wins; removal is never claimed), and **own-account insights** (follower-count series, daily reach/views/engagement, country demographics). Each observation is stored with source id, observation id, observed vs. captured time, confidence, and SHA-256 hashes in an append-only evidence ledger. When explicitly enabled, `igtrack lookup <username>` also **probes** another public professional account's public profile and recent media through the documented Business Discovery edge — read-through, persisted nowhere. Recording such an account is a second, explicit act: `igtrack targets add <username> --observed` probes the route once, refuses with the platform's reason if it cannot answer, and only then tracks it; `igtrack dossier <username>` reads the recorded profile, its bounded media preview (the ceiling is stated, never shown as "the account's posts"), the per-capability coverage, and the refusals, each with its reason. `igtrack mention <commentId>` reads one comment that mentions the owned account, on demand, from an id delivered by a Meta webhook — read-through, persisted nowhere.
 - **Derives** — follow deltas, profile changes, **post caption edits and disappearances** (posts no longer observed in a complete media listing — never called "deleted"), story lifetimes, mention roll-ups, relationship rankings (story mentions, comment authorship on owned media, follow deltas) and **insight series**. Every derived row points at the observations it came from. Truncated (PARTIAL) scans are recorded but **never diffed**, so partiality cannot fabricate a "lost follower" or a vanished post, and a metric the platform did not return is stored as an **absence with a reason**, never a zero.
 - **Refuses, out loud** — follower/following *rosters* of other accounts, liker lists, another account's comments/likes, repost identities, other accounts' highlights, and media bytes are not exposed by any supported interface. IGTrack names the reason instead of inventing a number — including on the one cross-account route it does support, where unreachable classes (consumer, private, age-gated) return the platform's reason, never an empty profile. `igtrack capabilities` prints the whole registry.
 - **Runs itself** — a Postgres-backed job queue (`FOR UPDATE SKIP LOCKED`, leases, heartbeats, resumable paged scans, checkpoints, retry classification) plus a scheduler with per-target cadence.
@@ -89,7 +89,7 @@ Then ask your agent things like:
 
 > *"Queue a scan, run the worker, and tell me everything that changed on aurora.wilde in the last 7 days. Quote the evidence id for each claim. If something isn't observable, say so instead of guessing."*
 
-The server ships instructions that tell the agent the same rules this README does: `null` means *not observable* (never zero), synthetic data must be declared as synthetic, and lawfully unavailable data must not be chased. Sixteen tools are exposed, all backed by the same operations the CLI uses.
+The server ships instructions that tell the agent the same rules this README does: `null` means *not observable* (never zero), synthetic data must be declared as synthetic, and lawfully unavailable data must not be chased. Nineteen tools are exposed, all backed by the same operations the CLI uses.
 
 Prefer plain CLI? Everything is JSON-first and scriptable:
 
@@ -110,7 +110,7 @@ run Node can call it without pnpm:
 pnpm igtrack capabilities
 ```
 
-`15 of 20 capabilities are obtainable from a lawful source.` The rest are marked
+`18 of 23 capabilities are obtainable from a lawful source.` The rest are marked
 `DOCUMENTED_ABSENT` with the exact reason and what would unlock them. This table
 is generated from the same registry the CLI reads — the CLI cannot advertise
 more than the code delivers. See [docs/CAPABILITIES.md](docs/CAPABILITIES.md).

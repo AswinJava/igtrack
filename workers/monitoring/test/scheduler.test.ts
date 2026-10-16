@@ -74,9 +74,9 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
       now: new Date(T0),
     });
     expect(result.targetsConsidered).toBe(1);
-    expect(result.enqueued).toBe(6);
+    expect(result.enqueued).toBe(7);
     expect(result.deduplicated).toBe(0);
-    expect(await countJobs(handle)).toBe(6);
+    expect(await countJobs(handle)).toBe(7);
 
     for (const kind of ["PROFILE_SCAN", "FOLLOWER_SCAN", "FOLLOWING_SCAN", "POSTS_SCAN", "INSIGHTS_SCAN"]) {
       const jobs = await jobsForKind(handle, kind);
@@ -88,13 +88,17 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
     }
     const storyJobs = await jobsForKind(handle, "STORY_SCAN");
     expect(storyJobs[0]?.idempotencyKey).toContain("2026-08-28T10:00:00.000Z");
+    // TAGS_SCAN runs on a 24h cadence: the window containing T0 is midnight.
+    const tagsJobs = await jobsForKind(handle, "TAGS_SCAN");
+    expect(tagsJobs).toHaveLength(1);
+    expect(tagsJobs[0]?.idempotencyKey).toContain("2026-08-28T00:00:00.000Z");
   });
 
   it("a repeated tick inside the same window is idempotent (S1)", async () => {
     const result = await runSchedulerTick(handle.db, { now: new Date(T0_LATER) });
     expect(result.enqueued).toBe(0);
-    expect(result.deduplicated).toBe(6);
-    expect(await countJobs(handle)).toBe(6);
+    expect(result.deduplicated).toBe(7);
+    expect(await countJobs(handle)).toBe(7);
   });
 
   it("two concurrent scheduler instances do not duplicate logical jobs (S2)", async () => {
@@ -105,8 +109,10 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
         runSchedulerTick(other.db, { now: new Date(T1) }),
       ]);
       const totalEnqueued = results.reduce((sum, r) => sum + r.enqueued, 0);
+      // The six sub-daily kinds moved to a new window; TAGS_SCAN's 24h window
+      // is unchanged, so it deduplicates instead of double-enqueueing.
       expect(totalEnqueued).toBe(6);
-      expect(await countJobs(handle)).toBe(12);
+      expect(await countJobs(handle)).toBe(13);
     } finally {
       await other.close();
     }
@@ -123,7 +129,7 @@ describe.runIf(dbAvailable)("scheduler tick", () => {
       now: new Date(Date.parse("2026-08-28T16:10:00.000Z") + 6 * 60 * 60 * 1000),
     });
     expect(result.enqueued).toBe(6);
-    expect(await countJobs(handle)).toBe(18);
+    expect(await countJobs(handle)).toBe(19);
   });
 
   it("PAUSED targets never receive scheduled scans (S3)", async () => {

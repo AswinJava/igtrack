@@ -89,9 +89,17 @@ function storySource(config: StorySourceConfig = {}): ExecutionSource {
       getPublicPosts: true,
       getPublicComments: true,
       getPostChildren: false,
+      getTags: false,
+      getMentionedComment: false,
       getAccountInsights: false,
       discoverAccount: false,
     }),
+    getTags: async () => {
+      throw new Error("stub: not wired");
+    },
+    getMentionedComment: async () => {
+      throw new Error("stub: not wired");
+    },
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
     },

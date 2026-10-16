@@ -10,8 +10,10 @@ import {
   opEvidence,
   opInsights,
   opLookup,
+  opMentionedCommentProbe,
   opScanRun,
   opStatus,
+  opTaggedMedia,
   opTargetSetStatus,
   opTargetAdd,
   opWork,
@@ -97,7 +99,7 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
 
   it("queues every owned scan kind once per scheduling window, and only --force repeats it", async () => {
     const first = await opScanRun(ctx, { target: FIXTURE_USERNAME });
-    expect(first.enqueued).toHaveLength(6);
+    expect(first.enqueued).toHaveLength(7);
     expect(first.enqueued.every((e) => e.deduplicated === false)).toBe(true);
     // The discovery kind belongs to the other observation mode: refused with a
     // reason at enqueue, never queued to fail (D47).
@@ -105,7 +107,7 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     expect(first.skipped[0]?.reason).toContain("DISCOVERY_SCAN observes another account");
 
     const second = await opScanRun(ctx, { target: FIXTURE_USERNAME });
-    expect(second.enqueued).toHaveLength(6);
+    expect(second.enqueued).toHaveLength(7);
     expect(second.enqueued.every((e) => e.deduplicated === true)).toBe(true);
     expect(new Set(second.enqueued.map((e) => e.jobId))).toEqual(
       new Set(first.enqueued.map((e) => e.jobId)),
@@ -122,7 +124,7 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     await opTargetSetStatus(ctx, { target: FIXTURE_USERNAME, status: "PAUSED" });
     const result = await opScanRun(ctx, { target: FIXTURE_USERNAME });
     expect(result.enqueued).toHaveLength(0);
-    expect(result.skipped).toHaveLength(7);
+    expect(result.skipped).toHaveLength(8);
     expect(result.skipped.every((s) => s.reason.includes("PAUSED"))).toBe(true);
     await opTargetSetStatus(ctx, { target: FIXTURE_USERNAME, status: "ACTIVE" });
   });
@@ -317,7 +319,7 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     // refused with the mode reason instead of being queued to fail (D47).
     const queued = await opScanRun(ctx, { target: DISCOVERY_USERNAME });
     expect(queued.enqueued.map((e) => e.kind)).toEqual(["DISCOVERY_SCAN"]);
-    expect(queued.skipped).toHaveLength(6);
+    expect(queued.skipped).toHaveLength(7);
     expect(queued.skipped.every((s) => s.reason.includes("only DISCOVERY_SCAN"))).toBe(true);
 
     const work = await opWork(ctx, { max: 40, skipScheduler: true });
@@ -358,5 +360,84 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     await expect(opDossier(ctx, { target: "definitely-not-tracked" })).rejects.toThrow(
       /No tracked target matches/,
     );
+  });
+
+  it("reads tagged media back as another account's media, with the listing's completeness (FOUNDING §17)", async () => {
+    const tags = await opTaggedMedia(ctx, { target: FIXTURE_USERNAME });
+    // The TAGS_SCAN job drained by the work test above stored the two fixture
+    // rows, and the listing that produced them is recorded alongside them.
+    expect(tags.listing).not.toBeNull();
+    expect(tags.listing?.completion).toBe("COMPLETE");
+    expect([...tags.rows.map((r) => r.mediaId)].sort()).toEqual([
+      "tag-media-1",
+      "tag-media-2",
+    ]);
+
+    // Each row names the tagging account, never this one.
+    const first = tags.rows.find((r) => r.mediaId === "tag-media-1");
+    expect(first?.ownerUsername).toBe("mira.lens");
+    // Another account's publish time and our first observation are different facts.
+    expect(first?.takenAt).toBe("2026-08-26T15:40:00.000Z");
+    expect(first?.observedAt).not.toBe(first?.takenAt);
+    // A field the provider did not return stays null, never "".
+    expect(tags.rows.find((r) => r.mediaId === "tag-media-2")?.permalink).toBeNull();
+    expect(tags.notes.join(" ")).toContain("ANOTHER account");
+  });
+
+  it("answers one mentioned comment by id and persists nothing (FOUNDING §17)", async () => {
+    // With more than one owned account (the seed's target_a plus this one) the
+    // read refuses to guess which account a webhook notification belongs to.
+    await expect(
+      opMentionedCommentProbe(ctx, { commentId: "mentioned-comment-1" }),
+    ).rejects.toThrow(/pass --account/);
+
+    const probe = await opMentionedCommentProbe(ctx, {
+      commentId: "mentioned-comment-1",
+      account: FIXTURE_USERNAME,
+    });
+    expect(probe.status).toBe("AVAILABLE");
+    expect(probe.account).toBe(FIXTURE_USERNAME);
+    const comment = probe.comment as {
+      commentId: string;
+      likeCount?: number;
+      mediaId?: string;
+    } | null;
+    expect(comment?.commentId).toBe("mentioned-comment-1");
+    expect(comment?.likeCount).toBe(12);
+    expect(comment?.mediaId).toBe("other-media-77");
+
+    // The read is stateless: an id the set does not declare is UNAVAILABLE
+    // with the reason, never a fabricated or empty comment.
+    const unknown = await opMentionedCommentProbe(ctx, {
+      commentId: "no-such-comment",
+      account: FIXTURE_USERNAME,
+    });
+    expect(unknown.status).toBe("UNAVAILABLE");
+    expect(unknown.comment).toBeNull();
+    expect(unknown.note).toMatch(/declares no mentioned comment/);
+  });
+
+  it("reports tags, the mention-listing gap, and the repost metric exactly as observed (FOUNDING §17)", async () => {
+    const dossier = await opDossier(ctx, { target: FIXTURE_USERNAME });
+
+    const tags = dossier.coverage.find((c) => c.capability === "TAGS");
+    expect(tags?.state).toBe("OBSERVED");
+    expect(tags?.observedRows).toBe(2);
+
+    // No listing edge exists for mentioned comments: the dossier states that
+    // with the reason instead of an empty list pretending to be one.
+    const mentions = dossier.coverage.find((c) => c.capability === "MENTIONED_COMMENTS");
+    expect(mentions?.state).toBe("UNAVAILABLE");
+    expect(mentions?.reason).toMatch(/stateless single read/);
+
+    // The repost metric is OBSERVED for exactly the rows that returned it:
+    // post-1 carries it, post-2's absence stays absent — never zero.
+    const reposts = dossier.coverage.find((c) => c.capability === "REPOSTS");
+    expect(reposts?.state).toBe("OBSERVED");
+    expect(reposts?.observedRows).toBe(1);
+    const post1 = dossier.media?.rows.find((r) => r.postId === "post-1");
+    const post2 = dossier.media?.rows.find((r) => r.postId === "post-2");
+    expect(post1?.repostsCount).toBe(128);
+    expect(post2?.repostsCount).toBeNull();
   });
 });

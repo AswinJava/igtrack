@@ -13,6 +13,7 @@ export type SchedulableScanKind =
   | "STORY_SCAN"
   | "POSTS_SCAN"
   | "INSIGHTS_SCAN"
+  | "TAGS_SCAN"
   | "DISCOVERY_SCAN";
 
 export const SCHEDULABLE_KINDS: readonly SchedulableScanKind[] = [
@@ -22,6 +23,7 @@ export const SCHEDULABLE_KINDS: readonly SchedulableScanKind[] = [
   "STORY_SCAN",
   "POSTS_SCAN",
   "INSIGHTS_SCAN",
+  "TAGS_SCAN",
   "DISCOVERY_SCAN",
 ];
 
@@ -38,6 +40,7 @@ export const OWNED_ONLY_KINDS: readonly SchedulableScanKind[] = [
   "STORY_SCAN",
   "POSTS_SCAN",
   "INSIGHTS_SCAN",
+  "TAGS_SCAN",
 ];
 
 export const KINDS_BY_OBSERVATION_MODE: Record<
@@ -62,6 +65,7 @@ export interface ScanIntervalConfig {
   STORY_SCAN: number;
   POSTS_SCAN: number;
   INSIGHTS_SCAN: number;
+  TAGS_SCAN: number;
   DISCOVERY_SCAN: number;
 }
 
@@ -70,7 +74,9 @@ const HOUR = 60 * MINUTE;
 
 // MVP cadence: stories expire after 24h, so they are polled every 30 minutes
 // (a missed poll is a permanent ephemerality gap); profile, follow lists,
-// posts, and insights move slowly and are polled every 6 hours.
+// posts, and insights move slowly and are polled every 6 hours. TAGS_SCAN is
+// owned-account and slow-moving (FOUNDING §17): a tag appearing a day late is
+// not a missed observation, so the documented tags edge is listed once a day.
 // DISCOVERY_SCAN is the slowest on purpose: it is the one kind that spends
 // another account's Platform Rate Limit budget (200 × users per hour) and the
 // data it watches — a public profile's fields and its recent media — does not
@@ -82,6 +88,7 @@ export const DEFAULT_SCAN_INTERVALS_MS: ScanIntervalConfig = {
   STORY_SCAN: 30 * MINUTE,
   POSTS_SCAN: 6 * HOUR,
   INSIGHTS_SCAN: 6 * HOUR,
+  TAGS_SCAN: 24 * HOUR,
   DISCOVERY_SCAN: 24 * HOUR,
 };
 
@@ -92,6 +99,7 @@ const INTERVAL_ENV: Record<SchedulableScanKind, string> = {
   STORY_SCAN: "IGTRACK_SCAN_STORY_MS",
   POSTS_SCAN: "IGTRACK_SCAN_POSTS_MS",
   INSIGHTS_SCAN: "IGTRACK_SCAN_INSIGHTS_MS",
+  TAGS_SCAN: "IGTRACK_SCAN_TAGS_MS",
   DISCOVERY_SCAN: "IGTRACK_SCAN_DISCOVERY_MS",
 };
 

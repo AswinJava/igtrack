@@ -39,6 +39,7 @@ describe("per-target scan preferences (pure)", () => {
       "STORY_SCAN",
       "POSTS_SCAN",
       "INSIGHTS_SCAN",
+      "TAGS_SCAN",
     ]);
     expect(kindsForTarget(["STORY_SCAN", "POSTS_SCAN"])).toEqual([
       "STORY_SCAN",
@@ -81,6 +82,7 @@ describe("per-target scan preferences (pure)", () => {
       STORY_SCAN: 1_800_000,
       POSTS_SCAN: 6 * 3_600_000,
       INSIGHTS_SCAN: 6 * 3_600_000,
+      TAGS_SCAN: 24 * 3_600_000,
       DISCOVERY_SCAN: 24 * 3_600_000,
     };
     const now = Date.parse("2026-08-28T10:10:00.000Z");
@@ -97,6 +99,7 @@ describe("per-target scan preferences (pure)", () => {
       "STORY_SCAN",
       "POSTS_SCAN",
       "INSIGHTS_SCAN",
+      "TAGS_SCAN",
     ]);
     const story = scans.find((s) => s.kind === "STORY_SCAN")!;
     expect(story.nextWindowStart.toISOString()).toBe("2026-08-28T10:30:00.000Z");

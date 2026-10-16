@@ -19,10 +19,12 @@ import {
   type NormalizedDiscoveredAccount,
   type NormalizedFollowPage,
   type NormalizedInsightSet,
+  type NormalizedMentionedComment,
   type NormalizedPost,
   type NormalizedPostChild,
   type NormalizedProfile,
   type NormalizedStory,
+  type NormalizedTagPage,
   type ProviderCapabilities,
   type SourceRef,
 } from "@igtrack/core";
@@ -130,6 +132,11 @@ export class ImportProvider implements InstagramProvider {
       getPublicPosts: false,
       getPublicComments: false,
       getPostChildren: false,
+      // The export carries no tagged-media section (tagged media belong to
+      // other accounts) and no mentioned-comment data; declared false rather
+      // than silently absent.
+      getTags: false,
+      getMentionedComment: false,
       // The export has no insight metrics at all (D38) — declared false so
       // doctor and the capability matrix never over-claim.
       getAccountInsights: false,
@@ -199,6 +206,20 @@ export class ImportProvider implements InstagramProvider {
     return unavailable(
       this.meta(),
       "import:v1 reads only the export's follower/following roster files; album children are not read by this provider version.",
+    );
+  }
+
+  async getTags(): Promise<CapabilityResult<NormalizedTagPage>> {
+    return unavailable(
+      this.meta(),
+      "The Instagram data export carries no tagged-media section: media in which the account was tagged belong to other accounts and are absent from the export. Reachable through the graph provider's documented IG User tags edge (owned account).",
+    );
+  }
+
+  async getMentionedComment(): Promise<CapabilityResult<NormalizedMentionedComment>> {
+    return unavailable(
+      this.meta(),
+      "The Instagram data export carries no mentioned-comment data: comments on other accounts' media are not included. The graph provider's mentioned_comment read is webhook-keyed and reads one caller-supplied id on demand.",
     );
   }
 

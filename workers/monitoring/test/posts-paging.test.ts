@@ -94,9 +94,17 @@ function postsStub(config: PostsStubConfig): ExecutionSource {
       getPublicPosts: true,
       getPublicComments: config.commentsCap ?? true,
       getPostChildren: config.childrenCap ?? true,
+      getTags: false,
+      getMentionedComment: false,
       getAccountInsights: false,
       discoverAccount: false,
     }),
+    getTags: async () => {
+      throw new Error("stub: not wired");
+    },
+    getMentionedComment: async () => {
+      throw new Error("stub: not wired");
+    },
     resolveAccount: async () => {
       throw new Error("stub: resolveAccount not wired");
     },
@@ -190,9 +198,17 @@ function followerStub(pages: { usernames: string[]; complete: boolean; nextCurso
       getPublicPosts: true,
       getPublicComments: true,
       getPostChildren: false,
+      getTags: false,
+      getMentionedComment: false,
       getAccountInsights: false,
       discoverAccount: false,
     }),
+    getTags: async () => {
+      throw new Error("stub: not wired");
+    },
+    getMentionedComment: async () => {
+      throw new Error("stub: not wired");
+    },
     resolveAccount: async () => {
       throw new Error("not wired");
     },

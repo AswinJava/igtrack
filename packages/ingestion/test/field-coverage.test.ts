@@ -115,6 +115,8 @@ describe("new provider field detection (Phase 17)", () => {
       "getPostChildren",
       "getPublicComments",
       "getStories",
+      "getTags",
+      "getMentionedComment",
     ]) {
       expect(
         COVERAGE_AREA_BY_CAPABILITY[capability],

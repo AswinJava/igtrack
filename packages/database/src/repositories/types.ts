@@ -33,6 +33,9 @@ export const ObservationKind = {
   // Phase G (D58): one evidence row per logical scan covers the media change
   // claims that scan produced (caption edits, no-longer-observed events).
   POSTS_LISTING: "posts_listing",
+  // FOUNDING §17: one evidence row per logical tags scan covers that scan's
+  // tagged-media rows — the artifact is the listing, not each row.
+  TAGGED_MEDIA_LISTING: "tagged_media_listing",
   ACCOUNT_INSIGHTS: "account_insights",
 } as const;
 

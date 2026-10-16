@@ -5,10 +5,12 @@ import type {
   NormalizedDiscoveredAccount,
   NormalizedFollowPage,
   NormalizedInsightSet,
+  NormalizedMentionedComment,
   NormalizedPost,
   NormalizedPostChild,
   NormalizedProfile,
   NormalizedStory,
+  NormalizedTagPage,
 } from "./models.js";
 
 export const CapabilityName = {
@@ -20,6 +22,8 @@ export const CapabilityName = {
   GET_PUBLIC_POSTS: "getPublicPosts",
   GET_PUBLIC_COMMENTS: "getPublicComments",
   GET_POST_CHILDREN: "getPostChildren",
+  GET_TAGS: "getTags",
+  GET_MENTIONED_COMMENT: "getMentionedComment",
   GET_ACCOUNT_INSIGHTS: "getAccountInsights",
   DISCOVER_ACCOUNT: "discoverAccount",
 } as const;
@@ -71,6 +75,29 @@ export interface InstagramProvider {
    * No pagination: albums are bounded single responses.
    */
   getPostChildren(post: NormalizedPost): Promise<CapabilityResult<NormalizedPostChild[]>>;
+  /**
+   * Media owned by OTHER accounts in which this account was tagged (the
+   * documented IG User `tags` edge; the edge exists on the owned account
+   * only). Rows are references — first-observed records of who tagged the
+   * account — never diffed and never rendered as the account's own media. A
+   * complete empty listing IS a claim (no tags observed); a provider without
+   * the edge reports UNAVAILABLE with the reason.
+   */
+  getTags(
+    account: NormalizedAccountRef,
+    cursor?: Cursor,
+  ): Promise<CapabilityResult<NormalizedTagPage>>;
+  /**
+   * The documented IG User `mentioned_comment` field expansion: one comment
+   * on someone else's media in which this account was @mentioned, read by id.
+   * The platform publishes no listing edge — ids arrive via Meta webhook
+   * notifications — so this is an on-demand read, not a feed. Providers
+   * without the route report UNAVAILABLE with the reason.
+   */
+  getMentionedComment(
+    account: NormalizedAccountRef,
+    commentId: string,
+  ): Promise<CapabilityResult<NormalizedMentionedComment>>;
   /**
    * PRODUCT STATUS: provider-level AVAILABLE via the documented IG User
    * insights edge (owned account). A metric the platform does not return is
