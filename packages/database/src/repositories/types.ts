@@ -30,6 +30,9 @@ export const ObservationKind = {
   INTERACTION: "interaction",
   POST: "post",
   POST_COMMENT: "post_comment",
+  // Phase G (D58): one evidence row per logical scan covers the media change
+  // claims that scan produced (caption edits, no-longer-observed events).
+  POSTS_LISTING: "posts_listing",
   ACCOUNT_INSIGHTS: "account_insights",
 } as const;
 

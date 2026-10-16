@@ -15,7 +15,7 @@ import {
   type ParsedArgs,
 } from "../output.js";
 import { createContext } from "../context.js";
-import { opActivity, opEvidence, opInsights, opLookup, opRelationships } from "../tools.js";
+import { opActivity, opDossier, opEvidence, opInsights, opLookup, opRelationships } from "../tools.js";
 
 // ---------------------------------------------------------------------------
 // Read-only operations: activity, relationships, evidence, lookup.
@@ -97,20 +97,31 @@ export async function runRelationships(args: ParsedArgs): Promise<number> {
       result.ranks.length === 0
         ? "No relationships observed yet. Relationship ranks come from COMPLETE follower/following snapshots, story mentions, and comment authorship on owned media."
         : table(
-            ["account", "score", "mentions", "comments", "deltas", "mutual", "first seen", "last seen", "basis"],
+            ["account", "score", "mentions", "comments", "deltas", "mutual", "first seen", "last seen", "last signal", "basis"],
             result.ranks.map((r) => [
               `@${r.username}`,
               String(r.score),
-              String(r.signals.mentions),
-              String(r.signals.comments),
-              String(r.signals.deltas),
+              `${r.signals.mentions}${r.signalsWithinWindow.mentions > 0 ? ` (${r.signalsWithinWindow.mentions} in ${result.method.recencyWindowDays}d)` : ""}`,
+              `${r.signals.comments}${r.signalsWithinWindow.comments > 0 ? ` (${r.signalsWithinWindow.comments} in ${result.method.recencyWindowDays}d)` : ""}`,
+              `${r.signals.deltas}${r.signalsWithinWindow.deltas > 0 ? ` (${r.signalsWithinWindow.deltas} in ${result.method.recencyWindowDays}d)` : ""}`,
               r.mutual ? "yes" : "no",
               r.firstSeenAt === null ? "unavailable" : r.firstSeenAt,
               r.lastSeenAt === null ? "not currently observed" : r.lastSeenAt,
+              r.lastSignalAt === null ? "no signal event" : r.lastSignalAt,
               r.firstSeenBasis ?? "none",
             ]),
           ),
-    ].join("\n");
+      result.truncated
+        ? `Note: more ranks exist than the ${result.ranks.length} shown; raise --limit to see them.`
+        : "",
+      "",
+      `Method: ${result.method.scoreFormula}`,
+      ...result.method.signals.map((s) => `  ${s.kind} × ${s.weight} — ${s.means}`),
+      `  ${result.method.recencyNote}`,
+      `  ${result.method.evidenceNote}`,
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
 
     emit({ json, meta: ctx.meta, data: result, human });
     return 0;
@@ -265,6 +276,138 @@ export async function runLookup(args: ParsedArgs): Promise<number> {
         : "Nothing was persisted: `lookup` is a read-only probe.";
     const human = [...sections, "", footer].join("\n");
     emit({ json, meta: ctx.meta, data: result, human });
+    return 0;
+  } finally {
+    await ctx.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// dossier — everything recorded about one target, with its gaps named
+// ---------------------------------------------------------------------------
+
+export const DOSSIER_HELP = `igtrack dossier <target id|username> [--json]
+
+Everything this deployment has RECORDED about one tracked account, read back
+with its gaps intact: identity, profile snapshots and changes, follow deltas,
+stories and mentions, stored media rows, and a per-capability coverage list
+where every state is computed from rows that exist.
+
+A capability with no rows is reported as NOT_OBSERVED with the reason a scan
+cannot fill it, or as UNAVAILABLE with the platform's own reason — never as
+empty data. Capabilities this project refuses by decision carry that refusal.
+
+For a DISCOVERY target (another public account, tracked via
+\`targets add <username> --observed\`) the stored media rows are a BOUNDED,
+non-pageable preview: the row's \`publishedAt\` (the platform's publish time) and
+\`firstObservedAt\` (when this deployment first saw it) are different facts and
+are printed as such — newly discovered is not newly created.
+
+Read-only. Nothing is fetched; this is a report over stored observations.`;
+
+export async function runDossier(args: ParsedArgs): Promise<number> {
+  const json = isJson(args.flags);
+  const target = args.positionals[0];
+  if (target === undefined) {
+    throw new UsageError("Usage: igtrack dossier <target id|username>");
+  }
+  const ctx = await createContext();
+  try {
+    const result = await opDossier(ctx, { target });
+
+    const sections: string[] = [
+      `Dossier   @${result.account.username}  (${result.target.observationMode} · ${result.target.status})`,
+      `Account   id ${result.account.id} · platform id ${display(result.account.igId)}`,
+      `Profile   ${display(result.account.displayName)} · private ${display(result.account.isPrivate)} · verified ${display(result.account.isVerified)} · type ${display(result.account.accountType)}`,
+      `Seen      first ${result.account.firstSeenAt} · last ${result.account.lastSeenAt}`,
+      `Route     ${result.route.providerMethod} — ${result.route.scope}`,
+      `Sources   ${result.route.observingSources.length === 0 ? "none recorded yet" : result.route.observingSources.join(", ")}`,
+      "",
+      "Coverage (state is computed from stored rows; reasons are the platform's or the registry's, never a guess):",
+      table(
+        ["capability", "state", "rows", "latest", "reason"],
+        result.coverage.map((c) => [
+          c.label,
+          c.state,
+          c.observedRows === null ? "no writer" : String(c.observedRows),
+          c.latestObservedAt ?? "unavailable",
+          [
+            c.reason === null ? null : c.reason.replace(/\s+/g, " ").slice(0, 90),
+            c.unlock === null ? null : `unlock: ${c.unlock.replace(/\s+/g, " ").slice(0, 60)}`,
+            c.caveat === null ? null : `caveat: ${c.caveat.replace(/\s+/g, " ").slice(0, 90)}`,
+          ]
+            .filter((v) => v !== null)
+            .join(" · "),
+        ]),
+      ),
+    ];
+
+    sections.push(
+      "",
+      "Profile snapshots:",
+      result.profile.latest === null
+        ? "  No profile snapshot recorded for this account yet."
+        : table(
+            ["field", "value"],
+            [
+              ["observed at", result.profile.latest.observedAt],
+              ["source", result.profile.latest.sourceId],
+              ["completeness", display(result.profile.latest.completeness)],
+              ["followers", display(result.profile.latest.followerCount)],
+              ["following", display(result.profile.latest.followingCount)],
+              ["posts", display(result.profile.latest.postCount)],
+              ["bio", display(result.profile.latest.biography)],
+              ["external url", display(result.profile.latest.externalUrl)],
+              ["verified", display(result.profile.latest.isVerified)],
+            ],
+          ),
+      `  ${result.profile.snapshotCount} snapshot(s) · ${result.profile.changeCount} recorded field change(s)`,
+    );
+
+    if (result.media !== null) {
+      sections.push(
+        "",
+        `Stored media rows (${result.media.storedCount})${result.media.bounded === true ? " — bounded preview" : ""}:`,
+        table(
+          ["post", "published", "first observed", "type", "likes", "comments", "comments state"],
+          result.media.rows.map((m) => [
+            m.postId,
+            display(m.publishedAt),
+            display(m.firstObservedAt),
+            display(m.mediaType),
+            display(m.likeCount),
+            display(m.commentCount),
+            m.commentsState,
+          ]),
+        ),
+        `  published ${display(result.media.oldestPublishedAt)} … ${display(result.media.newestPublishedAt)} · first observed here ${display(result.media.firstObservedAt)} … ${display(result.media.lastObservedAt)}`,
+      );
+      if (result.media.truncated) {
+        sections.push(
+          "  Note: more rows are stored than the report lists; this table is capped.",
+        );
+      }
+    }
+
+    if (result.routeUnavailability.length > 0) {
+      sections.push(
+        "",
+        "Routes that answered UNAVAILABLE for the sources observing this target:",
+        table(
+          ["source", "capability", "reason", "updated"],
+          result.routeUnavailability.map((u) => [
+            u.sourceId,
+            u.capability,
+            display(u.note).replace(/\s+/g, " ").slice(0, 110),
+            u.updatedAt,
+          ]),
+        ),
+      );
+    }
+
+    sections.push("", "Notes:", ...result.notes.map((n) => `  · ${n}`));
+
+    emit({ json, meta: ctx.meta, data: result, human: sections.join("\n") });
     return 0;
   } finally {
     await ctx.close();

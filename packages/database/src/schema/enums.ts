@@ -11,6 +11,16 @@ export const followDirectionEnum = pgEnum("follow_direction", [
   "FOLLOWING",
 ]);
 
+// How a target is observed (FOUNDING §15, D47). OWNED means the operator's own
+// account, read through the owned-account edges. DISCOVERY means another public
+// professional account, read through the documented Business Discovery edge —
+// operator-named, never traversal-derived, and never a place to hang an owned
+// scan kind that cannot succeed there.
+export const observationModeEnum = pgEnum("observation_mode", [
+  "OWNED",
+  "DISCOVERY",
+]);
+
 export const snapshotCompletenessEnum = pgEnum("snapshot_completeness", [
   "COMPLETE",
   "PARTIAL",
@@ -21,6 +31,20 @@ export const followChangeEnum = pgEnum("follow_change", [
   "LOST_FOLLOWING",
   "NEW_FOLLOWER",
   "LOST_FOLLOWER",
+]);
+
+// Phase G (D54): how a post's presence in an owned account's media listing
+// changed between observations. PRESENT/ABSENT is current state (mutable);
+// NO_LONGER_OBSERVED is the event row written when a COMPLETE listing no
+// longer contains a post — never phrased as "deleted" (D55).
+export const postPresenceStateEnum = pgEnum("post_presence_state", [
+  "PRESENT",
+  "ABSENT",
+]);
+
+export const postChangeKindEnum = pgEnum("post_change_kind", [
+  "CAPTION_EDITED",
+  "NO_LONGER_OBSERVED",
 ]);
 
 export const interactionKindEnum = pgEnum("interaction_kind", [

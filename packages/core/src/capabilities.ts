@@ -119,10 +119,15 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["discoverAccount"],
     permissions:
       "Facebook Login product; the documented business_discovery edge. Public Business/Creator accounts only — consumer and private accounts are unreachable, age-gated accounts return nothing. Documented permissions: instagram_basic + instagram_manage_insights + pages_read_engagement. Opt-in on the graph provider: IGTRACK_GRAPH_BUSINESS_DISCOVERY=1 (D42).",
-    persistence: [],
-    ui: ["igtrack lookup (CLI)", "lookup (MCP tool)"],
+    persistence: ["profileSnapshots", "posts", "evidence"],
+    ui: [
+      "igtrack lookup (CLI)",
+      "igtrack dossier (CLI)",
+      "igtrack targets add --observed (CLI)",
+      "lookup / dossier / igtrack_target_add (MCP tools)",
+    ],
     howItWorks:
-      "A probe, not a record: lookup asks the documented business_discovery edge for one username and renders the public profile fields plus a bounded recent-media preview with the audited media fields (captions, type, permalink, like and comment counts). Nothing is persisted, so no evidence row is owed — a probe is not a claim of record. Unreachable classes (consumer, private, age-gated, no such account) return UNAVAILABLE with the platform's reason, never an empty profile and never a zero. The platform id travels as an output of this response; it is never a lookup key.",
+      "Two intents, one edge (D53). `lookup` is a probe, not a record: it renders the public profile fields plus the bounded recent-media preview and persists nothing — a probe is not a claim of record. Recording is operator-directed: `targets add <username> --observed` probes the route once, refuses on UNAVAILABLE with the platform's reason (a target that can never be scanned is not created), and creates a DISCOVERY target; DISCOVERY_SCAN then stores the documented profile fields as a COMPLETE, diffable snapshot and the media preview as posts rows. The preview is capped by the edge and cannot page (cap 12, DISCOVERY_MEDIA_PREVIEW_LIMIT): the cap is written into every media row's evidence, the scan completes as COMPLETED_PARTIAL, and no surface may call those rows the account's post history. Media rows carry the platform's published time and our first-observation time as separate fields. No documented route returns another account's media comments — that stays UNAVAILABLE with a reason.",
     whyUnavailable: null,
     unlock: null,
     liveState: "NOT_VERIFIED",
@@ -211,10 +216,10 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     label: "Public posts",
     providerMethods: ["getPublicPosts"],
     permissions: "Public account media; graph returns the owned account's media.",
-    persistence: ["posts", "evidence"],
+    persistence: ["posts", "postPresence", "postChanges", "evidence"],
     ui: ["/targets/[id] (content tab)"],
     howItWorks:
-      "Listings paginate with opaque cursors; the executor persists a checkpoint per page, resumes after crashes, stops on duplicate cursors (PARTIAL, never a loop), and records idempotently. The provider shortcode is preferred with permalink parsing as fallback. A page without a cursor is a complete listing.",
+      "Listings paginate with opaque cursors; the executor persists a checkpoint per page, resumes after crashes, stops on duplicate cursors (PARTIAL, never a loop), and records idempotently. The provider shortcode is preferred with permalink parsing as fallback. A page without a cursor is a complete listing. For OWNED targets each scan also records media change state (FOUNDING §16): the caption as last read per post, a CAPTION_EDITED event when a caption read differs from the caption last read, and — only when the media listing completed — a NO_LONGER_OBSERVED event for posts absent from that complete listing ('no longer observed', never 'deleted'). DISCOVERY previews are never diffed.",
     whyUnavailable: null,
     unlock: null,
     liveState: "NOT_VERIFIED",

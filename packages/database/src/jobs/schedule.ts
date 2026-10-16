@@ -12,7 +12,8 @@ export type SchedulableScanKind =
   | "FOLLOWING_SCAN"
   | "STORY_SCAN"
   | "POSTS_SCAN"
-  | "INSIGHTS_SCAN";
+  | "INSIGHTS_SCAN"
+  | "DISCOVERY_SCAN";
 
 export const SCHEDULABLE_KINDS: readonly SchedulableScanKind[] = [
   "PROFILE_SCAN",
@@ -21,7 +22,38 @@ export const SCHEDULABLE_KINDS: readonly SchedulableScanKind[] = [
   "STORY_SCAN",
   "POSTS_SCAN",
   "INSIGHTS_SCAN",
+  "DISCOVERY_SCAN",
 ];
+
+// Which scan kinds a target's observation mode may legally run (FOUNDING §15
+// D47). The two modes are answered by different provider routes, so a kind that
+// cannot succeed for a mode is refused when the job is ENQUEUED, not discovered
+// as a repeated provider failure later.
+export type ObservationMode = "OWNED" | "DISCOVERY";
+
+export const OWNED_ONLY_KINDS: readonly SchedulableScanKind[] = [
+  "PROFILE_SCAN",
+  "FOLLOWER_SCAN",
+  "FOLLOWING_SCAN",
+  "STORY_SCAN",
+  "POSTS_SCAN",
+  "INSIGHTS_SCAN",
+];
+
+export const KINDS_BY_OBSERVATION_MODE: Record<
+  ObservationMode,
+  readonly SchedulableScanKind[]
+> = {
+  OWNED: OWNED_ONLY_KINDS,
+  DISCOVERY: ["DISCOVERY_SCAN"],
+};
+
+export function isScanKindAllowedForMode(
+  kind: SchedulableScanKind,
+  mode: ObservationMode,
+): boolean {
+  return KINDS_BY_OBSERVATION_MODE[mode].includes(kind);
+}
 
 export interface ScanIntervalConfig {
   PROFILE_SCAN: number;
@@ -30,6 +62,7 @@ export interface ScanIntervalConfig {
   STORY_SCAN: number;
   POSTS_SCAN: number;
   INSIGHTS_SCAN: number;
+  DISCOVERY_SCAN: number;
 }
 
 const MINUTE = 60_000;
@@ -38,6 +71,10 @@ const HOUR = 60 * MINUTE;
 // MVP cadence: stories expire after 24h, so they are polled every 30 minutes
 // (a missed poll is a permanent ephemerality gap); profile, follow lists,
 // posts, and insights move slowly and are polled every 6 hours.
+// DISCOVERY_SCAN is the slowest on purpose: it is the one kind that spends
+// another account's Platform Rate Limit budget (200 × users per hour) and the
+// data it watches — a public profile's fields and its recent media — does not
+// move faster than daily.
 export const DEFAULT_SCAN_INTERVALS_MS: ScanIntervalConfig = {
   PROFILE_SCAN: 6 * HOUR,
   FOLLOWER_SCAN: 6 * HOUR,
@@ -45,6 +82,7 @@ export const DEFAULT_SCAN_INTERVALS_MS: ScanIntervalConfig = {
   STORY_SCAN: 30 * MINUTE,
   POSTS_SCAN: 6 * HOUR,
   INSIGHTS_SCAN: 6 * HOUR,
+  DISCOVERY_SCAN: 24 * HOUR,
 };
 
 const INTERVAL_ENV: Record<SchedulableScanKind, string> = {
@@ -54,6 +92,7 @@ const INTERVAL_ENV: Record<SchedulableScanKind, string> = {
   STORY_SCAN: "IGTRACK_SCAN_STORY_MS",
   POSTS_SCAN: "IGTRACK_SCAN_POSTS_MS",
   INSIGHTS_SCAN: "IGTRACK_SCAN_INSIGHTS_MS",
+  DISCOVERY_SCAN: "IGTRACK_SCAN_DISCOVERY_MS",
 };
 
 export function resolveScanIntervals(
@@ -102,9 +141,12 @@ export interface EnqueueScheduledScanResult {
   enqueued: boolean;
 }
 
-// Race-safe enqueue: a single INSERT…SELECT guarded on target status. A target
-// paused or deleted between scheduler selection and this statement can never
-// receive a job. Unique-idempotency conflicts resolve to `enqueued: false`.
+// Race-safe enqueue: a single INSERT…SELECT guarded on target status AND
+// observation mode. A target paused, deleted, or mode-changed between scheduler
+// selection and this statement can never receive a job, and a kind illegal for
+// the target's mode is refused here — before it enters the queue (D47). The
+// mode is read in the same statement that inserts, so it cannot go stale.
+// Unique-idempotency conflicts resolve to `enqueued: false`.
 export async function enqueueScheduledScan(
   db: Database,
   input: EnqueueScheduledScanInput,
@@ -125,6 +167,7 @@ export async function enqueueScheduledScan(
     FROM targets
     WHERE targets.id = ${input.targetId}
       AND targets.status = 'ACTIVE'
+      AND (targets.observation_mode = 'DISCOVERY') = (${input.kind} = 'DISCOVERY_SCAN')
     ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
     RETURNING monitoring_jobs.id
   `);
@@ -159,12 +202,19 @@ export interface UpcomingScan {
  * scheduler will do. Paused targets are the caller's concern (no jobs). */
 export function upcomingScansForTarget(
   targetId: string,
-  prefs: { scanCadenceMult: number | null; scanKinds: string[] | null } | null,
+  prefs: {
+    scanCadenceMult: number | null;
+    scanKinds: string[] | null;
+    observationMode?: ObservationMode;
+  } | null,
   nowMs: number,
   intervals: ScanIntervalConfig,
 ): UpcomingScan[] {
   const mult = prefs?.scanCadenceMult ?? null;
-  return kindsForTarget(prefs?.scanKinds ?? null).map((kind) => {
+  return kindsForTarget(
+    prefs?.scanKinds ?? null,
+    prefs?.observationMode ?? "OWNED",
+  ).map((kind) => {
     const interval = effectiveIntervalMs(intervals[kind], mult);
     const nextWindowStart = upcomingWindowStart(nowMs, interval);
     return {
@@ -200,6 +250,8 @@ export interface TargetScanPrefs {
   scanCadenceMult: number | null;
   /** Explicit enabled scan kinds; NULL = all schedulable kinds. */
   scanKinds: string[] | null;
+  /** How this target is observed; decides which kinds are even legal (D47). */
+  observationMode: ObservationMode;
 }
 
 function normalizeCadenceMult(raw: number | null): number {
@@ -215,11 +267,21 @@ export function effectiveIntervalMs(
   return Math.max(1, Math.floor(baseMs * normalizeCadenceMult(scanCadenceMult)));
 }
 
-/** Schedulable kinds enabled for one target (unknown entries dropped). */
-export function kindsForTarget(scanKinds: string[] | null): SchedulableScanKind[] {
-  if (scanKinds === null) return [...SCHEDULABLE_KINDS];
-  const allowed = new Set<string>(SCHEDULABLE_KINDS);
-  return SCHEDULABLE_KINDS.filter((k) => scanKinds.includes(k) && allowed.has(k));
+/**
+ * Schedulable kinds enabled for one target (unknown entries dropped).
+ *
+ * The observation mode is a hard filter applied BEFORE the caller's explicit
+ * subset: a DISCOVERY target can never be scheduled for an owned-account scan
+ * kind, whatever its `scan_kinds` says (D47). Refusing here means the queue
+ * never holds a job that is guaranteed to fail.
+ */
+export function kindsForTarget(
+  scanKinds: string[] | null,
+  observationMode: ObservationMode = "OWNED",
+): SchedulableScanKind[] {
+  const legal = KINDS_BY_OBSERVATION_MODE[observationMode];
+  if (scanKinds === null) return [...legal];
+  return legal.filter((k) => scanKinds.includes(k));
 }
 
 /** Next window start strictly after now for a per-target effective interval. */
@@ -236,7 +298,7 @@ export async function listActiveTargetPrefs(
   offset = 0,
 ): Promise<TargetScanPrefs[]> {
   const rows = await db.execute(sql`
-    SELECT id::text AS id, scan_cadence_mult, scan_kinds
+    SELECT id::text AS id, scan_cadence_mult, scan_kinds, observation_mode
     FROM targets
     WHERE status = 'ACTIVE'
     ORDER BY created_at ASC, id ASC
@@ -247,12 +309,16 @@ export async function listActiveTargetPrefs(
       id: string;
       scan_cadence_mult: string | number | null;
       scan_kinds: string[] | null;
+      observation_mode: string | null;
     }>,
   ).map((row) => ({
     id: row.id,
     scanCadenceMult:
       row.scan_cadence_mult === null ? null : Number(row.scan_cadence_mult),
     scanKinds: row.scan_kinds,
+    // The column is NOT NULL with an OWNED default; the fallback only covers a
+    // row read from a database that has not run migration 0016 yet.
+    observationMode: row.observation_mode === "DISCOVERY" ? "DISCOVERY" : "OWNED",
   }));
 }
 

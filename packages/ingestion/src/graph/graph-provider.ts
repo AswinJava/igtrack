@@ -4,6 +4,7 @@ import {
   CapabilityName,
   CapabilityStatus,
   Confidence,
+  DISCOVERY_MEDIA_PREVIEW_LIMIT,
   errored,
   ObservationCategory,
   SourceKind,
@@ -74,7 +75,9 @@ export const GRAPH_INSIGHTS_WINDOW_DAYS = 30;
 // public data. The request reuses the audited profile and media field sets
 // verbatim, so no field enters the product through this route that the §15
 // field-coverage audit has not already accounted for.
-export const GRAPH_DISCOVERY_MEDIA_LIMIT = 12;
+// The preview ceiling lives in core (it is a property of the route, and the
+// recording layer must state the same bound the request enforced).
+export const GRAPH_DISCOVERY_MEDIA_LIMIT = DISCOVERY_MEDIA_PREVIEW_LIMIT;
 export function graphDiscoveryFields(username: string): string {
   return (
     `business_discovery.username(${username})` +
@@ -759,6 +762,9 @@ export class GraphProvider implements InstagramProvider {
         ...(d.follows_count !== undefined ? { followingCount: d.follows_count } : {}),
         ...(d.media_count !== undefined ? { postCount: d.media_count } : {}),
         recentMedia: (d.media?.data ?? []).map((m) => mapGraphMediaItem(m, observedAt)),
+        // The request asked for at most this many; declaring it on the result
+        // lets the recording layer state the same bound (D48).
+        recentMediaLimit: GRAPH_DISCOVERY_MEDIA_LIMIT,
         meta: {
           category: ObservationCategory.OBSERVED,
           confidence: Confidence.MEDIUM,

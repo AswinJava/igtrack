@@ -113,6 +113,20 @@
       "when": 1792200000000,
       "tag": "0015_insight_points",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1792300000000,
+      "tag": "0016_target_observation_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1792400000000,
+      "tag": "0017_post_change_detection",
+      "breakpoints": true
     }
   ]
 }

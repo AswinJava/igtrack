@@ -3,9 +3,9 @@ import {
   CapabilityErrorKind,
   CapabilityName,
   CapabilityStatus,
+  RegistryCapabilityId,
   type CapabilityResult,
   type InstagramProvider,
-  type RegistryCapabilityId,
 } from "@igtrack/core";
 import {
   ACTIVITY_TYPES,
@@ -18,8 +18,10 @@ import {
   getOwnedTarget,
   getUserActivityFeed,
   getRelationshipsForUser,
+  getTargetDossier,
   insightLatest,
   insightState,
+  isScanKindAllowedForMode,
   listInsightSeries,
   listJobsForTarget,
   listProviderMetrics,
@@ -27,6 +29,8 @@ import {
   listScopedEvidence,
   listTargets,
   listTargetsForUser,
+  RELATIONSHIP_RECENCY_WINDOW_DAYS,
+  RELATIONSHIP_SIGNAL_WEIGHTS,
   resolveScanIntervals,
   schedulingWindowStart,
   transitionTargetStatus,
@@ -35,6 +39,7 @@ import {
   type DashboardOverview,
   type RelationshipRank,
   type ScopedEvidenceRow,
+  type TargetDossier,
   type TargetListItem,
 } from "@igtrack/database";
 import {
@@ -72,6 +77,7 @@ const SCAN_KINDS = [
   "STORY_SCAN",
   "POSTS_SCAN",
   "INSIGHTS_SCAN",
+  "DISCOVERY_SCAN",
 ] as const;
 export type ScanKind = (typeof SCAN_KINDS)[number];
 
@@ -218,27 +224,113 @@ export interface TargetAddInput {
   username: string;
   localName?: string | undefined;
   tags?: string[] | undefined;
+  /**
+   * `--observed`: track another public account through the documented Business
+   * Discovery edge (D47/D49). The route is probed FIRST; if it answers
+   * UNAVAILABLE the target is refused and the platform's reason (or the unlock
+   * flag) is printed — a target that can never be scanned is not created.
+   */
+  observed?: boolean | undefined;
+  provider?: InstagramProvider | undefined;
+}
+
+export interface TargetAddResult {
+  id: string;
+  username: string;
+  created: boolean;
+  observationMode: "OWNED" | "DISCOVERY";
+  note: string;
+  /** What the one-time probe confirmed, verbatim from the provider (a probe result, not a stored claim). */
+  probe: { status: string; observedAt: string | null; note: string | null } | null;
 }
 
 export async function opTargetAdd(
   ctx: CliContext,
   input: TargetAddInput,
-): Promise<{ id: string; username: string; created: boolean; note: string }> {
+): Promise<TargetAddResult> {
   const username = input.username.trim().replace(/^@/, "");
   if (username === "") throw new UsageError("targets add requires a username.");
+
+  let probe: TargetAddResult["probe"] = null;
+  if (input.observed === true) {
+    probe = await probeObservedAccount(ctx, input.provider, username);
+  }
+
   const { target, created } = await createTarget(ctx.db, {
     userId: ctx.userId,
     username,
     ...(input.localName !== undefined ? { localName: input.localName } : {}),
     ...(input.tags !== undefined && input.tags.length > 0 ? { tags: input.tags } : {}),
+    ...(input.observed === true ? { observationMode: "DISCOVERY" as const } : {}),
   });
   return {
     id: target.id,
     username,
     created,
-    note: created
-      ? "Target created ACTIVE. The scheduler enqueues the first scans on the next tick (`igtrack work` runs one now)."
-      : "Target already tracked for this user; nothing changed.",
+    observationMode: input.observed === true ? "DISCOVERY" : "OWNED",
+    note:
+      input.observed === true
+        ? created
+          ? "Observed target created ACTIVE (DISCOVERY mode). Only DISCOVERY_SCAN can run for it; the scheduler enqueues it on the next tick (`igtrack work` runs one now), and `igtrack dossier <username>` reads back what was recorded."
+          : "Target already tracked for this user; nothing changed. (`--observed` records through the same target row.)"
+        : created
+          ? "Target created ACTIVE. The scheduler enqueues the first scans on the next tick (`igtrack work` runs one now)."
+          : "Target already tracked for this user; nothing changed.",
+    probe,
+  };
+}
+
+/**
+ * One probe of the documented route before a DISCOVERY target exists (D49).
+ * The probe is the gate, not a permission check: a route that says UNAVAILABLE
+ * — switched off, a consumer account, a private account, age-gated, or the
+ * account the deployment already observes — must refuse the target HERE, with
+ * the platform's reason, instead of queueing scans that can never succeed.
+ * A transport failure is retryable and is reported as such, never as absence.
+ */
+async function probeObservedAccount(
+  ctx: CliContext,
+  injected: InstagramProvider | undefined,
+  username: string,
+): Promise<{ status: string; observedAt: string | null; note: string | null }> {
+  const provider = injected ?? ctx.provider.provider;
+  if (provider === null) {
+    throw new CliError(
+      "PROVIDER_UNAVAILABLE",
+      `Provider "${ctx.provider.name}" is not usable: ${ctx.provider.error ?? "unknown reason"}`,
+      3,
+    );
+  }
+  if (provider.capabilities()[CapabilityName.DISCOVER_ACCOUNT] !== true) {
+    throw new CliError(
+      "CAPABILITY_UNAVAILABLE",
+      `Provider "${ctx.provider.name}" cannot read another account's public data (no documented route). Nothing was created.`,
+      3,
+    );
+  }
+  const result = await provider.discoverAccount(username);
+  if (result.status === CapabilityStatus.ERROR) {
+    throw new CliError(
+      result.error?.kind ?? "PROVIDER_ERROR",
+      `The probe of @${username} failed: ${result.error?.message ?? "provider error"}${
+        result.error?.retryable === true ? " (retryable — nothing was created)" : " (nothing was created)"
+      }`,
+      3,
+    );
+  }
+  if (result.status !== CapabilityStatus.AVAILABLE) {
+    throw new CliError(
+      "OBSERVATION_UNAVAILABLE",
+      `@${username} cannot be observed through the documented route, so no target was created: ${
+        result.note ?? "the platform returned no public data for this account"
+      }`,
+      3,
+    );
+  }
+  return {
+    status: result.status,
+    observedAt: result.observedAt,
+    note: result.note ?? null,
   };
 }
 
@@ -287,8 +379,7 @@ export async function opScanRun(
   ctx: CliContext,
   input: { target?: string | undefined; kinds?: string[] | undefined; force?: boolean | undefined },
 ): Promise<ScanRunResult> {
-  const all = await listTargetsForUser(ctx.db, ctx.userId);
-  if (all.length === 0) {
+  const all = await listTargetsForUser(ctx.db, ctx.userId);  if (all.length === 0) {
     throw new CliError(
       "NO_TARGETS",
       "This deployment tracks nothing yet. Add one with `igtrack targets add <username>`.",
@@ -331,6 +422,20 @@ export async function opScanRun(
         : kinds.filter((k) => (full.scanKinds ?? []).includes(k));
 
     for (const kind of kinds) {
+      // Refused at enqueue, before a job exists (D47): the two observation
+      // modes are answered by different provider routes, so a kind belonging
+      // to the other mode could never succeed for this target.
+      if (!isScanKindAllowedForMode(kind, full.observationMode)) {
+        skipped.push({
+          kind,
+          username: target.username,
+          reason:
+            full.observationMode === "DISCOVERY"
+              ? "DISCOVERY target: only DISCOVERY_SCAN is answerable for another account"
+              : "OWNED target: DISCOVERY_SCAN observes another account, not this one",
+        });
+        continue;
+      }
       if (!allowed.includes(kind)) {
         skipped.push({ kind, username: target.username, reason: "excluded by target scan preferences" });
         continue;
@@ -507,13 +612,400 @@ export async function opActivity(ctx: CliContext, input: ActivityQuery): Promise
   };
 }
 
+export interface RelationshipsResult {
+  target: ResolvedTarget;
+  /**
+   * How every score was computed, stated with the data (D51). The weights and
+   * the recency window come from the same constants the ranking code uses, so
+   * the description cannot drift from the arithmetic.
+   */
+  method: {
+    signals: Array<{ kind: "mention" | "comment" | "delta"; weight: number; means: string }>;
+    scoreFormula: string;
+    recencyWindowDays: number;
+    recencyNote: string;
+    evidenceNote: string;
+  };
+  // Honest bound: ranks are capped after ranking, so say when the cap hid rows.
+  truncated: boolean;
+  ranks: RelationshipRank[];
+}
+
 export async function opRelationships(
   ctx: CliContext,
   input: { target: string; limit?: number | undefined },
-): Promise<{ target: ResolvedTarget; ranks: RelationshipRank[] }> {
+): Promise<RelationshipsResult> {
   const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
   const ranks = await getRelationshipsForUser(ctx.db, ctx.userId, resolved.id);
-  return { target: resolved, ranks: ranks.slice(0, input.limit ?? 25) };
+  const limit = input.limit ?? 25;
+  return {
+    target: resolved,
+    method: {
+      signals: [
+        {
+          kind: "mention",
+          weight: RELATIONSHIP_SIGNAL_WEIGHTS.mention,
+          means: "the account was named in one of the target's stories (one story counts once)",
+        },
+        {
+          kind: "comment",
+          weight: RELATIONSHIP_SIGNAL_WEIGHTS.comment,
+          means: "the account authored a comment on media the operator owns",
+        },
+        {
+          kind: "delta",
+          weight: RELATIONSHIP_SIGNAL_WEIGHTS.delta,
+          means: "a recorded follow/unfollow change by name (a change event, not an inferred timeline)",
+        },
+      ],
+      scoreFormula: `score = mentions × ${RELATIONSHIP_SIGNAL_WEIGHTS.mention} + comments × ${RELATIONSHIP_SIGNAL_WEIGHTS.comment} + deltas × ${RELATIONSHIP_SIGNAL_WEIGHTS.delta}`,
+      recencyWindowDays: RELATIONSHIP_RECENCY_WINDOW_DAYS,
+      recencyNote:
+        "Each rank also carries lastSignalAt and the same three counts restricted to the recency window. Recency is NOT folded into the score: this product counts stored rows, it does not invent a decay constant.",
+      evidenceNote:
+        "Each rank carries up to three stored rows behind its counts. An empty evidence list is a structural membership fact (present in the follow snapshots) with no signal event — not missing data.",
+    },
+    truncated: ranks.length > limit,
+    ranks: ranks.slice(0, limit),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// dossier — everything recorded about one target, read back with its gaps
+// ---------------------------------------------------------------------------
+
+/**
+ * Which stored surfaces a registry capability is durable in. The state is not
+ * a claim in itself: it is computed from row counts, so "OBSERVED" always has
+ * rows behind it and "NOT_OBSERVED" never means empty data.
+ */
+const CAPABILITY_SURFACES: Partial<
+  Record<RegistryCapabilityId, Array<keyof TargetDossier["counts"]>>
+> = {
+  PROFILE: ["profileSnapshots"],
+  COUNTS: ["profileSnapshots"],
+  ACCOUNT_INSIGHTS: ["insightPoints"],
+  // The discovery route's profile fields land in profileSnapshots; its media
+  // preview lands in posts.
+  OTHER_ACCOUNT_PUBLIC: ["profileSnapshots", "posts"],
+  STORIES: ["stories"],
+  STORY_METADATA: ["stories"],
+  STORY_MENTIONS: ["storyMentions"],
+  MENTION_INTELLIGENCE: ["storyMentions", "interactions"],
+  POSTS: ["posts", "postChanges"],
+  REELS: ["posts"],
+  CAROUSELS: ["posts", "postChildren"],
+  COMMENTS: ["postComments"],
+  REPLIES: ["postComments"],
+  FOLLOWERS: ["followerSnapshots", "followDeltas"],
+  FOLLOWING: ["followingSnapshots", "followDeltas"],
+};
+
+export interface DossierCoverageRow {
+  capability: string;
+  label: string;
+  state: "OBSERVED" | "UNAVAILABLE" | "NOT_OBSERVED";
+  /** Rows stored for this capability's surfaces on this target. Null when the capability has no writer. */
+  observedRows: number | null;
+  latestObservedAt: string | null;
+  /** Why it is unavailable / why nothing is observed. Never a guess: registry text or a recorded route note. */
+  reason: string | null;
+  /** What would change the answer, from the registry. */
+  unlock: string | null
+  /** Tables the capability persists into, from the registry. */
+  persistence: string[];
+  /** Bound or route caveat that qualifies an OBSERVED state (e.g. a bounded media preview). */
+  caveat: string | null;
+}
+
+export interface DossierResult {
+  target: ResolvedTarget & {
+    observationMode: "OWNED" | "DISCOVERY";
+    createdAt: string;
+    tags: string[];
+    localName: string | null;
+  };
+  account: {
+    id: string;
+    username: string;
+    igId: string | null;
+    displayName: string | null;
+    isPrivate: boolean | null;
+    isVerified: boolean | null;
+    accountType: string | null;
+    firstSeenAt: string;
+    lastSeenAt: string;
+  };
+  /** How this target is observed and what that route can answer. */
+  route: {
+    observationMode: "OWNED" | "DISCOVERY";
+    providerMethod: string;
+    scope: string;
+    observingSources: string[];
+  };
+  counts: Record<string, { count: number; latestAt: string | null }>;
+  profile: {
+    snapshotCount: number;
+    latest: {
+      observedAt: string;
+      sourceId: string;
+      completeness: string | null;
+      followerCount: number | null;
+      followingCount: number | null;
+      postCount: number | null;
+      biography: string | null;
+      externalUrl: string | null;
+      isVerified: boolean | null;
+    } | null;
+    changeCount: number;
+  };
+  /**
+   * The media rows stored for this target. For a DISCOVERY target they are a
+   * bounded, non-pageable preview — the ceiling recorded with the rows is
+   * repeated here, and `publishedAt` (platform) is kept apart from
+   * `firstObservedAt` (us).
+   */
+  media: {
+    storedCount: number;
+    previewLimit: number | null;
+    bounded: boolean | null;
+    boundedStatement: string | null;
+    oldestPublishedAt: string | null;
+    newestPublishedAt: string | null;
+    firstObservedAt: string | null;
+    lastObservedAt: string | null;
+    rows: Array<{
+      postId: string;
+      caption: string | null;
+      permalink: string | null;
+      publishedAt: string | null;
+      firstObservedAt: string | null;
+      likeCount: number | null;
+      commentCount: number | null;
+      mediaType: string | null;
+      mediaProductType: string | null;
+      commentsState: string;
+      evidenceId: string | null;
+    }>;
+    truncated: boolean;
+  } | null;
+  coverage: DossierCoverageRow[];
+  /** Routes that answered UNAVAILABLE for the sources observing this target, with their reasons. */
+  routeUnavailability: Array<{
+    sourceId: string;
+    capability: string;
+    note: string | null;
+    updatedAt: string;
+  }>;
+  notes: string[];
+}
+
+export async function opDossier(
+  ctx: CliContext,
+  input: { target: string },
+): Promise<DossierResult> {
+  const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
+  const dossier = await getTargetDossier(ctx.db, ctx.userId, resolved.id);
+  if (dossier === null) {
+    throw new CliError(
+      "TARGET_NOT_FOUND",
+      `No stored observations for "${input.target}" under this user.`,
+      2,
+    );
+  }
+
+  const mode = dossier.target.observationMode;
+  const discoveryEntry = CAPABILITY_REGISTRY.find(
+    (e) => e.id === RegistryCapabilityId.OTHER_ACCOUNT_PUBLIC,
+  );
+  const isObserved = (entry: (typeof CAPABILITY_REGISTRY)[number]): boolean =>
+    mode === "DISCOVERY"
+      ? entry.providerMethods.includes(CapabilityName.DISCOVER_ACCOUNT)
+      : entry.providerMethods.some((m) => m !== CapabilityName.DISCOVER_ACCOUNT);
+
+  const boundedStatement =
+    dossier.media !== null && dossier.media.previewBounded === true
+      ? `Bounded preview: the platform edge returns at most ${
+          dossier.media.previewLimit ?? "a fixed number of"
+        } media rows and does not page, so these rows are NOT the account's post history. Stored rows: ${
+          dossier.media.storedCount
+        }.`
+      : null;
+
+  const coverage: DossierCoverageRow[] = CAPABILITY_REGISTRY.map((entry) => {
+    const surfaces = CAPABILITY_SURFACES[entry.id] ?? [];
+    let rows = 0;
+    let latest: Date | null = null;
+    for (const key of surfaces) {
+      const surface = dossier.counts[key];
+      rows += surface.count;
+      if (surface.latestAt !== null && (latest === null || surface.latestAt > latest)) {
+        latest = surface.latestAt;
+      }
+    }
+    const hasWriter = surfaces.length > 0;
+    const routeNote = dossier.routeUnavailability.find((u) =>
+      entry.providerMethods.includes(u.capability as (typeof entry.providerMethods)[number]),
+    );
+    const caveat =
+      entry.id === RegistryCapabilityId.POSTS || entry.id === RegistryCapabilityId.OTHER_ACCOUNT_PUBLIC
+        ? boundedStatement
+        : null;
+
+    let state: DossierCoverageRow["state"];
+    let reason: string | null = null;
+    if (hasWriter && rows > 0) {
+      state = "OBSERVED";
+    } else if (entry.whyUnavailable !== null) {
+      state = "UNAVAILABLE";
+      reason = entry.whyUnavailable;
+    } else if (routeNote !== undefined) {
+      state = "UNAVAILABLE";
+      reason = routeNote.note ?? "The route reported this capability unavailable for this source.";
+    } else if (!isObserved(entry)) {
+      state = "UNAVAILABLE";
+      reason =
+        mode === "DISCOVERY"
+          ? `A DISCOVERY target is read through the documented route only, and that route covers: ${
+              discoveryEntry?.label ?? "another account's public profile and recent media"
+            }. This capability belongs to the owned-account edges.`
+          : "No owned-account route for this capability in the configured provider.";
+    } else if (!hasWriter) {
+      state = "UNAVAILABLE";
+      reason =
+        entry.howItWorks !== "" ? entry.howItWorks : "No provider surface writes this capability.";
+    } else {
+      state = "NOT_OBSERVED";
+      reason =
+        mode === "DISCOVERY"
+          ? "Not observed yet: no scan through the documented route has stored rows for this capability."
+          : "Not observed yet: no scan has stored rows for this capability. A scan can still run.";
+    }
+
+    return {
+      capability: entry.id,
+      label: entry.label,
+      state,
+      observedRows: hasWriter ? rows : null,
+      latestObservedAt: latest === null ? null : latest.toISOString(),
+      reason,
+      unlock: entry.unlock,
+      persistence: entry.persistence,
+      caveat,
+    };
+  });
+
+  const notes: string[] = [];
+  if (mode === "DISCOVERY") {
+    notes.push(
+      "This target is observed through the documented Business Discovery route. Only public Business/Creator accounts are reachable; consumer and private accounts are unreachable, and age-gated accounts return nothing.",
+    );
+  }
+  if (boundedStatement !== null) notes.push(boundedStatement);
+  notes.push(
+    "publishedAt is when the platform published a row; firstObservedAt is when this deployment first saw it. A row discovered later was not necessarily created later (FOUNDING §15.1).",
+  );
+  if (dossier.media !== null && dossier.media.storedCount > dossier.media.rows.length) {
+    notes.push(
+      `The media list below is capped at ${dossier.media.rows.length} rows for this report; ${dossier.media.storedCount} are stored.`,
+    );
+  }
+  notes.push(
+    "Capabilities this product refuses by decision (likers, other accounts' rosters, highlights, reposts) are recorded in FOUNDING §14 — they are platform-absent, not unimplemented.",
+  );
+
+  return {
+    target: {
+      ...resolved,
+      observationMode: mode,
+      createdAt: dossier.target.createdAt.toISOString(),
+      tags: dossier.target.tags,
+      localName: dossier.target.localName,
+    },
+    account: {
+      id: dossier.account.id,
+      username: dossier.account.username,
+      igId: dossier.account.igId,
+      displayName: dossier.account.displayName,
+      isPrivate: dossier.account.isPrivate,
+      isVerified: dossier.account.isVerified,
+      accountType: dossier.account.accountType,
+      firstSeenAt: dossier.account.firstSeenAt.toISOString(),
+      lastSeenAt: dossier.account.lastSeenAt.toISOString(),
+    },
+    route: {
+      observationMode: mode,
+      providerMethod: mode === "DISCOVERY" ? "discoverAccount" : "owned-account edges",
+      scope:
+        mode === "DISCOVERY"
+          ? "Another account's documented public fields: profile fields plus a bounded recent-media preview."
+          : "The account this deployment observes: profile, posts, stories, follow rosters (provider permitting), insights.",
+      observingSources: dossier.observingSources,
+    },
+    counts: Object.fromEntries(
+      Object.entries(dossier.counts).map(([key, v]) => [
+        key,
+        { count: v.count, latestAt: v.latestAt === null ? null : v.latestAt.toISOString() },
+      ]),
+    ),
+    profile: {
+      snapshotCount: dossier.counts.profileSnapshots.count,
+      latest:
+        dossier.latestProfileSnapshot === null
+          ? null
+          : {
+              observedAt: dossier.latestProfileSnapshot.observedAt.toISOString(),
+              sourceId: dossier.latestProfileSnapshot.sourceId,
+              completeness: dossier.latestProfileSnapshot.completeness,
+              followerCount: dossier.latestProfileSnapshot.followerCount,
+              followingCount: dossier.latestProfileSnapshot.followingCount,
+              postCount: dossier.latestProfileSnapshot.postCount,
+              biography: dossier.latestProfileSnapshot.bio,
+              externalUrl: dossier.latestProfileSnapshot.externalUrl,
+              isVerified: dossier.latestProfileSnapshot.isVerified,
+            },
+      changeCount: dossier.counts.profileChanges.count,
+    },
+    media:
+      dossier.media === null
+        ? null
+        : {
+            storedCount: dossier.media.storedCount,
+            previewLimit: dossier.media.previewLimit,
+            bounded: dossier.media.previewBounded,
+            boundedStatement,
+            oldestPublishedAt: isoOrNull(dossier.media.oldestPublishedAt),
+            newestPublishedAt: isoOrNull(dossier.media.newestPublishedAt),
+            firstObservedAt: isoOrNull(dossier.media.firstObservedAt),
+            lastObservedAt: isoOrNull(dossier.media.lastObservedAt),
+            rows: dossier.media.rows.map((r) => ({
+              postId: r.postId,
+              caption: r.caption,
+              permalink: r.permalink,
+              publishedAt: isoOrNull(r.publishedAt),
+              firstObservedAt: isoOrNull(r.firstObservedAt),
+              likeCount: r.likeCount,
+              commentCount: r.commentCount,
+              mediaType: r.mediaType,
+              mediaProductType: r.mediaProductType,
+              commentsState: r.commentsState,
+              evidenceId: r.evidenceId,
+            })),
+            truncated: dossier.media.storedCount > dossier.media.rows.length,
+          },
+    coverage,
+    routeUnavailability: dossier.routeUnavailability.map((u) => ({
+      sourceId: u.sourceId,
+      capability: u.capability,
+      note: u.note,
+      updatedAt: u.updatedAt.toISOString(),
+    })),
+    notes,
+  };
+}
+
+function isoOrNull(v: Date | null): string | null {
+  return v === null ? null : v.toISOString();
 }
 
 export interface InsightsQuery {

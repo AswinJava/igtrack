@@ -15,6 +15,7 @@ import {
 } from "@igtrack/database";
 import {
   JobExecutionError,
+  runDiscoveryScan,
   runFollowerScan,
   runFollowingScan,
   runInsightsScan,
@@ -175,6 +176,8 @@ export async function executeOne(
       result = await runPostScan(db, job, src);
     } else if (job.kind === "INSIGHTS_SCAN") {
       result = await runInsightsScan(db, job, src);
+    } else if (job.kind === "DISCOVERY_SCAN") {
+      result = await runDiscoveryScan(db, job, src);
     } else {
       return await recordFailure(db, workerId, job, {
         message: `Unknown job kind ${job.kind}`,

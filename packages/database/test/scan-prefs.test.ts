@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createTarget,
   effectiveIntervalMs,
+  isScanKindAllowedForMode,
   kindsForTarget,
   listActiveTargetPrefs,
   upcomingScansForTarget,
@@ -46,6 +47,21 @@ describe("per-target scan preferences (pure)", () => {
     expect(kindsForTarget(["STORY_SCAN", "NOPE"])).toEqual(["STORY_SCAN"]);
   });
 
+  it("kindsForTarget never mixes the two observation modes (D47)", () => {
+    // An OWNED target can never be scheduled a DISCOVERY_SCAN, even if the
+    // preference list names it; a DISCOVERY target runs nothing else — for an
+    // owned-kind preference it gets an empty set, not a job that cannot run.
+    expect(kindsForTarget(["DISCOVERY_SCAN"], "OWNED")).toEqual([]);
+    expect(kindsForTarget(null, "DISCOVERY")).toEqual(["DISCOVERY_SCAN"]);
+    expect(kindsForTarget(["STORY_SCAN", "DISCOVERY_SCAN"], "DISCOVERY")).toEqual([
+      "DISCOVERY_SCAN",
+    ]);
+    expect(kindsForTarget(["DISCOVERY_SCAN"], "OWNED")).toEqual([]);
+    expect(isScanKindAllowedForMode("DISCOVERY_SCAN", "OWNED")).toBe(false);
+    expect(isScanKindAllowedForMode("DISCOVERY_SCAN", "DISCOVERY")).toBe(true);
+    expect(isScanKindAllowedForMode("PROFILE_SCAN", "DISCOVERY")).toBe(false);
+  });
+
   it("upcomingWindowStart always strictly advances", () => {
     const at = Date.parse("2026-08-28T10:00:00.000Z");
     expect(upcomingWindowStart(at, 3_600_000).toISOString()).toBe(
@@ -65,6 +81,7 @@ describe("per-target scan preferences (pure)", () => {
       STORY_SCAN: 1_800_000,
       POSTS_SCAN: 6 * 3_600_000,
       INSIGHTS_SCAN: 6 * 3_600_000,
+      DISCOVERY_SCAN: 24 * 3_600_000,
     };
     const now = Date.parse("2026-08-28T10:10:00.000Z");
     const scans = upcomingScansForTarget(

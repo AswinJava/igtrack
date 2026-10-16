@@ -1,7 +1,8 @@
 import { sql, eq, type SQL } from "drizzle-orm";
 import type { Database } from "../client/client.js";
 import { getSourceHealth, type SourceHealthRecord } from "./source-health.js";
-import { getOwnedTarget } from "./targets.js";
+import { getOwnedTarget, type TargetRecord } from "./targets.js";
+import type { AccountRecord } from "./accounts.js";
 import { igAccounts, profileSnapshots } from "../schema/index.js";
 import {
   listProfileSnapshots,
@@ -35,11 +36,12 @@ async function query<T>(db: Database, q: SQL): Promise<T[]> {
 // absent when no snapshot exists yet.
 // ---------------------------------------------------------------------------
 
-interface TargetListRow {
+export interface TargetListRow {
   id: string;
   username: string;
   display_name: string | null;
   status: string;
+  observation_mode: string | null;
   tags: string[] | null;
   local_name: string | null;
   is_private: boolean | null;
@@ -59,6 +61,8 @@ export interface TargetListItem {
   username: string;
   displayName: string | null;
   status: string;
+  /** OWNED = this deployment's own account; DISCOVERY = another public account via the documented route (D47). */
+  observationMode: "OWNED" | "DISCOVERY";
   tags: string[];
   localName: string | null;
   isPrivate: boolean | null;
@@ -86,6 +90,7 @@ export async function listTargetsForUser(
            ia.username,
            ia.display_name,
            t.status::text AS status,
+           t.observation_mode::text AS observation_mode,
            t.tags,
            t.local_name,
            ia.is_private,
@@ -122,6 +127,7 @@ export async function listTargetsForUser(
     username: r.username,
     displayName: r.display_name,
     status: r.status,
+    observationMode: r.observation_mode === "DISCOVERY" ? "DISCOVERY" : "OWNED",
     tags: r.tags ?? [],
     localName: r.local_name,
     isPrivate: r.is_private,
@@ -198,8 +204,9 @@ export interface ActivityItem {
   // DERIVED (snapshot comparisons), story sightings are OBSERVED events.
   // Confidence is the originating observation's persisted confidence:
   // profile changes inherit their to-snapshot's confidence, follow deltas
-  // carry their own persisted confidence, stories carry theirs. Nothing here
-  // is assigned or invented.
+  // carry their own persisted confidence, stories carry theirs, and media
+  // changes (Phase G) carry the confidence of the observation that read the
+  // difference. Nothing here is assigned or invented.
   category: string | null;
   confidence: string | null;
   // Evidence row id backing this event, so every feed item links to
@@ -216,6 +223,10 @@ export const ACTIVITY_TYPES = [
   "STORY_POSTED",
   "STORY_EXPIRED",
   "POST_PUBLISHED",
+  // Phase G (FOUNDING §16): media changes. POST_REMOVED reads "no longer
+  // observed in a complete listing" — never "deleted" (D55).
+  "POST_EDITED",
+  "POST_REMOVED",
   "COMMENT_POSTED",
   "MENTION_OBSERVED",
 ] as const;
@@ -317,6 +328,26 @@ export async function getUserActivityFeed(
      JOIN ig_accounts ia ON ia.id = p.ig_account_id
      WHERE t.user_id = ${userId}
      ORDER BY p.taken_at DESC LIMIT ${limit})
+    UNION ALL
+    (SELECT pch.id::text AS id,
+            (CASE pch.change
+              WHEN 'CAPTION_EDITED' THEN 'POST_EDITED'
+              ELSE 'POST_REMOVED'
+            END)::text AS type,
+            owner.username || ' — ' ||
+            CASE pch.change
+              WHEN 'CAPTION_EDITED' THEN 'post caption changed'
+              ELSE 'post no longer observed'
+            END AS summary,
+            pch.detected_at AS occurred_at, owner.username,
+            'DERIVED'::text AS category, pch.confidence::text AS confidence,
+            pch.evidence_id AS evidence_id
+     FROM post_changes pch
+     JOIN posts p ON p.id = pch.post_db_id
+     JOIN targets t ON t.id = pch.target_id
+     JOIN ig_accounts owner ON owner.id = p.ig_account_id
+     WHERE t.user_id = ${userId}
+     ORDER BY pch.detected_at DESC LIMIT ${limit})
     UNION ALL
     (SELECT pc.id::text AS id, 'COMMENT_POSTED'::text AS type,
             author.username || ' — comment observed' AS summary,
@@ -559,6 +590,11 @@ export interface RelationshipRank {
   // owned media, follow deltas. A signal a scan never observed stays 0 here —
   // this is a count of stored rows, not an inferred affinity.
   signals: { mentions: number; comments: number; deltas: number };
+  /**
+   * The same counts restricted to the recency window (D51). A count, not a
+   * decayed score: how many stored rows are recent, never a denoised guess.
+   */
+  signalsWithinWindow: { mentions: number; comments: number; deltas: number };
   confidence: string;
   // Structural relationship state, derived from the latest COMPLETE-agnostic
   // snapshots (membership is a fact about the latest observation, not a
@@ -572,7 +608,44 @@ export interface RelationshipRank {
   // Latest snapshot in which the account was a member; null when no longer
   // observed (never fabricate a departure timestamp).
   lastSeenAt: string | null;
+  /**
+   * Timestamp of the most recent stored signal (mention, comment, or delta).
+   * Null means no signal was ever observed — not "a long time ago".
+   */
+  lastSignalAt: string | null;
+  /**
+   * The stored rows behind the counts, newest first and bounded. Every rank
+   * can be traced to observations; a rank with no evidence rows is a
+   * structural membership fact, and says so by being empty.
+   */
+  evidence: RelationshipEvidenceRow[];
 }
+
+export interface RelationshipEvidenceRow {
+  kind: "mention" | "comment" | "delta";
+  observedAt: string;
+  /** Evidence ledger id backing the row (null when the observation stored none). */
+  evidenceId: string | null;
+  /** Stable reference inside the kind: story_db_id / post_db_id / change name. */
+  reference: string;
+}
+
+/**
+ * Signal weights and the recency window, in one place: the ranking code and
+ * the method block a caller renders must describe the same arithmetic (D51).
+ * A mention is a public act naming the account (12), a comment is a direct
+ * interaction on owned media (10), a follow delta is a structural change (8).
+ * The weights order observed counts; they never invent one.
+ */
+export const RELATIONSHIP_SIGNAL_WEIGHTS = {
+  mention: 12,
+  comment: 10,
+  delta: 8,
+} as const;
+
+export const RELATIONSHIP_RECENCY_WINDOW_DAYS = 30;
+
+const EVIDENCE_PER_ACCOUNT = 3;
 
 export async function getRelationshipsForUser(
   db: Database,
@@ -582,14 +655,19 @@ export async function getRelationshipsForUser(
   const owned = await getOwnedTarget(db, userId, targetId);
   if (owned === null) return [];
 
-  const [deltas, mentionRows, commentRows] = await Promise.all([
+  const [deltas, mentionRows, commentRows, deltaRows, evidenceRows] = await Promise.all([
     listRecentDeltas(db, owned.id, { limit: 50 }).catch(
       () => [] as DeltaWithAccount[],
     ),
-    query<{ username: string; count: number }>(
+    query<{ username: string; count: number; count_window: number; last_at: Date | string }>(
       db,
       sql`
-        SELECT ia.username, count(*)::int AS count
+        SELECT ia.username,
+               count(DISTINCT sm.story_db_id)::int AS count,
+               count(DISTINCT sm.story_db_id) FILTER (
+                 WHERE s.observed_at >= now() - (${RELATIONSHIP_RECENCY_WINDOW_DAYS} || ' days')::interval
+               )::int AS count_window,
+               max(s.observed_at) AS last_at
         FROM story_mentions sm
         JOIN ig_accounts ia ON ia.id = sm.mentioned_account_id
         JOIN stories s ON s.id = sm.story_db_id
@@ -597,15 +675,20 @@ export async function getRelationshipsForUser(
         GROUP BY ia.username
         ORDER BY count DESC
       `,
-    ).catch(() => [] as Array<{ username: string; count: number }>),
+    ).catch(() => [] as Array<{ username: string; count: number; count_window: number; last_at: Date | string }>),
     // Comment authorship on the owned account's media (D43). The owner's own
     // comments are excluded — talking on your own post is not a relationship
     // signal. Readable lawfully only because these comments live on media the
     // operator owns.
-    query<{ username: string; count: number }>(
+    query<{ username: string; count: number; count_window: number; last_at: Date | string }>(
       db,
       sql`
-        SELECT ia.username, count(*)::int AS count
+        SELECT ia.username,
+               count(*)::int AS count,
+               count(*) FILTER (
+                 WHERE pc.observed_at >= now() - (${RELATIONSHIP_RECENCY_WINDOW_DAYS} || ' days')::interval
+               )::int AS count_window,
+               max(pc.observed_at) AS last_at
         FROM post_comments pc
         JOIN posts p ON p.id = pc.post_db_id
         JOIN ig_accounts ia ON ia.id = pc.author_account_id
@@ -614,22 +697,135 @@ export async function getRelationshipsForUser(
         GROUP BY ia.username
         ORDER BY count DESC
       `,
-    ).catch(() => [] as Array<{ username: string; count: number }>),
+    ).catch(() => [] as Array<{ username: string; count: number; count_window: number; last_at: Date | string }>),
+    // Delta aggregates in one pass (not the capped event list): a 30-day count
+    // and the newest change timestamp per account.
+    query<{ username: string; count: number; count_window: number; last_at: Date | string }>(
+      db,
+      sql`
+        SELECT ia.username,
+               count(*)::int AS count,
+               count(*) FILTER (
+                 WHERE fd.first_seen_at >= now() - (${RELATIONSHIP_RECENCY_WINDOW_DAYS} || ' days')::interval
+               )::int AS count_window,
+               max(fd.first_seen_at) AS last_at
+        FROM follow_deltas fd
+        JOIN ig_accounts ia ON ia.id = fd.ig_account_id
+        WHERE fd.target_id = ${owned.id}
+        GROUP BY ia.username
+      `,
+    ).catch(() => [] as Array<{ username: string; count: number; count_window: number; last_at: Date | string }>),
+    // Per-account evidence rows: the stored observations behind the counts,
+    // newest first, bounded per account inside the database (no N+1).
+    query<{
+      username: string;
+      kind: string;
+      observed_at: Date | string;
+      evidence_id: string | null;
+      reference: string;
+    }>(
+      db,
+      sql`
+        SELECT username, kind, observed_at, evidence_id, reference FROM (
+          SELECT ia.username, 'mention'::text AS kind, s.observed_at,
+                 sm.evidence_id, sm.story_db_id AS reference,
+                 row_number() OVER (PARTITION BY ia.username ORDER BY s.observed_at DESC) AS rn
+          FROM story_mentions sm
+          JOIN ig_accounts ia ON ia.id = sm.mentioned_account_id
+          JOIN stories s ON s.id = sm.story_db_id
+          WHERE s.ig_account_id = ${owned.igAccountId}
+        ) m WHERE rn <= ${EVIDENCE_PER_ACCOUNT}
+        UNION ALL
+        SELECT username, kind, observed_at, evidence_id, reference FROM (
+          SELECT ia.username, 'comment'::text AS kind, pc.observed_at,
+                 pc.evidence_id, pc.post_db_id AS reference,
+                 row_number() OVER (PARTITION BY ia.username ORDER BY pc.observed_at DESC) AS rn
+          FROM post_comments pc
+          JOIN posts p ON p.id = pc.post_db_id
+          JOIN ig_accounts ia ON ia.id = pc.author_account_id
+          WHERE p.ig_account_id = ${owned.igAccountId}
+            AND pc.author_account_id <> ${owned.igAccountId}
+        ) c WHERE rn <= ${EVIDENCE_PER_ACCOUNT}
+        UNION ALL
+        SELECT username, kind, observed_at, evidence_id, reference FROM (
+          SELECT ia.username, 'delta'::text AS kind, fd.first_seen_at AS observed_at,
+                 NULL::text AS evidence_id, fd.change::text AS reference,
+                 row_number() OVER (PARTITION BY ia.username ORDER BY fd.first_seen_at DESC) AS rn
+          FROM follow_deltas fd
+          JOIN ig_accounts ia ON ia.id = fd.ig_account_id
+          WHERE fd.target_id = ${owned.id}
+        ) d WHERE rn <= ${EVIDENCE_PER_ACCOUNT}
+        ORDER BY observed_at DESC
+      `,
+    ).catch(() => [] as Array<{
+      username: string;
+      kind: string;
+      observed_at: Date | string;
+      evidence_id: string | null;
+      reference: string;
+    }>),
   ]);
 
-  const map = new Map<string, { mentions: number; comments: number; deltas: number }>();
+  const map = new Map<
+    string,
+    {
+      mentions: number;
+      comments: number;
+      deltas: number;
+      window: { mentions: number; comments: number; deltas: number };
+      lastSignalAt: string | null;
+      evidence: RelationshipEvidenceRow[];
+    }
+  >();
+  const bucket = (username: string) => {
+    let cur = map.get(username);
+    if (cur === undefined) {
+      cur = {
+        mentions: 0,
+        comments: 0,
+        deltas: 0,
+        window: { mentions: 0, comments: 0, deltas: 0 },
+        lastSignalAt: null,
+        evidence: [],
+      };
+      map.set(username, cur);
+    }
+    return cur;
+  };
+  const newer = (a: string | null, b: string): string =>
+    a === null || b > a ? b : a;
   for (const m of mentionRows) {
-    map.set(m.username, { mentions: int(m.count), comments: 0, deltas: 0 });
+    const cur = bucket(m.username);
+    cur.mentions += int(m.count);
+    cur.window.mentions += int(m.count_window);
+    cur.lastSignalAt = newer(cur.lastSignalAt, asDate(m.last_at).toISOString());
   }
   for (const c of commentRows) {
-    const cur = map.get(c.username) ?? { mentions: 0, comments: 0, deltas: 0 };
+    const cur = bucket(c.username);
     cur.comments += int(c.count);
-    map.set(c.username, cur);
+    cur.window.comments += int(c.count_window);
+    cur.lastSignalAt = newer(cur.lastSignalAt, asDate(c.last_at).toISOString());
   }
   for (const d of deltas) {
-    const cur = map.get(d.username) ?? { mentions: 0, comments: 0, deltas: 0 };
-    cur.deltas += 1;
-    map.set(d.username, cur);
+    // Kept for the event list the caller renders; the aggregates above are
+    // the counts, so this pass only guarantees the account has a rank row.
+    bucket(d.username);
+  }
+  for (const d of deltaRows) {
+    const cur = bucket(d.username);
+    cur.deltas += int(d.count);
+    cur.window.deltas += int(d.count_window);
+    cur.lastSignalAt = newer(cur.lastSignalAt, asDate(d.last_at).toISOString());
+  }
+  for (const e of evidenceRows) {
+    const cur = bucket(e.username);
+    if (cur.evidence.length >= EVIDENCE_PER_ACCOUNT) continue;
+    cur.evidence.push({
+      kind: e.kind as RelationshipEvidenceRow["kind"],
+      observedAt: asDate(e.observed_at).toISOString(),
+      evidenceId: e.evidence_id,
+      reference: e.reference,
+    });
   }
 
   // Stable members: accounts present in BOTH the earliest and latest
@@ -670,21 +866,25 @@ export async function getRelationshipsForUser(
   ).catch(() => [] as Array<{ username: string }>);
   for (const row of stableRows) {
     if (!map.has(row.username)) {
-      map.set(row.username, { mentions: 0, comments: 0, deltas: 0 });
+      bucket(row.username);
     }
   }
 
-  // Structural enrichment, bounded to ranked candidates with indexed EXISTS
-  // probes (no full-roster loads). Everything here describes snapshot
-  // membership — observed facts, never inferred follow/unfollow timestamps.
-  // Weights (D43): a story mention is a public act naming the account (12), a
-  // comment is a direct interaction (10), a follow delta is a structural
-  // change (8). The score orders observed counts; it never invents one.
+  // Ranking: observed counts ordered by the shared weights (D43/D51). Recency
+  // is carried alongside (lastSignalAt + a 30-day count), never folded into
+  // the score — a decay constant would be an invented number, and this product
+  // does not invent numbers.
   const ranked = [...map.entries()]
     .map(([username, v]) => ({
       username,
-      score: v.mentions * 12 + v.comments * 10 + v.deltas * 8,
-      signals: v,
+      score:
+        v.mentions * RELATIONSHIP_SIGNAL_WEIGHTS.mention +
+        v.comments * RELATIONSHIP_SIGNAL_WEIGHTS.comment +
+        v.deltas * RELATIONSHIP_SIGNAL_WEIGHTS.delta,
+      signals: { mentions: v.mentions, comments: v.comments, deltas: v.deltas },
+      signalsWithinWindow: v.window,
+      lastSignalAt: v.lastSignalAt,
+      evidence: v.evidence,
       confidence:
         v.mentions + v.comments + v.deltas > 2
           ? "MEDIUM"
@@ -692,7 +892,14 @@ export async function getRelationshipsForUser(
             ? "LOW"
             : "UNKNOWN",
     }))
-    .sort((a, b) => b.score - a.score);
+    // Ties are broken by recency, then name — the order is deterministic and
+    // every position is explained by a stored count or a stored timestamp.
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        (b.lastSignalAt ?? "").localeCompare(a.lastSignalAt ?? "") ||
+        a.username.localeCompare(b.username),
+    );
 
   const [latestFollowers, latestFollowing, earliestTaken, firstSeenRows] = await Promise.all([
     latestFollowSnapshot(db, owned.id, "FOLLOWERS").catch(() => null),
@@ -776,6 +983,314 @@ export async function getRelationshipsForUser(
     });
   }
   return enriched;
+}
+
+// ---------------------------------------------------------------------------
+// Dossier: one target's recorded state read back in a single pass (D50).
+//
+// A dossier is a REPORT over stored observations, not a new store: every
+// number below is a count of rows that exist, and a surface with no rows is
+// reported as not observed rather than as empty data. Nothing is inferred
+// from another surface, and nothing is zero-filled.
+// ---------------------------------------------------------------------------
+
+export interface DossierCount {
+  count: number;
+  latestAt: Date | null;
+}
+
+export interface DossierMediaRow {
+  postId: string;
+  caption: string | null;
+  permalink: string | null;
+  /** The platform's publish time (posts.taken_at) — a different fact from when we first saw it. */
+  publishedAt: Date | null;
+  /** When this deployment first observed the row (posts.observed_at). */
+  firstObservedAt: Date | null;
+  likeCount: number | null;
+  commentCount: number | null;
+  mediaType: string | null;
+  mediaProductType: string | null;
+  commentsState: string;
+  sourceId: string;
+  evidenceId: string | null;
+  /** Position inside the provider's bounded preview, when one was declared. */
+  previewPosition: number | null;
+  previewLimit: number | null;
+  previewBounded: boolean | null;
+}
+
+export interface DossierMediaSummary {
+  storedCount: number;
+  /** The route's ceiling on the preview, from the newest row's evidence. Null when the source declared none. */
+  previewLimit: number | null;
+  previewBounded: boolean | null;
+  oldestPublishedAt: Date | null;
+  newestPublishedAt: Date | null;
+  firstObservedAt: Date | null;
+  lastObservedAt: Date | null;
+  rows: DossierMediaRow[];
+}
+
+export interface DossierRouteUnavailability {
+  sourceId: string;
+  capability: string;
+  note: string | null;
+  updatedAt: Date;
+}
+
+export interface TargetDossier {
+  target: TargetRecord;
+  account: AccountRecord;
+  counts: {
+    profileSnapshots: DossierCount;
+    profileChanges: DossierCount;
+    followerSnapshots: DossierCount;
+    followingSnapshots: DossierCount;
+    followDeltas: DossierCount;
+    stories: DossierCount;
+    storyMentions: DossierCount;
+    storySightings: DossierCount;
+    posts: DossierCount;
+    postComments: DossierCount;
+    postChildren: DossierCount;
+    // Phase G: media change events (caption edits, no-longer-observed).
+    postChanges: DossierCount;
+    insightPoints: DossierCount;
+    interactions: DossierCount;
+  };
+  latestProfileSnapshot: Awaited<ReturnType<typeof listProfileSnapshots>>[number] | null;
+  media: DossierMediaSummary | null;
+  /** Sources that have actually written observations for this target/account. */
+  observingSources: string[];
+  /**
+   * Capabilities the routes themselves reported as UNAVAILABLE for those
+   * sources, with the reason they gave. Deployment-wide per (source,
+   * capability) — the same answer any scan of this account would get.
+   */
+  routeUnavailability: DossierRouteUnavailability[];
+}
+
+const DOSSIER_MEDIA_LIMIT = 25;
+
+export async function getTargetDossier(
+  db: Database,
+  userId: string,
+  targetId: string,
+): Promise<TargetDossier | null> {
+  const owned = await getOwnedTarget(db, userId, targetId);
+  if (owned === null) return null;
+
+  const accountRows = await db
+    .select()
+    .from(igAccounts)
+    .where(eq(igAccounts.id, owned.igAccountId))
+    .limit(1);
+  const account = accountRows[0];
+  if (account === undefined) return null;
+
+  const [countRows, latestSnapshots, mediaRows, mediaAggRows, sourceRows, healthRows] =
+    await Promise.all([
+      query<Record<string, number | Date | string | null>>(
+        db,
+        sql`
+          SELECT
+            (SELECT count(*)::int FROM profile_snapshots WHERE ig_account_id = ${account.id}) AS profile_snapshots,
+            (SELECT max(observed_at) FROM profile_snapshots WHERE ig_account_id = ${account.id}) AS profile_snapshots_at,
+            (SELECT count(*)::int FROM profile_changes WHERE ig_account_id = ${account.id}) AS profile_changes,
+            (SELECT max(created_at) FROM profile_changes WHERE ig_account_id = ${account.id}) AS profile_changes_at,
+            (SELECT count(*)::int FROM follow_snapshots WHERE target_id = ${owned.id} AND direction = 'FOLLOWERS') AS follower_snapshots,
+            (SELECT max(taken_at) FROM follow_snapshots WHERE target_id = ${owned.id} AND direction = 'FOLLOWERS') AS follower_snapshots_at,
+            (SELECT count(*)::int FROM follow_snapshots WHERE target_id = ${owned.id} AND direction = 'FOLLOWING') AS following_snapshots,
+            (SELECT max(taken_at) FROM follow_snapshots WHERE target_id = ${owned.id} AND direction = 'FOLLOWING') AS following_snapshots_at,
+            (SELECT count(*)::int FROM follow_deltas WHERE target_id = ${owned.id}) AS follow_deltas,
+            (SELECT max(first_seen_at) FROM follow_deltas WHERE target_id = ${owned.id}) AS follow_deltas_at,
+            (SELECT count(*)::int FROM stories WHERE ig_account_id = ${account.id}) AS stories,
+            (SELECT max(observed_at) FROM stories WHERE ig_account_id = ${account.id}) AS stories_at,
+            (SELECT count(*)::int FROM story_mentions sm JOIN stories s ON s.id = sm.story_db_id
+              WHERE s.ig_account_id = ${account.id}) AS story_mentions,
+            (SELECT max(sm.observed_at) FROM story_mentions sm JOIN stories s ON s.id = sm.story_db_id
+              WHERE s.ig_account_id = ${account.id}) AS story_mentions_at,
+            (SELECT count(*)::int FROM story_sightings ss JOIN stories s ON s.id = ss.story_db_id
+              WHERE s.ig_account_id = ${account.id}) AS story_sightings,
+            (SELECT max(ss.observed_at) FROM story_sightings ss JOIN stories s ON s.id = ss.story_db_id
+              WHERE s.ig_account_id = ${account.id}) AS story_sightings_at,
+            (SELECT count(*)::int FROM posts WHERE target_id = ${owned.id}) AS posts,
+            (SELECT max(observed_at) FROM posts WHERE target_id = ${owned.id}) AS posts_at,
+            (SELECT count(*)::int FROM post_comments pc JOIN posts p ON p.id = pc.post_db_id
+              WHERE p.target_id = ${owned.id}) AS post_comments,
+            (SELECT max(pc.observed_at) FROM post_comments pc JOIN posts p ON p.id = pc.post_db_id
+              WHERE p.target_id = ${owned.id}) AS post_comments_at,
+            (SELECT count(*)::int FROM post_children ch JOIN posts p ON p.id = ch.post_db_id
+              WHERE p.target_id = ${owned.id}) AS post_children,
+            (SELECT max(ch.created_at) FROM post_children ch JOIN posts p ON p.id = ch.post_db_id
+              WHERE p.target_id = ${owned.id}) AS post_children_at,
+            (SELECT count(*)::int FROM post_changes WHERE target_id = ${owned.id}) AS post_changes,
+            (SELECT max(detected_at) FROM post_changes WHERE target_id = ${owned.id}) AS post_changes_at,
+            (SELECT count(*)::int FROM insight_points WHERE ig_account_id = ${account.id}) AS insight_points,
+            (SELECT max(observed_at) FROM insight_points WHERE ig_account_id = ${account.id}) AS insight_points_at,
+            (SELECT count(*)::int FROM interactions WHERE target_id = ${owned.id}) AS interactions,
+            (SELECT max(observed_at) FROM interactions WHERE target_id = ${owned.id}) AS interactions_at
+        `,
+      ),
+      listProfileSnapshots(db, account.id, { limit: 1 }).catch(() => []),
+      query<{
+        post_id: string;
+        caption: string | null;
+        permalink: string | null;
+        taken_at: Date | string | null;
+        observed_at: Date | string | null;
+        like_count: number | null;
+        comment_count: number | null;
+        media_type: string | null;
+        media_product_type: string | null;
+        comments_state: string;
+        source_id: string;
+        evidence_id: string | null;
+        metadata: Record<string, unknown> | null;
+      }>(
+        db,
+        sql`
+          SELECT p.post_id, p.caption, p.permalink, p.taken_at, p.observed_at,
+                 p.like_count, p.comment_count, p.media_type::text AS media_type,
+                 p.media_product_type, p.comments_state::text AS comments_state,
+                 p.source_id, p.evidence_id, e.metadata
+          FROM posts p
+          LEFT JOIN evidence e ON e.id = p.evidence_id
+          WHERE p.target_id = ${owned.id}
+          -- Published-time order is the platform's order for a preview;
+          -- observed_at is kept separate so the two never blur.
+          ORDER BY p.taken_at DESC NULLS LAST, p.observed_at DESC
+          LIMIT ${DOSSIER_MEDIA_LIMIT}
+        `,
+      ).catch(() => []),
+      query<{
+        count: number;
+        oldest_published: Date | string | null;
+        newest_published: Date | string | null;
+        first_observed: Date | string | null;
+        last_observed: Date | string | null;
+      }>(
+        db,
+        sql`
+          SELECT count(*)::int AS count,
+                 min(taken_at) AS oldest_published,
+                 max(taken_at) AS newest_published,
+                 min(observed_at) AS first_observed,
+                 max(observed_at) AS last_observed
+          FROM posts WHERE target_id = ${owned.id}
+        `,
+      ).catch(() => []),
+      query<{ source_id: string }>(
+        db,
+        sql`
+          SELECT DISTINCT source_id FROM (
+            SELECT source_id FROM profile_snapshots WHERE ig_account_id = ${account.id}
+            UNION SELECT source_id FROM stories WHERE ig_account_id = ${account.id}
+            UNION SELECT source_id FROM insight_points WHERE ig_account_id = ${account.id}
+            UNION SELECT source_id FROM posts WHERE target_id = ${owned.id}
+            UNION SELECT source_id FROM follow_snapshots WHERE target_id = ${owned.id}
+            UNION SELECT source_id FROM interactions WHERE target_id = ${owned.id}
+          ) s
+          ORDER BY source_id
+        `,
+      ).catch(() => []),
+      getSourceHealth(db).catch(() => [] as SourceHealthRecord[]),
+    ]);
+
+  const counts = countRows[0] ?? {};
+  const count = (key: string): number => int(counts[key] ?? 0);
+  const at = (key: string): Date | null => {
+    const v = counts[key];
+    return v === null || v === undefined ? null : asDate(v);
+  };
+
+  const observingSources = sourceRows.map((r) => r.source_id);
+  const mediaAgg = mediaAggRows[0];
+
+  const media: DossierMediaSummary | null =
+    mediaAgg === undefined || int(mediaAgg.count) === 0
+      ? null
+      : {
+          storedCount: int(mediaAgg.count),
+          previewLimit: readPreviewNumber(mediaRows[0]?.metadata, "previewLimit"),
+          previewBounded: readPreviewBoolean(mediaRows[0]?.metadata, "previewBounded"),
+          oldestPublishedAt: nullableDate(mediaAgg.oldest_published),
+          newestPublishedAt: nullableDate(mediaAgg.newest_published),
+          firstObservedAt: nullableDate(mediaAgg.first_observed),
+          lastObservedAt: nullableDate(mediaAgg.last_observed),
+          rows: mediaRows.map((r) => ({
+            postId: r.post_id,
+            caption: r.caption,
+            permalink: r.permalink,
+            publishedAt: nullableDate(r.taken_at),
+            firstObservedAt: nullableDate(r.observed_at),
+            likeCount: r.like_count === null ? null : int(r.like_count),
+            commentCount: r.comment_count === null ? null : int(r.comment_count),
+            mediaType: r.media_type,
+            mediaProductType: r.media_product_type,
+            commentsState: r.comments_state,
+            sourceId: r.source_id,
+            evidenceId: r.evidence_id,
+            previewPosition: readPreviewNumber(r.metadata, "previewPosition"),
+            previewLimit: readPreviewNumber(r.metadata, "previewLimit"),
+            previewBounded: readPreviewBoolean(r.metadata, "previewBounded"),
+          })),
+        };
+
+  return {
+    target: owned,
+    account,
+    counts: {
+      profileSnapshots: { count: count("profile_snapshots"), latestAt: at("profile_snapshots_at") },
+      profileChanges: { count: count("profile_changes"), latestAt: at("profile_changes_at") },
+      followerSnapshots: { count: count("follower_snapshots"), latestAt: at("follower_snapshots_at") },
+      followingSnapshots: { count: count("following_snapshots"), latestAt: at("following_snapshots_at") },
+      followDeltas: { count: count("follow_deltas"), latestAt: at("follow_deltas_at") },
+      stories: { count: count("stories"), latestAt: at("stories_at") },
+      storyMentions: { count: count("story_mentions"), latestAt: at("story_mentions_at") },
+      storySightings: { count: count("story_sightings"), latestAt: at("story_sightings_at") },
+      posts: { count: count("posts"), latestAt: at("posts_at") },
+      postComments: { count: count("post_comments"), latestAt: at("post_comments_at") },
+      postChildren: { count: count("post_children"), latestAt: at("post_children_at") },
+      postChanges: { count: count("post_changes"), latestAt: at("post_changes_at") },
+      insightPoints: { count: count("insight_points"), latestAt: at("insight_points_at") },
+      interactions: { count: count("interactions"), latestAt: at("interactions_at") },
+    },
+    latestProfileSnapshot: latestSnapshots[0] ?? null,
+    media,
+    observingSources,
+    routeUnavailability: healthRows
+      .filter(
+        (h) => h.status === "UNAVAILABLE" && observingSources.includes(h.sourceId),
+      )
+      .map((h) => ({
+        sourceId: h.sourceId,
+        capability: h.capability,
+        note: h.coverageNote ?? null,
+        updatedAt: h.updatedAt,
+      })),
+  };
+}
+
+function nullableDate(v: Date | string | null | undefined): Date | null {
+  return v === null || v === undefined ? null : asDate(v);
+}
+
+function readPreviewNumber(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string,
+): number | null {
+  const v = metadata?.[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function readPreviewBoolean(
+  metadata: Record<string, unknown> | null | undefined,
+  key: string,
+): boolean | null {
+  const v = metadata?.[key];
+  return typeof v === "boolean" ? v : null;
 }
 
 // ---------------------------------------------------------------------------

@@ -26,6 +26,9 @@ import {
   mediaTypeEnum,
   mentionVisibilityEnum,
   observationCategoryEnum,
+  observationModeEnum,
+  postChangeKindEnum,
+  postPresenceStateEnum,
   retentionStateEnum,
   snapshotCompletenessEnum,
   sourceHealthStatusEnum,
@@ -106,6 +109,14 @@ export const targets = pgTable(
     notes: text("notes"),
     tags: text("tags").array().notNull().default([]),
     status: targetStatusEnum("status").notNull().default("ACTIVE"),
+    // OWNED (default) = the operator's own account; DISCOVERY = another public
+    // professional account observed through the documented Business Discovery
+    // edge. The mode decides which scan kinds are legal for this target
+    // (FOUNDING §15 D47) — it is not a permission, it is a statement about
+    // which provider route can answer.
+    observationMode: observationModeEnum("observation_mode")
+      .notNull()
+      .default("OWNED"),
     // Per-target scan cadence multiplier applied to every global per-kind
     // interval (NULL = default 1x). Validated 0.25–8 on write; NULL keeps the
     // deployment defaults so existing targets are unaffected.
@@ -444,6 +455,76 @@ export const postChildren = pgTable(
       table.childMediaId,
     ),
     index("post_children_post_idx").on(table.postDbId),
+  ],
+);
+
+// Phase G (D54): the durable state a media-listing diff needs — one row per
+// stored post. Deliberately NOT append-only: this is current state, not a
+// claim; the claim rows live in post_changes. last_scan_at is OUR logical scan
+// instant (job.startedAt, stable across retries), never the provider's clock.
+export const postPresence = pgTable(
+  "post_presence",
+  {
+    postDbId: text("post_db_id")
+      .primaryKey()
+      .references(() => posts.id, { onDelete: "cascade" }),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => targets.id, { onDelete: "cascade" }),
+    sourceId: text("source_id")
+      .notNull()
+      .references(() => sources.id, { onDelete: "restrict" }),
+    // PRESENT = observed in the most recent listing that read this post;
+    // ABSENT = not observed in a COMPLETE listing since (D55).
+    state: postPresenceStateEnum("state").notNull().default("PRESENT"),
+    firstSeenAt: timestamptz("first_seen_at").notNull(),
+    lastScanAt: timestamptz("last_scan_at").notNull(),
+    // The caption as last read. NULL means no observation has exposed a
+    // caption yet — an omitted caption field never clears it (D56).
+    lastCaption: text("last_caption"),
+    updatedAt: timestamptz("updated_at").notNull().defaultNow(),
+  },
+  (table) => [
+    index("post_presence_scope_idx").on(
+      table.targetId,
+      table.sourceId,
+      table.state,
+      table.lastScanAt,
+    ),
+  ],
+);
+
+// Phase G (D54–D58): append-only media change events. One row per observed
+// difference, deduplicated by the logical scan instant it was first read at —
+// a retried scan re-observes the same difference at the same instant and
+// collapses; a later difference is a new event.
+export const postChanges = pgTable(
+  "post_changes",
+  {
+    id: uuid(),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => targets.id, { onDelete: "cascade" }),
+    postDbId: text("post_db_id")
+      .notNull()
+      .references(() => posts.id, { onDelete: "cascade" }),
+    change: postChangeKindEnum("change").notNull(),
+    oldValue: text("old_value"),
+    newValue: text("new_value"),
+    detectedAt: timestamptz("detected_at").notNull(),
+    confidence: confidenceLevelEnum("confidence").notNull(),
+    evidenceId: text("evidence_id").references(() => evidence.id, {
+      onDelete: "set null",
+    }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("post_changes_idempotency_idx").on(
+      table.postDbId,
+      table.change,
+      table.detectedAt,
+    ),
+    index("post_changes_target_time_idx").on(table.targetId, table.detectedAt),
   ],
 );
 

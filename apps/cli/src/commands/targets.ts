@@ -4,15 +4,22 @@ import { opTargetAdd, opTargetList, opTargetRemove, opTargetSetStatus } from "..
 
 export const TARGETS_HELP = `igtrack targets <subcommand>
 
-  list                          Tracked accounts with status and last observation
-  add <username> [--name N] [--tags a,b]
+  list                          Tracked accounts with status, mode and last observation
+  add <username> [--name N] [--tags a,b] [--observed]
                                 Start tracking an account (idempotent per user)
   pause <id|username>           Stop scheduling scans (history is preserved)
   resume <id|username>          Return the target to ACTIVE
   rm <id|username> --yes        Delete the target and its observations
 
 Targets are always scoped to the resolved owner user. "rm" proceeds through the
-retention boundary and is irreversible, so it requires --yes.`;
+retention boundary and is irreversible, so it requires --yes.
+
+--observed tracks ANOTHER public account through the documented Business
+Discovery route (mode DISCOVERY). The route is probed once first; if it answers
+UNAVAILABLE the target is refused and the platform's reason (or the flag that
+unlocks it) is printed, because a target that cannot be scanned is worse than no
+target. Such a target runs only DISCOVERY_SCAN: profile fields plus a bounded,
+non-pageable recent-media preview. Read it back with \`igtrack dossier\`.`;
 
 export async function runTargets(args: ParsedArgs): Promise<number> {
   const sub = args.positionals[0] ?? "list";
@@ -27,10 +34,11 @@ export async function runTargets(args: ParsedArgs): Promise<number> {
         targets.length === 0
           ? "No targets. Add one with `igtrack targets add <username>`."
           : table(
-              ["id", "username", "status", "followers", "following", "last observed", "source"],
+              ["id", "username", "mode", "status", "followers", "following", "last observed", "source"],
               targets.map((t) => [
                 t.id,
                 `@${t.username}`,
+                t.observationMode,
                 t.status,
                 t.followerCount === null ? "unavailable" : String(t.followerCount),
                 t.followingCount === null ? "unavailable" : String(t.followingCount),
@@ -48,8 +56,11 @@ export async function runTargets(args: ParsedArgs): Promise<number> {
   if (sub === "add") {
     const username = rest[0];
     if (username === undefined) {
-      throw new UsageError("Usage: igtrack targets add <username> [--name N] [--tags a,b]");
+      throw new UsageError(
+        "Usage: igtrack targets add <username> [--name N] [--tags a,b] [--observed]",
+      );
     }
+    const observed = args.flags["observed"] === true;
     const tags = (flagString(args.flags, "tags") ?? "")
       .split(",")
       .map((t) => t.trim())
@@ -60,11 +71,19 @@ export async function runTargets(args: ParsedArgs): Promise<number> {
         username,
         localName: flagString(args.flags, "name"),
         tags,
+        observed,
       });
       const human = [
-        result.created ? `Tracking @${result.username} (${result.id}).` : `@${result.username} was already tracked (${result.id}).`,
+        result.created
+          ? `Tracking @${result.username} (${result.id}) in ${result.observationMode} mode.`
+          : `@${result.username} was already tracked (${result.id}).`,
+        result.probe === null
+          ? ""
+          : `Probe    ${result.probe.status} · observed ${display(result.probe.observedAt)} · ${display(result.probe.note)}`,
         result.note,
-      ].join("\n");
+      ]
+        .filter((line) => line !== "")
+        .join("\n");
       emit({ json, meta: ctx.meta, data: result, human });
       return 0;
     } finally {

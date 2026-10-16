@@ -272,8 +272,72 @@ describe.runIf(available)("relationship structure (mutual, span)", () => {
     expect(friend.signals.mentions).toBe(0);
     // Two stored comment rows × the documented comment weight, nothing else.
     expect(friend.score).toBe(20);
+    // D51: the newest stored signal timestamp and the rows behind the count —
+    // every rank is traceable to observations.
+    expect(friend.lastSignalAt).toBe(T1.toISOString());
+    expect(friend.evidence.map((e) => e.kind)).toEqual(["comment", "comment"]);
+    expect(friend.evidence[0]!.evidenceId).not.toBeNull();
+    expect(friend.evidence[0]!.reference).toBe(recorded.post.id);
     // The owner commenting on their own post is not a relationship signal.
     expect(byName.get("rel_target")?.signals.comments ?? 0).toBe(0);
+  });
+
+  it("carries a recency window beside the all-time counts, never inside them (D51)", async () => {
+    const oldAt = new Date(Date.now() - 40 * 24 * 3_600_000);
+    const recentAt = new Date(Date.now() - 1 * 24 * 3_600_000);
+    for (const [label, at, taken] of [
+      ["win-old", oldAt, oldAt],
+      ["win-new", recentAt, recentAt],
+    ] as const) {
+      await recordStory(handle.db, {
+        owner: { username: "rel_target" },
+        sourceId: SOURCE.id,
+        story: {
+          storyId: label,
+          mediaType: "IMAGE",
+          takenAt: taken.toISOString(),
+          expiresAt: new Date(taken.getTime() + 24 * 3_600_000).toISOString(),
+          hasLink: false,
+          stickerKinds: [],
+          mentions: [
+            {
+              account: { username: "window_friend" },
+              visibilityClass: "VISIBLE",
+              meta: {
+                category: ObservationCategory.OBSERVED,
+                confidence: Confidence.HIGH,
+                observedAt: at.toISOString(),
+              },
+            },
+          ],
+          meta: {
+            category: ObservationCategory.OBSERVED,
+            confidence: Confidence.HIGH,
+            observedAt: at.toISOString(),
+          },
+        },
+        evidence: evidenceFor("story", label, at),
+      });
+    }
+
+    const ranks = await getRelationshipsForUser(handle.db, userId, targetId);
+    const ranked = ranks.find((r) => r.username === "window_friend")!;
+    // Both stored mentions count; only the one inside the 30-day window is
+    // recent. The score uses the all-time count — a decay constant would be
+    // an invented number (D51).
+    expect(ranked.signals.mentions).toBe(2);
+    expect(ranked.signalsWithinWindow.mentions).toBe(1);
+    expect(ranked.score).toBe(2 * 12);
+    expect(ranked.lastSignalAt).toBe(recentAt.toISOString());
+    expect(ranked.evidence).toHaveLength(2);
+    expect(ranked.evidence[0]!.kind).toBe("mention");
+    expect(ranked.evidence[0]!.observedAt).toBe(recentAt.toISOString());
+    // Two mentions outrank one comment pair by weight alone: the order is the
+    // documented arithmetic, not a vibe.
+    expect(ranks[0]!.username).toBe("window_friend");
+    // Two rows is more than zero and not more than two: LOW by the stored-count
+    // rule, never rounded up.
+    expect(ranks[0]!.confidence).toBe("LOW");
   });
 
   it("returns [] for unknown targets instead of fabricating ranks", async () => {

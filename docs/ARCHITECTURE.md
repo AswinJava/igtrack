@@ -43,13 +43,17 @@ cannot be quietly re-implemented in a UI.
    `enqueueScheduledScan`, a single race-safe `INSERT … SELECT` guarded on target
    status with a unique idempotency key that encodes the window. A target paused
    between selection and insert can never receive a job; a duplicate window
-   resolves to a no-op instead of a duplicate scan.
+   resolves to a no-op instead of a duplicate scan. The insert is also guarded on
+   the target's **observation mode**: an owned-only kind is never queued for a
+   `DISCOVERY` target and `DISCOVERY_SCAN` is never queued for an `OWNED` one
+   (FOUNDING D47), so a scan that cannot succeed is refused before a job exists.
 2. **Claim** — `claimJob` uses `FOR UPDATE SKIP LOCKED` with a lease and a
    heartbeat. Multiple workers are safe; a dead worker's job is reclaimed after
    the lease expires. `started_at` is preserved across retries and reclaims,
    which is what makes a *logical scan* identifiable.
 3. **Execute** — one executor per kind (`PROFILE_SCAN`, `FOLLOWER_SCAN`,
-   `FOLLOWING_SCAN`, `STORY_SCAN`, `POSTS_SCAN`). Every provider call crosses
+   `FOLLOWING_SCAN`, `STORY_SCAN`, `POSTS_SCAN`, `INSIGHTS_SCAN`, and
+   `DISCOVERY_SCAN` for observed accounts). Every provider call crosses
    `providerCall()`, which applies a timeout, counts the call, and converts a
    hang into a typed retryable `TIMEOUT` — never a silent success.
 4. **Persist** — repositories write observations *and* their evidence row. The
@@ -75,6 +79,13 @@ cannot be quietly re-implemented in a UI.
   the retention window. Growth is bounded by default.
 - **Source health**: every capability outcome updates a `source_health` row, so
   "degraded" and "structurally unavailable" are both visible and distinguishable.
+- **Observed (non-owned) accounts**: `DISCOVERY_SCAN` records the documented
+  Business Discovery profile as a COMPLETE, diffable snapshot and its
+  recent-media preview as posts rows. The preview is a window the edge does not
+  page, so each row carries the ceiling in its evidence metadata, the scan
+  completes as `COMPLETED_PARTIAL`, and media rows keep the platform's published
+  time apart from our first-observation time. `igtrack dossier <username>` reads
+  the whole record back with per-capability coverage from the registry.
 
 ## Epistemics (the part that is the product)
 

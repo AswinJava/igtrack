@@ -172,10 +172,30 @@ Binding rules that follow from it:
   lawful alternative.
 - **Other-account data has exactly one lawful route:** the documented Business
   Discovery edge, opt-in via `IGTRACK_GRAPH_BUSINESS_DISCOVERY=1`, returning
-  documented fields only, as a probe (no persistence), with UNAVAILABLE+reason
-  for consumer/private/age-gated accounts. New cross-account routes require a
-  new dated founding entry, not a PR.
-- **The platform id is an output, never a lookup key** (D44).
+  documented fields only, with UNAVAILABLE+reason for consumer/private/age-gated
+  accounts. Two intents, two shapes (FOUNDING §15, D53): `lookup` is a
+  **stateless probe that persists nothing**; `targets add --observed` (an
+  `observation_mode = DISCOVERY` target) **records** what the edge returned, and
+  `dossier` reads it back. New cross-account routes require a new dated founding
+  entry, not a PR.
+- **Observation is operator-directed, never traversal-derived.** A `DISCOVERY`
+  target exists because a person named that account. Never auto-create one from
+  a mention, comment, tag, follower row or discovery response; never add a
+  depth/expand parameter; never walk the graph — there is nothing lawful to walk
+  (FOUNDING §14.1 A10).
+- **A bounded listing says so where the claim lives.** The discovery media
+  preview is capped (12) and cannot page: the cap is recorded in each media
+  row's evidence metadata, the scan reports `COMPLETED_PARTIAL`, and no surface
+  may call those rows "the account's posts" (D48).
+- **Published time and first-observed time are different facts.** Media rows
+  carry the provider's published timestamp *and* our first observation. "Newly
+  discovered" must never be rendered as "newly created" (FOUNDING §15.1).
+- **Owned and observed targets do not share scan kinds.** Owned-only kinds are
+  refused for a `DISCOVERY` target and `DISCOVERY_SCAN` is refused for an
+  `OWNED` one — refuse at enqueue *and* at execute; never queue a scan that
+  cannot succeed (D47).
+- **The platform id is an output, never a lookup key** (D44). It may be used to
+  *match* an account already on record (D52) — never to fetch one.
 - **Relationship ranking uses observed evidence only** (story mentions,
   comment authorship on owned media, follow deltas). Never inference, never a
   score without stored rows behind it.

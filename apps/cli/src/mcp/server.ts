@@ -7,6 +7,7 @@ import {
   opActivity,
   opCapabilities,
   opDoctor,
+  opDossier,
   opEvidence,
   opInsights,
   opLookup,
@@ -41,7 +42,12 @@ How to use these tools:
 1. Call \`igtrack_status\` first. It names the active provider and whether data is synthetic.
 2. \`igtrack_scans_run\` only QUEUES work. \`igtrack_work\` executes it. Nothing is observed until a worker runs.
 3. Read with \`igtrack_activity\`, \`igtrack_relationships\`, \`igtrack_insights\`, \`igtrack_evidence\`. Every row carries its source id, confidence, and evidence id — quote them when you report a claim.
-4. \`igtrack_capabilities\` lists what can and cannot be observed, with the reason. Never present an unavailable capability as a zero/empty result.
+4. \`igtrack_dossier\` is the read-back of everything recorded about ONE account, including per-capability coverage and the gaps. Use it instead of assembling a profile from several calls.
+5. \`igtrack_capabilities\` lists what can and cannot be observed, with the reason. Never present an unavailable capability as a zero/empty result.
+
+Two observation modes exist and they do not mix:
+- OWNED (default): accounts this deployment's credentials observe. Owned scans only.
+- DISCOVERY: ANOTHER public account, tracked with \`igtrack_target_add { observed: true }\` through the documented Business Discovery edge. Only \`DISCOVERY_SCAN\` runs for it, its profile fields are recorded like any snapshot, and its media rows are a BOUNDED, non-pageable preview: never describe them as "the account's posts". Its media rows carry both the platform's publish time and when we first saw the row — "newly discovered" is not "newly created".
 
 Non-negotiable rules for you as the agent:
 - \`null\` means "not observable", never 0. Do not fill gaps with estimates.
@@ -184,11 +190,17 @@ export function buildServer(): McpServer {
     {
       title: "Track an account",
       description:
-        "Start tracking a public account. Idempotent per owner. Only accounts you are authorized to observe; live observation requires the official Graph API on an owned account.",
+        "Start tracking a public account. Idempotent per owner. Only accounts you are authorized to observe; live observation requires the official Graph API on an owned account. Set observed: true to track ANOTHER public account through the documented Business Discovery edge (mode DISCOVERY, only DISCOVERY_SCAN runs for it). That route is probed once first and the target is REFUSED if the platform answers UNAVAILABLE — the error carries the platform's reason or the flag that unlocks it.",
       inputSchema: {
         username: z.string().describe("Instagram username, with or without leading @"),
         localName: z.string().optional().describe("Human label for this target"),
         tags: z.array(z.string()).optional().describe("Free-form tags"),
+        observed: z
+          .boolean()
+          .optional()
+          .describe(
+            "Track another public account (Business Discovery route, mode DISCOVERY) instead of an owned account",
+          ),
       },
     },
     async (args) =>
@@ -200,6 +212,7 @@ export function buildServer(): McpServer {
               username: args.username,
               localName: args.localName,
               tags: args.tags,
+              observed: args.observed,
             }),
           ),
         ),
@@ -344,7 +357,7 @@ export function buildServer(): McpServer {
     {
       title: "Relationship ranking",
       description:
-        "Accounts ranked by observed signal strength (story mentions + comment authorship on owned media + follow deltas) with mutual/currently-observed state and honest first/last-seen provenance.",
+        "Accounts ranked by observed signal strength (story mentions + comment authorship on owned media + follow deltas) with mutual/currently-observed state and honest first/last-seen provenance. Each rank carries signalsWithinWindow, lastSignalAt and up to three stored evidence rows behind its counts; the result's `method` block states the exact score formula and says that recency is NOT folded into the score.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         target: z.string().describe("Target id or username"),
@@ -356,6 +369,23 @@ export function buildServer(): McpServer {
         withContext(async (ctx) =>
           withMeta(ctx, await opRelationships(ctx, { target: args.target, limit: args.limit })),
         ),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_dossier",
+    {
+      title: "Account dossier",
+      description:
+        "Everything this deployment has RECORDED about one tracked account, read back with its gaps intact: identity, profile snapshots and changes, follow deltas, stories/mentions, stored media rows, and a per-capability coverage list (OBSERVED / NOT_OBSERVED / UNAVAILABLE) where every state is computed from rows that exist and every reason comes from the platform or the capability registry. Read-only: nothing is fetched. For a DISCOVERY target the media rows are a bounded preview and carry publishedAt (platform) separately from firstObservedAt (us).",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        target: z.string().describe("Target id or username"),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) => withMeta(ctx, await opDossier(ctx, { target: args.target }))),
       ),
   );
 

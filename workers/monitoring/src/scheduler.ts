@@ -93,7 +93,7 @@ export async function runSchedulerTick(
       // while a 0.5x target lands in twice as many. Kinds outside the
       // target's enabled set are never enqueued here (manual sync can still
       // run them explicitly).
-      const kinds = kindsForTarget(target.scanKinds);
+      const kinds = kindsForTarget(target.scanKinds, target.observationMode);
       for (const kind of kinds) {
         const interval = effectiveIntervalMs(intervals[kind], target.scanCadenceMult);
         const windowStart = schedulingWindowStart(now.getTime(), interval);

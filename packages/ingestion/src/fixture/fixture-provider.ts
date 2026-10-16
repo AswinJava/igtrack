@@ -8,6 +8,7 @@ import {
   CapabilityName,
   CapabilityStatus,
   Confidence,
+  DISCOVERY_MEDIA_PREVIEW_LIMIT,
   errored,
   ObservationCategory,
   SourceKind,
@@ -546,8 +547,7 @@ export class FixtureProvider implements InstagramProvider {
         captured_at: raw.captured_at,
         posts: raw.recent_media,
         next_cursor: null,
-      });
-      const discovered: NormalizedDiscoveredAccount = {
+      });      const discovered: NormalizedDiscoveredAccount = {
         account: {
           username: raw.account.username,
           igId: raw.account.id,
@@ -572,7 +572,11 @@ export class FixtureProvider implements InstagramProvider {
         ...(raw.account.media_count !== undefined
           ? { postCount: raw.account.media_count }
           : {}),
-        recentMedia,
+        recentMedia: recentMedia.slice(0, DISCOVERY_MEDIA_PREVIEW_LIMIT),
+        // A fixture set stands in for the documented route, so it declares the
+        // same ceiling — a synthetic run exercises the bounded-preview
+        // bookkeeping exactly as the real edge would.
+        recentMediaLimit: DISCOVERY_MEDIA_PREVIEW_LIMIT,
         meta: {
           category: ObservationCategory.OBSERVED,
           confidence: Confidence.HIGH,

@@ -453,3 +453,203 @@ so Business Discovery is `NOT_VERIFIED` live; the request shape is docs-pinned
 against Meta's Business Discovery references (both updated 2026-08-12). The
 media preview is bounded (12) because paging does not exist on this edge — it
 is a preview, said as such in the note, never "the account's posts".
+
+---
+
+## 15. The fifth founding — the public-account dossier, executed where lawful
+
+**Date:** 2026-10-15 · **Status:** adopted (Phase F built; refusals restated)
+
+The founder restated the requirement as a full mission: enter **any public
+account's** username or user id and systematically collect, analyse, organise and
+**track** its publicly accessible information, its interactions across other
+public accounts, its followers/following by name, its tags, recaps and highlights
+"even if hidden", the likes and comments it left elsewhere, who followed and
+unfollowed it since the last audit, "closest contacts" ranked through the whole
+follow graph **recursively**, plus historical audits, change detection, and
+consistent account identification.
+
+§14 recorded that requirement and mapped it clause by clause, and Phase E built
+its lawful core (the Business Discovery probe). This section answers the *mission
+as given* — including the parts §14 refused — with one change of substance:
+
+> **The lawful cross-account route stops being a probe and becomes a record.**
+> §14.1 A1's answer was "another account's public data has exactly one lawful
+> route, and we render it without persisting". That made cross-account
+> *tracking* (the mission's §3 and §4) impossible by construction: no
+> persistence, no history, no diff. D42's probe was the right first step and the
+> wrong final shape. Phase F records what the edge returns, with the same
+> evidence discipline as everything else.
+
+### 15.1 What this phase changes, and what it does not
+
+**Changed (D47–D52):**
+
+1. A target can be **observed** (`observation_mode = DISCOVERY`) instead of owned
+   (`OWNED`). An observed target is a public professional account the operator
+   points at explicitly; it is scanned by the documented Business Discovery edge
+   on a cadence, and its profile and bounded recent media are recorded as
+   observations with evidence.
+2. Those observations are **diffable**: profile field changes over time become
+   `profile_changes` rows, and media carries both its **published timestamp**
+   (provider) and its **first-observed timestamp** (ours), so "newly discovered"
+   can never be printed as "newly created".
+3. `igtrack dossier <username>` answers the mission's read question for one
+   account: identity and how it was identified, observed profile history, media
+   with both timestamps, follow history when the account is owned, relationship
+   ranks when the account is owned, **per-capability coverage** (observed /
+   unavailable-with-reason / never attempted), and the registry's refusals for
+   this account.
+4. `targets add <username> --observed` refuses to create the target unless the
+   discovery route answers *now*: an unreachable class (consumer, private,
+   age-gated, nonexistent) and a switched-off route are both refused with the
+   reason, because a target whose every scan is guaranteed to be a no-op is the
+   "misconfiguration looks like no data" failure invariant 7 forbids.
+5. Account identification prefers the **stable platform identifier**: when the
+   provider supplies an `igId`, an existing row is matched by id first, so a
+   username change updates the account instead of forking its history into a new
+   row. The id remains an *output*, never a lookup key (D44 stands).
+
+**Not changed — the refusals stand, unaltered:**
+
+| # | Refused | Why (unchanged) |
+|---|---|---|
+| A4 | Highlights, story/highlight tags of others, "hidden" anything | No highlights edge exists (IG User reference, 2026-04-22); archived story content is not enumerable; "hidden" means the owner's session cookie, which invariant 3 forbids |
+| A5 | All comments another account left on others' posts | No such edge. The comment edge reads comments on media you own or manage; the discovery media objects cannot be navigated to a comments edge (insufficient permissions, documented) |
+| A6 | All likes another account made | No liker feed exists. `like_count` is a number; *who* is never enumerated |
+| A7 | Repost **identities** | No repost object or reshare edge. `reposts_count` is a scalar on media you can read, and remains unrequested until a live check verifies it under this integration's credentials |
+| A9 | Rosters of other accounts (followers/following by name) | No roster edge exists for any live interface. For a `DISCOVERY` account only `followers_count`/`follows_count` are observable — never the lists |
+| A10 | Recursive traversal of the follow graph | The input does not exist lawfully. Phase F records observations of accounts the **operator named**, one by one; it never walks from one account to another on its own. No traversal queue, no "expand neighbours", no depth parameter — there is nothing to traverse |
+
+Invariant 3 is untouched: the new route is the same documented edge D42 adopted,
+reached with the same Facebook-Login permission set, off unless
+`IGTRACK_GRAPH_BUSINESS_DISCOVERY=1` is set. Nothing in Phase F reads an
+undocumented endpoint, a session cookie, or another account's non-public data.
+
+### 15.2 Decision log (Phase F)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D47 | **A target carries an observation mode: `OWNED` (default) or `DISCOVERY`** (migration 0016). Owned-only scan kinds are refused for a `DISCOVERY` target and `DISCOVERY_SCAN` is refused for an `OWNED` one, at both the scheduler and the executor. | The mission's §3/§4 need cross-account tracking, and the queue, scheduler, checkpoints, evidence ledger and activity feed already exist. A mode column reuses all of it; a parallel subsystem would have duplicated every invariant. Refusing the wrong kind for the wrong mode keeps "scan that cannot succeed" out of the queue instead of recording it as a repeated provider failure. |
+| D48 | **`DISCOVERY_SCAN` records the profile as a COMPLETE snapshot and the media preview as a bounded one, and the scan always reports `COMPLETED_PARTIAL`.** The bound (12) is written into the evidence metadata of every media row, not just into a note. | Two different completeness facts in one response: the profile read finished (so it is a lawful diff baseline), the media listing is a window that paging cannot extend (so it can never be diffed or described as "the account's posts"). Putting the bound in the evidence row means the claim itself carries its coverage limit — durable, and readable years later. |
+| D49 | **`targets add --observed` probes the route once and refuses on UNAVAILABLE**, naming the platform's reason or the unlock flag. | Invariant 7, applied to the new mode: an unreachable account is a fact the operator should learn at add time, not after a week of scans that can never produce data. The probe also answers §6's "handles unavailable, deleted, renamed, private accounts appropriately" at the moment of identification. |
+| D50 | **`igtrack dossier <username>` is the reporting surface for one account**, ownership-scoped, read-only, and composed from stored observations plus the capability registry — not from a new table. It reports, per capability, `OBSERVED` (with row counts), `UNAVAILABLE` (with the registered reason) or `NOT_OBSERVED`, and lists the platform-level refusals that apply. | Mission §3/§9.9 require "which accounts and data categories have been investigated, which remain incomplete, and why". Deriving it from observations + registry means coverage cannot drift from what was actually stored, and the refusals are the registry's own words, not a second copy. |
+| D51 | **Relationship ranks gain recency, per-account evidence rows, and an explicit method block**; counts are de-duplicated at the source (`count(DISTINCT story_db_id)`, unique comment ids, unique delta keys) so the same interaction cannot be counted twice through two paths. | Mission §5 asks for frequency, recency, evidence and explanation. The score stays a sum of observed counts — recency is *reported* (`lastSignalAt`, 30-day count), never folded into the score as an invented decay, because a decay constant is a guess about people dressed as arithmetic. |
+| D52 | **Account identity is matched by platform id first** when the provider supplies one; a username change then updates the row instead of creating a second account, and the rename surfaces as a `username` profile change. | Mission §6 wants the same account recognized across audits and username changes handled "when reliable identifiers make this possible". They do make it possible — the id is returned by both the owned profile and the discovery response — so this is the one place the mission's ask was both lawful and unfinished. The id is still never a lookup key (D44). |
+| D53 | **`lookup` stays a stateless probe; `targets add --observed` + `dossier` are the recording path.** | Two different intents: "tell me about this account right now" must leave no residue in a tool an agent calls freely; "watch this account" is an explicit act with storage consequences. Conflating them would make every exploratory lookup write third-party data. |
+
+### 15.3 What was deliberately NOT added
+
+- **No traversal machinery.** No neighbour expansion, no depth setting, no
+  discovered-account queue, no "crawl from a mention". The refusal in §14.1 A10
+  is structural: the follow graph of a third-party account is not observable, so
+  a depth parameter would be a knob wired to nothing.
+- **No new provider method.** The mission's asks that have a lawful route are
+  served by `discoverAccount` (Phase E) and the existing owned-account methods.
+  The own-account `tags` edge and the `mentions` edge remain recorded unlocks
+  (D46) — they are the next lawful increment, not smuggled into this one.
+- **No identity inference, no local id→username mapping, no "similar-looking
+  content is a repost" classifier.** Same refusals as §14.3.
+- **No demo/dashboard surface.** The CLI and MCP are the product (D13).
+
+### 15.4 Prioritized plan and where each item landed
+
+| Priority | Item | Status in Phase F |
+|---|---|---|
+| P0 | Recorded cross-account observations (observation mode, `DISCOVERY_SCAN`, evidence, bounded-preview metadata) | **Built** (D47, D48) |
+| P0 | Dossier reporting with per-capability coverage and registry refusals | **Built** (D50) |
+| P0 | Historical comparison for observed accounts (profile diffs; published-vs-first-observed for media) | **Built** (D48, reuses Phase A's COMPLETE-only diff gate) |
+| P1 | Identification by stable id + username-change handling | **Built** (D52) |
+| P1 | Relationship ranking transparency (recency, evidence rows, method block, de-duplication) | **Built** (D51) |
+| P2 | Own-account `tags` / `mentions` edges (A2, A5 sliver) | **Recorded, not built** (D46) — next lawful increment |
+| P2 | `reposts_count` on owned media (A7 partial) | **Recorded, not built** (D46) — needs a live credential check first, because an unknown field name fails the whole media call |
+| — | Likers, third-party comment/like feeds, repost identities, other-account rosters, highlights, recursive traversal | **Refused** (§14.1, restated in §15.1) |
+
+### 15.5 Verification for Phase F
+
+| Item | Evidence |
+|---|---|
+| Typecheck | `pnpm typecheck` — clean across the 5 workspace packages (2026-10-15) |
+| Tests | `pnpm test` — **425 passed / 1 skipped, 58 files** (baseline before Phase F: 405/56). New/extended coverage: `workers/monitoring/test/discovery-scan.test.ts` (10 cases: COMPLETE profile snapshot, bounded media with the ceiling in evidence metadata, published-vs-first-observed, re-run de-duplication, UNAVAILABLE → reason in `source_health`, provider without the route, wrong-mode refusal non-retryable, enqueue guard, worker dispatch → `COMPLETED_PARTIAL`, failing route → retryable `JobExecutionError`, dossier read-back); `packages/database/test/dossier.test.ts` (4 cases: owner scoping, stored-count read-back, unobserved target, route-unavailability only from observing sources); `activity-relationships.test.ts` (recency window beside counts, evidence rows, deterministic order); `apps/cli/test/operations.test.ts` (`--observed` refusal by owned account / unknown username / route-less provider, full record → scan → dossier flow); `scan-prefs.test.ts` (mode routing); `mcp.test.ts` (tool surface) |
+| End-to-end (fixture) | Run against the live database (2026-10-15): `igtrack targets add dune.harbor --observed` (probe AVAILABLE, DISCOVERY target created) → `igtrack scans run --kinds DISCOVERY_SCAN --target dune.harbor` (1 job enqueued; the 6 owned kinds skipped with the mode reason) → `igtrack work` (job `succeeded`, outcome `COMPLETED_PARTIAL`) → `igtrack dossier dune.harbor` (profile snapshot COMPLETE with 18420 followers; 2 media rows with `publishedAt` 2026-08-21/26 vs `firstObservedAt` 2026-08-27; coverage states per capability; bounded-preview note; route unavailability with reasons) |
+| Capability registry | `OTHER_ACCOUNT_PUBLIC` now persists (`profileSnapshots`, `posts`, `evidence`) and describes both intents; `pnpm docs:capabilities` regenerated; matrix drift test green |
+
+Not claimed: no live Graph credential exists in this environment, so the
+`DISCOVERY_SCAN` request shape is docs-pinned and `NOT_VERIFIED` live, exactly
+like Phase E. The media bound (12) is Meta's documented behavior for this edge,
+not a choice this project made.
+
+---
+
+## 16. Phase G — media change detection (post edits and disappearances)
+
+**Date:** 2026-10-16 · **Status:** adopted (Phase G built; claims only where a COMPLETE listing exists)
+
+The mission recorded in §15 asks, in its historical-audit clause, to "maintain
+persistent audit history and compare each new audit against previous results"
+and to identify and report "new, edited, deleted, or otherwise changed posts
+and observable content". New posts were already covered (the posts row plus the
+`POST_PUBLISHED` activity item). **Edited and disappeared posts were not**: the
+posts table is append-only and first-observation-wins (`recordPost`
+deduplicates and never updates), and no surface recorded what a media listing
+contained at each scan, so a caption change or a post leaving the listing was
+undetectable. This phase closes that gap for the one target class where it is
+lawful to close it — targets the operator owns, read through the owned-account
+media edge, with the full listing paginated to completion.
+
+**Changed:**
+
+1. An owned target's `POSTS_SCAN` records, per stored post row, a **presence
+   state** (`post_presence`): first observed, last logical scan that observed
+   it, the caption as last read, and `PRESENT`/`ABSENT`.
+2. Two new append-only events land in `post_changes`: `CAPTION_EDITED` (with
+   the old and new caption text) and `NO_LONGER_OBSERVED` (with the last-read
+   caption as the old value). Both carry the **logical scan instant** as
+   `detected_at`, a confidence, and a linked `posts_listing` evidence row.
+3. The activity feed carries the two event types (`POST_EDITED`,
+   `POST_REMOVED`); the dossier counts `postChanges`; the `POSTS` capability
+   entry names the new persistence.
+
+**Not changed — the refusals stand, unaltered:** no session cookie, no
+undocumented endpoint, no traversal. DISCOVERY targets gain nothing here
+(D59): their media edge is a bounded, non-pageable preview, and a fixed window
+cannot distinguish "no longer observable" from "fell out of the window".
+
+### 16.1 Decision log (Phase G)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D54 | **A presence state, not per-scan media snapshots.** `post_presence` holds one mutable row per stored post (`state`, `first_seen_at`, `last_scan_at`, `last_caption`); `post_changes` holds append-only events deduplicated by `(post, change, detected_at)`, where `detected_at` is the logical scan instant (`job.startedAt`, stable across retries and lease reclaims). | The mission asks to preserve what is *required* to identify changes. A full membership snapshot per scan would cost O(posts × scans) to carry a fact the change rows already state durably. Follow rosters keep per-scan snapshots because membership there is the claim; for media, the post row itself is the membership record. |
+| D55 | **Disappearance is claimed only from a COMPLETE media listing, and it is never called "deleted".** The media listing's completeness is tracked **separately** from comment/children truncation: a truncated comment fetch neither suppresses nor creates a media claim. The event reads `NO_LONGER_OBSERVED` — "absent from a complete media listing at T". | Invariant 4/D9 applied to media: truncation may never fabricate a loss, and the claim states exactly what was observed. A post can leave a listing for reasons we did not verify (archival, gating, platform ordering/limits) — a deletion claim would assert more than we know. |
+| D56 | **Caption differences are recorded from what was read, not gated on listing completeness.** An edit claim asserts "the caption we read at T differs from the caption we last read"; it asserts nothing about absence, so the COMPLETE gate (which exists for absence) does not apply. A caption field the provider omits is "not exposed in this observation" — never an edit to empty, and it never clears the stored value. | Presence claims and absence claims have different epistemics (same distinction as §15.1's published-vs-first-observed). Only the absence half can be fabricated by truncation. |
+| D57 | **Reappearance is a state return, not an event.** A post observed again after absence flips back to `PRESENT` with no row emitted; a *later* disappearance is a new event under a new `detected_at`. | The mission asks for new/edited/deleted; "returned" would be a fourth event type with no ask behind it. The state itself answers the read question ("is it in the listing now"), and cycles still produce an event per genuine disappearance. |
+| D58 | **Change rows link one `posts_listing` evidence row per logical scan** (observation id stable across retries; created lazily on the first change, never for scans with no changes). No raw hash rides on it: the raw representation arrives per page and is not one artifact, and per invariant 5 an unset raw hash is the honest state. New posts keep their per-page raw hash on the post's own evidence. | The evidence obligation (invariant 5) is met without fabricating a payload identity that does not exist. |
+| D59 | **Owned-only, enforced at execution.** `POSTS_SCAN` writes presence and changes only when the target's `observation_mode` is `OWNED` (wrong-mode jobs are already refused at enqueue; the executor gate makes the new claim unreachable even if a job reaches it another way). | D48's bound made structural: no code path may produce a change claim from a bounded preview window. |
+
+### 16.2 What was deliberately NOT added
+
+- Any phrase, column, or summary that says "deleted" / "removed by the owner" —
+  the graph does not tell us that, so neither does the product (D55).
+- An "edited at" timestamp — the observation bounds the edit interval
+  (`detected_at` is when *we* first saw the difference), nothing narrower is
+  knowable.
+- A `POST_RETURNED`/`POST_REOBSERVED` activity type (D57), and per-scan media
+  snapshot tables (D54).
+- Any change machinery for DISCOVERY targets (D59); any diffing of the bounded
+  preview as if it were a listing.
+- The `tags`/`mentions` edges stay recorded unlocks (D46) — this phase closes
+  the mission's change-detection clause; they remain the next lawful increment.
+
+### 16.3 Verification for Phase G
+
+| Item | Evidence |
+|---|---|
+| Typecheck | `pnpm typecheck` — all five workspaces (`core`, `ingestion`, `database`, `monitoring`, `cli`) `tsc --noEmit` clean, exit 0 |
+| Tests | `pnpm test` — 59 files, 432 passed, 1 skipped (the Postgres-down suite skips loudly), exit 0. `workers/monitoring/test/posts-changes.test.ts` pins G1–G7: silent first scan, one `CAPTION_EDITED` per difference with old/new + listing evidence, absence once per genuine disappearance with silent return and a fresh `detected_at` on re-disappearance, PARTIAL suppression of absence alongside edit recording, first-caption/omitted-caption rules, the DISCOVERY execution gate, and retry idempotence |
+| End-to-end (fixture) | `igtrack setup` (migrations 0016+0017 applied) → `scans run` (owned kinds refused for the DISCOVERY target at enqueue) → `work --max 20` (all succeeded) → `dossier dune.harbor` (bounded-preview caveat and published-vs-first-observed rendered) → `activity`. In the live database afterwards: 2 `post_presence` rows `PRESENT` with captions for the owned fixture target, none for the DISCOVERY target, and 0 `post_changes` — a static fixture must and does produce no change claim |
+| Capability registry + docs | `pnpm docs:capabilities` regenerated `docs/CAPABILITIES.md` from the registry (POSTS entry now names `postPresence`/`postChanges`); the capability-matrix drift test and the schema-consistency test are green |
+
+Not claimed: caption edits and disappearances are verified against a mutable
+provider double and the worker boundary — not live. No Graph credential exists
+in this environment, so a real account's edit cycle remains `NOT_VERIFIED`
+live, same standing as every other Graph route.

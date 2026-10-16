@@ -12,10 +12,12 @@ import { runTargets, TARGETS_HELP } from "./commands/targets.js";
 import { runScans, runWork, SCANS_HELP } from "./commands/scans.js";
 import {
   CAPABILITIES_HELP,
+  DOSSIER_HELP,
   INSIGHTS_HELP,
   LOOKUP_HELP,
   runActivity,
   runCapabilities,
+  runDossier,
   runEvidence,
   runInsights,
   runLookup,
@@ -52,6 +54,7 @@ Observe
   work                  Run the worker now: one scheduler tick + drain the queue
   activity              What changed, newest first, with evidence ids
   relationships <t>     Accounts ranked by observed signal, with provenance
+  dossier <target>      Everything recorded about one account, with its gaps
   evidence              Evidence rows (audit trail) and --id chains
   lookup <username>     Ask the source what it can observe, persisting nothing
   insights <target>     Account metrics this deployment recorded, with absences
@@ -109,11 +112,17 @@ async function dispatch(args: ParsedArgs): Promise<number> {
     case "relationships":
       if (wantsHelp(args)) {
         process.stdout.write(
-          "igtrack relationships <target id|username> [--limit N]\n\nRank accounts by observed signal strength (story mentions, comment authorship\non owned media, follow deltas) against one tracked target, with\nmutual/observed state and first/last seen.\n",
+          "igtrack relationships <target id|username> [--limit N]\n\nRank accounts by observed signal strength (story mentions, comment authorship\non owned media, follow deltas) against one tracked target, with\nmutual/observed state, first/last seen, the newest signal, and the stored rows\nbehind each count (--json includes them).\n",
         );
         return 0;
       }
       return runRelationships(args);
+    case "dossier":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${DOSSIER_HELP}\n`);
+        return 0;
+      }
+      return runDossier(args);
     case "evidence":
       if (wantsHelp(args)) {
         process.stdout.write(

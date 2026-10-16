@@ -20,6 +20,11 @@ export const SCANS_HELP = `igtrack scans <subcommand> | igtrack work
 
 Kinds: ${SCAN_KINDS.join(", ")}.
 
+A target runs only the kinds its observation mode can answer: OWNED targets run
+the owned-account kinds, and a DISCOVERY target (another public account) runs
+only DISCOVERY_SCAN. The other kinds are refused at enqueue with the reason
+rather than queued to fail.
+
 "scans run" never executes anything by itself — it enqueues, and the worker
 executes. That separation is what makes a scan resumable, retryable, and safe to
 interrupt.`;

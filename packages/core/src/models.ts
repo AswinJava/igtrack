@@ -234,6 +234,14 @@ export interface NormalizedInsightSet {
 // platform withheld stays absent (D42).
 // ---------------------------------------------------------------------------
 
+/**
+ * The documented Business Discovery media edge takes a `limit` and does not
+ * page: the route can return at most this many media rows and the account may
+ * have more. The bound travels with the observation (`recentMediaLimit`) so a
+ * stored preview row can never be presented as "the account's posts".
+ */
+export const DISCOVERY_MEDIA_PREVIEW_LIMIT = 12;
+
 export interface NormalizedDiscoveredAccount {
   account: NormalizedAccountRef;
   displayName?: string;
@@ -245,5 +253,13 @@ export interface NormalizedDiscoveredAccount {
   postCount?: number;
   /** Bounded recent-media preview from the discovery media edge, in the order the platform returned it (Business Discovery returns newest first). */
   recentMedia: NormalizedPost[];
+  /**
+   * The route's ceiling on `recentMedia` when it is a bounded, non-pageable
+   * preview: the provider cannot return more than this, and the account may
+   * have more. Stored in the evidence of every media row so no surface can
+   * render the preview as "the account's posts". Absent means the route
+   * declared no ceiling (then nothing may claim one).
+   */
+  recentMediaLimit?: number;
   meta: ObservationMeta;
 }

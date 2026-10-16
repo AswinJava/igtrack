@@ -14,6 +14,7 @@ import {
   type NormalizedFollowEntry,
   type NormalizedPost,
   type NormalizedComment,
+  type NormalizedDiscoveredAccount,
   type NormalizedStory,
   type NormalizedInsightSet,
 } from "@igtrack/core";
@@ -29,6 +30,8 @@ import {
   recordPost,
   recordPostChildren,
   recordPostComment,
+  recordPostPresence,
+  finalizePostPresence,
   recordInsightSet,
   latestFollowSnapshot,
   persistFollowDiff,
@@ -358,6 +361,177 @@ export async function runProfileScan(
   });
 
   return "succeeded";
+}
+
+// ---------------------------------------------------------------------------
+// DISCOVERY_SCAN
+//
+// The recorded form of the documented Business Discovery edge (D47/D48): the
+// same route as the `lookup` probe, but on a DISCOVERY target it RECORDS what
+// the edge returned. Two facts the storage must never blur:
+//   * the profile fields are the documented field set — recorded COMPLETE and
+//     diffable, exactly like an owned profile snapshot;
+//   * the media edge is a bounded, non-pageable preview — the route's ceiling
+//     is written into every media row's evidence, and the scan can only ever
+//     report COMPLETED_PARTIAL. Nothing here may be rendered as "the account's
+//     posts".
+// A row's `taken_at` is when the platform published it; `observed_at` is when
+// we first saw it. "Newly discovered" is never "newly created".
+// ---------------------------------------------------------------------------
+
+export async function runDiscoveryScan(
+  db: Database,
+  job: JobRecord,
+  src: ExecutionSource,
+): Promise<JobResult> {
+  const { account, target } = await loadAccountForTarget(db, job);
+  const source = src.source;
+
+  // Execute-time mode guard (D47): the queue refuses an owned kind for a
+  // DISCOVERY target and refuses this kind for an OWNED one; a mode that
+  // changed after enqueue must not let a scan run under the wrong contract.
+  if (target.observationMode !== "DISCOVERY") {
+    throw new JobExecutionError(
+      `DISCOVERY_SCAN requires a DISCOVERY target; @${account.username} is observed as OWNED`,
+      { retryable: false },
+    );
+  }
+
+  const caps = src.provider.capabilities();
+  if (caps.discoverAccount !== true) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "discoverAccount",
+      coverageNote: "Provider declares the discoverAccount capability unavailable.",
+    });
+    return "unavailable";
+  }
+
+  const result: CapabilityResult<NormalizedDiscoveredAccount> = await providerCall(
+    db,
+    source,
+    "discoverAccount",
+    () => src.provider.discoverAccount(account.username),
+  );
+
+  if (result.status === CapabilityStatus.UNAVAILABLE) {
+    await markCapabilityUnavailable(db, {
+      source,
+      capability: "discoverAccount",
+      coverageNote:
+        result.note ??
+        "The platform exposes no public data for this account through the documented route.",
+    });
+    return "unavailable";
+  }
+
+  if (result.status === CapabilityStatus.ERROR) {
+    const err = result.error;
+    await recordCapabilityFailure(db, {
+      source,
+      capability: "discoverAccount",
+      reason: err?.message ?? "Provider error",
+      errorCategory: err?.kind ?? "INTERNAL",
+    });
+    throw new JobExecutionError(err?.message ?? "Provider error", {
+      kind: err?.kind ?? "INTERNAL",
+      retryable: resolvedRetryable(err),
+      ...(err?.retryAfterMs !== undefined ? { retryAfterMs: err.retryAfterMs } : {}),
+    });
+  }
+
+  if (result.data === undefined) {
+    throw new JobExecutionError("Provider returned no discovery data", {
+      retryable: false,
+    });
+  }
+
+  const found = result.data;
+  const observedAt = found.meta.observedAt;
+  const discovery = {
+    observationMode: "DISCOVERY",
+    route: "business_discovery",
+    jobId: job.id,
+  };
+
+  await recordProfileSnapshot(db, {
+    profile: {
+      account: found.account,
+      ...(found.bio !== undefined ? { bio: found.bio } : {}),
+      ...(found.externalUrl !== undefined ? { externalUrl: found.externalUrl } : {}),
+      ...(found.profilePicUrl !== undefined ? { profilePicUrl: found.profilePicUrl } : {}),
+      ...(found.followerCount !== undefined ? { followerCount: found.followerCount } : {}),
+      ...(found.followingCount !== undefined
+        ? { followingCount: found.followingCount }
+        : {}),
+      ...(found.postCount !== undefined ? { postCount: found.postCount } : {}),
+      meta: found.meta,
+    },
+    evidence: evidenceFrom(
+      source,
+      "profile_snapshot",
+      `discovery:profile:${found.account.username}@${observedAt}`,
+      {
+        observedAt,
+        confidence: result.confidence,
+        ref: account.username,
+        ...(result.rawPayloadHash !== undefined
+          ? { rawPayloadHash: result.rawPayloadHash }
+          : {}),
+        ...(result.rawReference !== undefined
+          ? { rawReference: result.rawReference }
+          : {}),
+      },
+      found,
+      { capabilityStatus: result.status, ...discovery },
+    ),
+    // The documented profile field set is the whole set for this route, so the
+    // snapshot is COMPLETE and diffable — the media preview is the bounded part.
+    completeness: "COMPLETE",
+  });
+
+  const previewLimit = found.recentMediaLimit;
+  for (const [position, post] of found.recentMedia.entries()) {
+    await recordPost(db, {
+      targetId: target.id,
+      owner: found.account,
+      post,
+      sourceId: source.id,
+      evidence: evidenceFrom(
+        source,
+        "post",
+        `discovery:media:${post.postId}@${post.meta.observedAt}`,
+        {
+          observedAt: post.meta.observedAt,
+          confidence: post.meta.confidence,
+          ...(result.rawReference !== undefined
+            ? { rawReference: result.rawReference }
+            : {}),
+        },
+        post,
+        {
+          ...discovery,
+          previewPosition: position,
+          ...(previewLimit !== undefined
+            ? { previewLimit, previewBounded: true }
+            : { previewBounded: false }),
+        },
+      ),
+      // No documented route returns another account's media comments, and a
+      // direct GET on a discovery media id is refused: the comment source is
+      // structurally absent, which is UNAVAILABLE, not "no comments".
+      commentsState: "UNAVAILABLE",
+    });
+  }
+
+  await recordCapabilitySuccess(db, {
+    source,
+    capability: "discoverAccount",
+  });
+
+  // Bounded preview = the media half of this observation is knowingly
+  // incomplete, and the job row says so.
+  return previewLimit !== undefined ? "succeeded-partial" : "succeeded";
 }
 
 // ---------------------------------------------------------------------------
@@ -848,6 +1022,15 @@ export async function runStoryScan(
 // UNAVAILABLE (no exposed comment source — skipped, never empty-faked),
 // NOT_SCANNED (comments capability off). A duplicate-cursor loop guard stops
 // pathological providers instead of paging forever.
+//
+// Phase G (FOUNDING §16): an OWNED target's scan also records media change
+// state — per post, a presence row and a caption-edit event when the caption
+// we read differs from the caption last read; at scan end, when (and only
+// when) the MEDIA listing completed, posts no longer present flip to ABSENT
+// with a NO_LONGER_OBSERVED event. Media-listing completeness is tracked
+// separately from comment/children truncation: those failures degrade the job
+// outcome but must not gate a media claim. DISCOVERY targets record nothing
+// here: their bounded preview cannot distinguish absence from window shift.
 // ---------------------------------------------------------------------------
 
 const POSTS_CHECKPOINT_KIND = "POSTS_SCAN";
@@ -939,7 +1122,36 @@ export async function runPostScan(
   }
   const targetId = job.targetId;
   const { account } = await loadAccountForTarget(db, job);
+  const target = await getTarget(db, targetId);
+  if (target === null) {
+    throw new JobExecutionError(`target ${targetId} not found`, { retryable: false });
+  }
   const source = src.source;
+
+  // Phase G (D59): presence/change tracking is owned-only. Wrong-mode jobs are
+  // already refused at enqueue; this gate keeps the change claim unreachable
+  // from a DISCOVERY preview, whose fixed window cannot distinguish "no longer
+  // observable" from "fell out of the window" (D48).
+  const trackMediaChanges = target.observationMode === "OWNED";
+
+  // Logical scan identity: claimJob preserves started_at across retries and
+  // lease reclaims, so every execution of this job observes the same instant.
+  // It is the dedup key for change events and the comparison instant for
+  // absence (D54/D55) — never the provider's clock.
+  const scanObservedAt = new Date(job.startedAt ?? Date.now());
+  const listingEvidence = (confidence: Confidence): EvidenceRecordInput =>
+    evidenceFrom(
+      source,
+      "posts_listing",
+      `posts_listing:${targetId}@${scanObservedAt.toISOString()}`,
+      {
+        observedAt: scanObservedAt.toISOString(),
+        confidence,
+        ref: account.username,
+      },
+      { targetId },
+      { jobId: job.id },
+    );
 
   const caps = src.provider.capabilities();
   if (caps.getPublicPosts !== true) {
@@ -989,6 +1201,11 @@ export async function runPostScan(
   let pagesProcessed = 0;
   let postsObserved = 0;
   let truncated = false;
+  // Media-listing completeness ONLY — a truncated comment fetch or a failed
+  // album expansion degrades the job outcome but is not a reason to suppress
+  // (or fabricate) a media change claim.
+  let listingTruncated = false;
+  let lastPageConfidence: Confidence | undefined;
 
   for (;;) {
     const result: CapabilityResult<NormalizedPost[]> = await providerCall(
@@ -1029,6 +1246,7 @@ export async function runPostScan(
     const posts = result.data;
     const pagePartial =
       result.status === CapabilityStatus.PARTIAL || result.confidence === Confidence.MEDIUM;
+    lastPageConfidence = result.confidence;
 
     for (const post of posts) {
       // Comments resolve BEFORE the post row is written: the posts table is
@@ -1131,6 +1349,23 @@ export async function runPostScan(
         }
       }
 
+      // Phase G (D54/D56/D58): the presence row is what a later complete
+      // listing is compared against — a caption edit is recorded from this
+      // read even on a partial page (a read caption is a fact, not an absence
+      // claim); absence is decided at scan end, COMPLETE listing only.
+      if (trackMediaChanges) {
+        await recordPostPresence(db, {
+          targetId,
+          postDbId: postRow.id,
+          sourceId: source.id,
+          scanObservedAt,
+          firstSeenAt: postRow.observedAt,
+          ...(post.caption !== undefined ? { caption: post.caption } : {}),
+          confidence: post.meta.confidence,
+          evidence: listingEvidence(post.meta.confidence),
+        });
+      }
+
       postsObserved += 1;
     }
 
@@ -1156,11 +1391,19 @@ export async function runPostScan(
     const next = result.nextCursor;
     if (next === undefined || next === "" || seenCursors.has(next)) {
       // Duplicate cursor = pathological provider loop: stop instead of paging
-      // forever, and report the listing as truncated (partial).
-      if (next !== undefined && next !== "") truncated = true;
+      // forever, and report the listing as truncated (partial). Either way the
+      // MEDIA listing did not complete — the one case that must also gate the
+      // change claims below.
+      if (next !== undefined && next !== "") {
+        truncated = true;
+        listingTruncated = true;
+      }
       // A PARTIAL final page with no continuation cursor cannot be resumed:
       // the listing must report truncated, never silently look complete.
-      if (pagePartial) truncated = true;
+      if (pagePartial) {
+        truncated = true;
+        listingTruncated = true;
+      }
       break;
     }
     seenCursors.add(next);
@@ -1178,6 +1421,21 @@ export async function runPostScan(
     source,
     capability: "getPublicPosts",
   });
+
+  // Phase G (D55): scan end is where absence can be claimed — and only when
+  // the MEDIA listing itself completed. This runs before the empty-listing
+  // early return (an empty COMPLETE listing is still an observation: nothing
+  // was present to read), mirroring the follow scans.
+  if (trackMediaChanges) {
+    await finalizePostPresence(db, {
+      targetId,
+      sourceId: source.id,
+      scanObservedAt,
+      complete: !listingTruncated,
+      confidence: lastPageConfidence ?? Confidence.MEDIUM,
+      evidence: listingEvidence(lastPageConfidence ?? Confidence.MEDIUM),
+    });
+  }
 
   if (postsObserved === 0) return "succeeded-empty";
   return truncated ? "succeeded-partial" : "succeeded";

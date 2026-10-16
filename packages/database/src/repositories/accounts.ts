@@ -32,23 +32,47 @@ export async function upsertAccount(
   const usernameLower = username.toLowerCase();
   const seenAt = input.seenAt ?? new Date();
 
+  // Presence-gated fields, shared by both write paths: only write a field when
+  // the observation explicitly knows it — UNKNOWN never becomes false.
+  const observed = {
+    ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+    ...(input.isPrivate !== undefined ? { isPrivate: input.isPrivate } : {}),
+    ...(input.isVerified !== undefined ? { isVerified: input.isVerified } : {}),
+    ...(input.accountType !== undefined ? { accountType: input.accountType } : {}),
+    ...(input.profilePicUrl !== undefined
+      ? { profilePicUrl: input.profilePicUrl }
+      : {}),
+    ...(input.bio !== undefined ? { bio: input.bio } : {}),
+    ...(input.externalUrl !== undefined ? { externalUrl: input.externalUrl } : {}),
+  };
+
+  // The platform id is the identity; the username is a mutable label (D52). If
+  // we already know this account's id, the row it names is updated — a rename
+  // rewrites username on that row instead of forking a second account that
+  // silently splits its history. The id stays an output of an observation, and
+  // this is the one place it is used to MATCH a row we already hold.
+  if (input.igId !== undefined) {
+    const updated = await db
+      .update(igAccounts)
+      .set({
+        ...observed,
+        username,
+        usernameLower,
+        lastSeenAt: sql`greatest(${igAccounts.lastSeenAt}, ${seenAt.toISOString()})`,
+      })
+      .where(sql`${igAccounts.igId} = ${input.igId}`)
+      .returning();
+    const row = updated[0];
+    if (row !== undefined) return row;
+  }
+
   const rows = await db
     .insert(igAccounts)
     .values({
       username,
       usernameLower,
       ...(input.igId !== undefined ? { igId: input.igId } : {}),
-      ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
-      // Only write privacy/verification when the observation explicitly knows
-      // them; UNKNOWN never becomes false.
-      ...(input.isPrivate !== undefined ? { isPrivate: input.isPrivate } : {}),
-      ...(input.isVerified !== undefined ? { isVerified: input.isVerified } : {}),
-      ...(input.accountType !== undefined ? { accountType: input.accountType } : {}),
-      ...(input.profilePicUrl !== undefined
-        ? { profilePicUrl: input.profilePicUrl }
-        : {}),
-      ...(input.bio !== undefined ? { bio: input.bio } : {}),
-      ...(input.externalUrl !== undefined ? { externalUrl: input.externalUrl } : {}),
+      ...observed,
       firstSeenAt: seenAt,
       lastSeenAt: seenAt,
     })
@@ -56,16 +80,7 @@ export async function upsertAccount(
       target: igAccounts.usernameLower,
       set: {
         ...(input.igId !== undefined ? { igId: input.igId } : {}),
-        ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
-        // Presence wins; absence never erodes a known fact.
-        ...(input.isPrivate !== undefined ? { isPrivate: input.isPrivate } : {}),
-        ...(input.isVerified !== undefined ? { isVerified: input.isVerified } : {}),
-        ...(input.accountType !== undefined ? { accountType: input.accountType } : {}),
-        ...(input.profilePicUrl !== undefined
-          ? { profilePicUrl: input.profilePicUrl }
-          : {}),
-        ...(input.bio !== undefined ? { bio: input.bio } : {}),
-        ...(input.externalUrl !== undefined ? { externalUrl: input.externalUrl } : {}),
+        ...observed,
         lastSeenAt: sql`greatest(${igAccounts.lastSeenAt}, ${seenAt.toISOString()})`,
       },
     })

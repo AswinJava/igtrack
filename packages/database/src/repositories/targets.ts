@@ -30,6 +30,7 @@ const createTargetSchema = z.object({
   localName: z.string().max(200).optional(),
   notes: z.string().max(5000).optional(),
   tags: z.array(z.string().max(50)).max(20).optional(),
+  observationMode: z.enum(["OWNED", "DISCOVERY"]).optional(),
 });
 
 const updateTargetMetaSchema = z
@@ -65,6 +66,14 @@ export interface CreateTargetInput {
   localName?: string;
   notes?: string;
   tags?: string[];
+  /**
+   * OWNED (default) observes the operator's own account through the owned
+   * edges; DISCOVERY observes another public professional account through the
+   * documented Business Discovery edge. The mode decides which scan kinds the
+   * target may run (FOUNDING §15 D47) — it is a statement about which provider
+   * route can answer, not a permission.
+   */
+  observationMode?: "OWNED" | "DISCOVERY";
 }
 
 export interface UpdateTargetMetaInput {
@@ -110,6 +119,9 @@ export async function createTarget(
         igAccountId: account.id,
         ...(parsed.localName !== undefined ? { localName: parsed.localName } : {}),
         ...(parsed.notes !== undefined ? { notes: parsed.notes } : {}),
+        ...(parsed.observationMode !== undefined
+          ? { observationMode: parsed.observationMode }
+          : {}),
         tags: parsed.tags ?? [],
       })
       .returning();
