@@ -245,7 +245,10 @@ const CONFIG_KEYS: Array<{ key: string; meaning: string }> = [
     meaning: "1 enables the Business Discovery probe of other public accounts (D42)",
   },
   { key: "IGTRACK_USER_EMAIL", meaning: "Owner user for CLI operations" },
-  { key: "IGTRACK_SCHEDULER", meaning: "1 enables in-process scheduling" },
+  {
+    key: "IGTRACK_SCHEDULER_ENABLED",
+    meaning: "Set exactly \"false\" to disable in-process scheduling",
+  },
   { key: "IGTRACK_JOB_POLL_MS", meaning: "Worker poll interval" },
   { key: "IGTRACK_JOB_LEASE_MS", meaning: "Job lease duration" },
   { key: "IGTRACK_SCAN_STORY_MS", meaning: "Story scan interval" },
