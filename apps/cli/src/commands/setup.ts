@@ -210,10 +210,14 @@ ${line}\n`,
 }
 
 function metaFor(): OutputMeta {
+  const provider = process.env.IGTRACK_PROVIDER ?? "fixture";
   return {
-    provider: process.env.IGTRACK_PROVIDER ?? "fixture",
+    provider,
     sourceId: null,
-    synthetic: true,
+    // Only the fixture provider is a synthetic source. Hardcoding `true` here
+    // would label a graph deployment's own configuration "synthetic" — the
+    // same class of lie the rest of the product refuses.
+    synthetic: provider === "fixture",
     production: process.env.NODE_ENV === "production",
     studio: "cli",
     generatedAt: new Date().toISOString(),
@@ -226,9 +230,10 @@ function metaFor(): OutputMeta {
 
 export const CONFIG_HELP = `igtrack config [--json]
 
-Show the effective configuration: which .env files were loaded, every variable
-IGTrack reads, and the resolved value with credentials redacted. Tokens are
-never printed — only whether they are set.`;
+Show the effective configuration: which .env files were loaded, the resolved
+values of the core variables with credentials redacted, and whether secret
+values are set (they are never printed). .env.example documents every variable
+IGTrack reads.`;
 
 const CONFIG_KEYS: Array<{ key: string; meaning: string }> = [
   { key: "DATABASE_URL", meaning: "Postgres connection (required)" },

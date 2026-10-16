@@ -31,6 +31,12 @@ The gap is not more data. The gap is **epistemic integrity**: record what was ob
 
 > Every claim carries provenance. Anything the law, the platform, or your permissions do not expose is reported **UNAVAILABLE with a reason** — never as zero, never as a guess, never as a scrape.
 
+And history is perishable by default: Meta keeps roughly 90 days of insights, a
+commercial dashboard's record begins on the day you subscribe, and nothing
+backfills the past. **Start recording now.** IGTrack's ledger is append-only and
+yours; next month's diff answers questions that a dashboard started then never
+could.
+
 ## What it does
 
 - **Observes** — profile, active stories, story mentions, following/follower counts, public posts, comments, carousels, **tagged media** (media by other accounts that tag the owned account, through the documented tags edge — stored first-observed-wins; removal is never claimed), and **own-account insights** (follower-count series, daily reach/views/engagement, country demographics). Each observation is stored with source id, observation id, observed vs. captured time, confidence, and SHA-256 hashes in an append-only evidence ledger. When explicitly enabled, `igtrack lookup <username>` also **probes** another public professional account's public profile and recent media through the documented Business Discovery edge — read-through, persisted nowhere. Recording such an account is a second, explicit act: `igtrack targets add <username> --observed` probes the route once, refuses with the platform's reason if it cannot answer, and only then tracks it; `igtrack dossier <username>` reads the recorded profile, its bounded media preview (the ceiling is stated, never shown as "the account's posts"), the per-capability coverage, and the refusals, each with its reason. `igtrack mention <commentId>` reads one comment that mentions the owned account, on demand, from an id delivered by a Meta webhook — read-through, persisted nowhere.
@@ -180,7 +186,7 @@ multi-worker safe if you scale out.
 |---|---|
 | `packages/core` | Domain core: observation categories, epistemics, capability results, typed errors with retryability, evidence hashing, profile/follow diffs, mention classification. **Zero runtime dependencies.** |
 | `packages/database` | PostgreSQL schema (Drizzle), repositories, append-only evidence ledger, job queue + scheduler primitives, migrations, synthetic seed. |
-| `packages/ingestion` | Providers and normalizers: `fixture:v1` (deterministic synthetic) and `graph` (official Graph API, owned account). Includes the documented-field audit behind the capability registry. |
+| `packages/ingestion` | Providers and normalizers: `fixture:v1` (deterministic synthetic), `graph` (official Graph API, owned account), and `import` (your own Instagram data export). Includes the documented-field audit behind the capability registry. |
 | `workers/monitoring` | Job runner: claim → execute → complete, per-kind executors, checkpoints + staging, lease heartbeats, provider timeouts, retention. |
 | `apps/cli` | `igtrack` CLI and `igtrack mcp` server. The agent surface. |
 
@@ -194,6 +200,11 @@ coding agent working in this repository.
 pnpm typecheck      # all packages
 pnpm test           # unit + integration (needs the Docker Postgres)
 ```
+
+Default-path behavior is covered by the fixture pipeline and these tests. The
+live Graph paths are docs-pinned and marked `NOT_VERIFIED` in the capability
+matrix until you run them against your own account; `pnpm verify:graph` is the
+one-node probe for the outstanding fields.
 
 ## Non-goals (deliberately not built)
 

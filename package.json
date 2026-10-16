@@ -14,11 +14,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "pnpm -r run build",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "pnpm -r run typecheck",
-    "lint": "pnpm -r run lint",
     "verify:graph": "pnpm exec tsx scripts/verify-graph-provider.ts",
     "docs:capabilities": "pnpm exec tsx scripts/capability-matrix.ts",
     "igtrack": "pnpm --filter @igtrack/cli run start",
