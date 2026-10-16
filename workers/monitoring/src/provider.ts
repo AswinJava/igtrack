@@ -89,9 +89,16 @@ export function providerFromEnv(): ExecutionSource {
       `igtrack worker: no provider implementation for "${name}". Expected ${expected}.`,
     );
   }
+  // Operator override, documented in .env.example and `igtrack config`. An
+  // empty value is treated as unset so a blank line never silently redirects
+  // fixture reads away from the packaged set.
+  const fixturesDir = process.env.IGTRACK_FIXTURES_DIR;
   return createExecutionSource({
     name: "fixture",
-    fixturesDir: defaultFixturesDir(),
+    fixturesDir:
+      fixturesDir !== undefined && fixturesDir !== ""
+        ? fixturesDir
+        : defaultFixturesDir(),
   });
 }
 

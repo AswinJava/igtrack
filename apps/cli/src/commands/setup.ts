@@ -235,12 +235,14 @@ values of the core variables with credentials redacted, and whether secret
 values are set (they are never printed). .env.example documents every variable
 IGTrack reads.`;
 
-const CONFIG_KEYS: Array<{ key: string; meaning: string }> = [
+export const CONFIG_KEYS: Array<{ key: string; meaning: string }> = [
   { key: "DATABASE_URL", meaning: "Postgres connection (required)" },
   { key: "IGTRACK_DATABASE_URL", meaning: "Overrides DATABASE_URL" },
   { key: "IGTRACK_PROVIDER", meaning: "fixture | graph" },
   { key: "IGTRACK_FIXTURE_VERSION", meaning: "Fixture dataset version" },
   { key: "IGTRACK_FIXTURES_DIR", meaning: "Override fixture directory" },
+  { key: "IGTRACK_IMPORT_DIR", meaning: "Export directory (import provider)" },
+  { key: "IGTRACK_IMPORT_USERNAME", meaning: "Export owner (import provider)" },
   { key: "IGTRACK_GRAPH_ACCESS_TOKEN", meaning: "Graph token (secret)" },
   { key: "IGTRACK_GRAPH_IG_USER_ID", meaning: "Owned IG user id" },
   { key: "IGTRACK_GRAPH_USERNAME", meaning: "Owned IG username" },

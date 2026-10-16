@@ -152,6 +152,11 @@ The type now says `string | null`, the CLI renders that absence as
 `unavailable`, and a test asserts a hash is either a real 64-char digest or
 absent — never a placeholder and never a normalized hash wearing a raw hash's name.
 
+**Correction (2026-10-16):** the counts in the table above record this first
+pass. As of this date the agent surface has grown to 19 MCP tools and 19 CLI
+commands; `apps/cli/test/mcp.test.ts` pins the full tool list, so the current
+number is machine-checked rather than prose.
+
 ## 8. Standing questions for the next founder pass
 
 1. Does the user-supplied-import provider deserve to be the *second* real
@@ -179,6 +184,8 @@ option among several — it is the product.
   read and mutation the web UI offered, through one operations layer with typed
   errors and honest `_meta`. The web app was a second rendering of the same
   repositories, not a capability.
+  *(Correction 2026-10-16: today the surface is 19 CLI commands and 19 MCP
+  tools; the 13/15 figures are the third-founding state.)*
 - The web app carried the entire auth surface: `users.password_hash`, the
   `sessions` table, session purge in the worker's maintenance tick, CSRF, an
   in-memory rate limiter, a dev-login route, and ~14 test files — all to protect

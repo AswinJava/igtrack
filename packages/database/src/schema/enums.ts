@@ -120,3 +120,10 @@ export const retentionStateEnum = pgEnum("retention_state", [
   "PENDING_DELETION",
   "DELETED",
 ]);
+
+// FOUNDING §18 (D67): how a claim's value was obtained, and whether the
+// operator has retracted it. There is deliberately no PLATFORM kind — a
+// platform read is an observation in the evidence ledger, never a claim.
+export const claimSourceKindEnum = pgEnum("claim_source_kind", ["OPERATOR", "WEB"]);
+
+export const claimStatusEnum = pgEnum("claim_status", ["ACTIVE", "RETRACTED"]);

@@ -102,6 +102,22 @@ describe.runIf(available)("schema & migrations", () => {
     const { runMigrations } = await import("../src/index.js");
     await expect(runMigrations(handle.db)).resolves.toBeUndefined();
   });
+
+  it("keeps scan_cadence_mult's live column type aligned with the schema declaration", async () => {
+    // Drift regression (2026-10-16): migration 0010 created this column as
+    // numeric while src/schema/tables.ts declares real(). Both read paths
+    // defended the mismatch (drizzle's real reader parses driver strings; the
+    // scheduler's raw SQL wraps Number()), but the declaration is the
+    // contract — migration 0019 reconciled the DDL. This pin keeps a future
+    // hand-authored migration from re-introducing the split silently.
+    const rows = await handle.sql<{ data_type: string }[]>`
+      SELECT data_type FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'targets'
+        AND column_name = 'scan_cadence_mult'
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data_type).toBe("real");
+  });
 });
 
 describe.skipIf(available)("schema & migrations (no database)", () => {

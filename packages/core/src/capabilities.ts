@@ -35,6 +35,7 @@ export const RegistryCapabilityId = {
   REPOSTS: "REPOSTS",
   RESHARES: "RESHARES",
   MEDIA: "MEDIA",
+  ACCOUNT_RESEARCH: "ACCOUNT_RESEARCH",
 } as const;
 
 export type RegistryCapabilityId =
@@ -45,6 +46,14 @@ export interface CapabilityRegistryEntry {
   label: string;
   /** Provider methods that supply this capability. Empty = no method exists. */
   providerMethods: CapabilityName[];
+  /**
+   * True for capabilities whose rows the OPERATOR supplies (the claims
+   * ledger): there is no provider method and none can exist, because the
+   * platform exposes no edge for these facts (FOUNDING §18). Availability
+   * must not be read from providerMethods alone for these entries — being
+   * fed by a human is being available, not being unavailable.
+   */
+  operatorSupplied?: boolean | undefined;
   /** Account/permission the data requires. */
   permissions: string;
   /** Drizzle schema export names that persist it. */
@@ -446,5 +455,27 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     liveState: "DOCUMENTED_ABSENT",
     liveEvidence:
       "The IG Media reference documents media_url omission rules that rule out archival use. Metadata links render as user-initiated outbound links only.",
+  },
+  {
+    id: "ACCOUNT_RESEARCH",
+    label: "Cited claims ledger and account research report",
+    providerMethods: [],
+    operatorSupplied: true,
+    permissions:
+      "No provider permission applies: claims are submitted by the operator or their agent, each with the source that stated it, and the report reads stored claims plus stored observations only. The platform exposes no edge for any claim predicate (organization, industry, contact, affiliation, stated relationships), which is why no provider method is listed — and none can be added.",
+    persistence: ["claims"],
+    ui: [
+      "igtrack claims add/list/retract (CLI)",
+      "igtrack research (CLI, --format md for a hand-off document)",
+      "claim_add / claims_list / claim_retract / research (MCP tools)",
+      "igtrack dossier (ACCOUNT_RESEARCH coverage row)",
+    ],
+    howItWorks:
+      "A claim is a finding the operator (or their agent) researched: a predicate from a closed 9-entry registry, a value, an optional absolute http(s) source URL, an excerpt (hashed on write), and stated/retrieved times. Writes are validated and deduplicated — re-submitting the same finding is refused, because it is not corroboration. `igtrack research <account>` composes a deterministic report: sections built only from stored observations (identity and route, observation summary, leads, closest connections, coverage) and one section built only from claims, with per-predicate relation labels derived from distinct web domains (CORROBORATED at two or more domains, SINGLE_SOURCE at one, OPERATOR_ASSERTED for operator-only, CONFLICTED when values disagree — both sides kept, nothing chosen). Sensitive person-level predicates (employment, health, religion, politics, sexuality, ethnicity, criminal or legal history, home address, education records, family and personal relationships) are refused at write time, from every source. Claims are never merged into platform observations, never upgraded to facts, and never expire silently: a claim whose retrieval basis is older than 180 days is flagged DUE_FOR_REVIEW and stays exactly as it was recorded.",
+    whyUnavailable: null,
+    unlock: null,
+    liveState: "DOCUMENTED_ABSENT",
+    liveEvidence:
+      "The platform exposes no documented edge for claim-predicate facts (no identity/organization/contact fields on any IG node) — their absence from the API is a finding, restated in FOUNDING §18. Live verification is a category that does not apply: the pipeline is local (validate, hash, store, render) and fully exercised by tests without credentials, and a claim is never a platform observation regardless of what a credential would return.",
   },
 ];

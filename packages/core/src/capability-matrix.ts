@@ -19,9 +19,25 @@ export interface CapabilityMatrixSummary {
   documentedAbsent: number;
 }
 
-/** True when a provider method actually supplies this capability today. */
+/**
+ * True when a lawful source actually supplies this capability today: a
+ * provider method, or — for operator-supplied capabilities such as the claims
+ * ledger — the operator themselves (FOUNDING §18: no provider method exists
+ * and none can, but the rows are there and the pipeline is real).
+ */
 export function isCapabilityAvailable(entry: CapabilityRegistryEntry): boolean {
-  return entry.whyUnavailable === null && entry.providerMethods.length > 0;
+  return (
+    entry.whyUnavailable === null &&
+    (entry.providerMethods.length > 0 || entry.operatorSupplied === true)
+  );
+}
+
+/** Human-readable "Supplied by" cell: provider methods, or operator submissions. */
+function suppliedBy(entry: CapabilityRegistryEntry): string {
+  if (entry.providerMethods.length === 0 && entry.operatorSupplied === true) {
+    return "operator submissions (no platform route exists)";
+  }
+  return list(entry.providerMethods);
 }
 
 export function capabilityMatrixSummary(): CapabilityMatrixSummary {
@@ -59,7 +75,8 @@ export function renderCapabilityMatrixDocument(): string {
   lines.push("");
   lines.push(
     `${summary.available} of ${summary.total} capabilities are obtainable from a lawful source; ` +
-      `${summary.unavailable} have no provider method at all. Separately, ` +
+      `${summary.unavailable} have no source at all (no provider method exists, and no operator-supplied ` +
+      "rows can stand in). Separately, " +
       `${summary.documentedAbsent} capabilities are \`DOCUMENTED_ABSENT\`: the exhaustive platform ` +
       "reference lists no such field or edge, so their absence is a finding, not an assumption.",
   );
@@ -77,7 +94,7 @@ export function renderCapabilityMatrixDocument(): string {
   lines.push("| State | Means |");
   lines.push("|---|---|");
   lines.push(
-    "| `available` | At least one provider method supplies it, and its pipeline is wired end to end. |",
+    "| `available` | At least one provider method supplies it — or, for the claims ledger, the operator does (the platform exposes no route and none can exist) — and its pipeline is wired end to end. |",
   );
   lines.push("| `UNAVAILABLE` | No provider method exists. The product reports it as unavailable **with the reason below** — never as zero, never as empty data. |");
   lines.push("| `LIVE_VERIFIED` | Observed against the real provider during a live check. |");
@@ -91,7 +108,7 @@ export function renderCapabilityMatrixDocument(): string {
   for (const entry of CAPABILITY_REGISTRY) {
     const available = isCapabilityAvailable(entry);
     lines.push(
-      `| **${cell(entry.label)}** | ${available ? "available" : "`UNAVAILABLE`"} · \`${entry.liveState}\` | ${list(entry.providerMethods)} | ${list(entry.persistence)} |`,
+      `| **${cell(entry.label)}** | ${available ? "available" : "`UNAVAILABLE`"} · \`${entry.liveState}\` | ${suppliedBy(entry)} | ${list(entry.persistence)} |`,
     );
   }
   lines.push("");
@@ -104,7 +121,11 @@ export function renderCapabilityMatrixDocument(): string {
     lines.push(`- **Registry id:** \`${entry.id}\``);
     lines.push(`- **Live state:** \`${entry.liveState}\` — ${cell(entry.liveEvidence)}`);
     lines.push(`- **Permissions:** ${cell(entry.permissions)}`);
-    lines.push(`- **Provider methods:** ${list(entry.providerMethods)}`);
+    lines.push(
+      entry.operatorSupplied === true
+        ? `- **Supplied by:** operator/agent submissions — no provider method exists, and none can (the platform exposes no route)`
+        : `- **Provider methods:** ${list(entry.providerMethods)}`,
+    );
     lines.push(`- **Persists to:** ${list(entry.persistence)}`);
     lines.push(`- **Surfaced in:** ${list(entry.ui)}`);
     if (entry.whyUnavailable !== null) {

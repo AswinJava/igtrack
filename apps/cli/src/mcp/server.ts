@@ -6,13 +6,18 @@ import { CliError } from "../output.js";
 import {
   opActivity,
   opCapabilities,
+  opClaimAdd,
+  opClaimList,
+  opClaimRetract,
   opDoctor,
   opDossier,
   opEvidence,
   opInsights,
   opLookup,
   opMentionedCommentProbe,
+  opPlan,
   opRelationships,
+  opResearch,
   opScanList,
   opScanRun,
   opStatus,
@@ -22,6 +27,7 @@ import {
   opTargetRemove,
   opTargetSetStatus,
   opWork,
+  PLAN_GOALS,
   SCAN_KINDS,
 } from "../tools.js";
 
@@ -46,6 +52,13 @@ How to use these tools:
 3. Read with \`igtrack_activity\`, \`igtrack_relationships\`, \`igtrack_insights\`, \`igtrack_tags\`, \`igtrack_evidence\`. Every row carries its source id, confidence, and evidence id — quote them when you report a claim.
 4. \`igtrack_dossier\` is the read-back of everything recorded about ONE account, including per-capability coverage and the gaps. Use it instead of assembling a profile from several calls.
 5. \`igtrack_capabilities\` lists what can and cannot be observed, with the reason. Never present an unavailable capability as a zero/empty result.
+6. \`igtrack_plan\` derives the honest next step from stored state (jobs, target, claims). It is recomputed on every call — there is no plan record and no cursor, so re-asking after an interruption is safe and correct.
+7. \`igtrack_research\` is the full read-back in separate sections: identity, platform observations, themes, cadence, audience, recorded changes, claims, contradictions, leads, connections, coverage. The claims ledger is managed by \`igtrack_claims_list\`, \`igtrack_claim_add\` and \`igtrack_claim_retract\`.
+
+Claims protocol (read this before reporting anything you learned outside these tools):
+- A claim is an operator/agent-submitted finding about an outside source. You supply predicate, value, sourceUrl and a short excerpt; IGTrack stores it, cites it and never fetches or generates it.
+- Predicates are a closed registry (\`igtrack_claims_list\` shows stored predicates; refused predicates come back with the reason). Person-level sensitive predicates (employment, health, religion, politics, ethnicity, education, family, address, legal) are REFUSED at write time — do not attempt to route around the refusal.
+- Re-submitting the same finding is refused: duplication is not corroboration. Two distinct domains asserting the same value is CORROBORATED; conflicting values are CONFLICTED and both stay visible — never pick a winner.
 
 Two observation modes exist and they do not mix:
 - OWNED (default): accounts this deployment's credentials observe. Owned scans only.
@@ -520,6 +533,176 @@ export function buildServer(): McpServer {
             await opMentionedCommentProbe(ctx, {
               commentId: args.commentId,
               account: args.account,
+            }),
+          ),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_plan",
+    {
+      title: "Plan the next investigation step",
+      description:
+        "Derive the honest next step for a goal (FULL, PROFILE, POSTS, STORIES, TAGS, INSIGHTS, CONNECTIONS, RESEARCH) from STORED state: per-scan-kind job history, target status and mode, provider usability, recorded claims. Every step carries status DONE/PENDING/READY/STALE/BLOCKED/NOT_APPLICABLE with the reason, plus nextAction (the exact tool and params to call). Stateless: recomputed on every call, so an interrupted investigation resumes by asking again — there is no plan record to drift.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        target: z.string().describe("Target id, username, @handle or instagram.com profile URL"),
+        goal: z
+          .enum(PLAN_GOALS)
+          .optional()
+          .describe("Defaults to FULL (every kind this target's mode allows)"),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(ctx, await opPlan(ctx, { target: args.target, goal: args.goal })),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_research",
+    {
+      title: "Account research report",
+      description:
+        "The full read-back for ONE target in separate sections: identity + route, platform observations (counts, profile, media — with the bounded-preview caveat for DISCOVERY), themes and cadence derived from stored captions/timestamps (corpus and formula stated), audience (platform-reported insights; platform-absent for DISCOVERY), recorded claims with relation labels (CONFLICTED/CORROBORATED/SINGLE_SOURCE/OPERATOR_ASSERTED) and review flags, contradictions with both sides, recorded change events in a stated window, leads (stored signal rows, not claims), connections (OWNED only — platform-absent for DISCOVERY, with the reason), capability coverage, and notes. Platform observations and claims are never merged, and every empty or unavailable section states its reason. Read-only and deterministic within a day.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        target: z.string().describe("Target id, username, @handle or instagram.com profile URL"),
+        connectionLimit: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe("Max ranked connections to include (owned targets only)"),
+        since: z
+          .string()
+          .optional()
+          .describe(
+            "Narrow the CLAIMS section to rows retrieved since this time (ISO date or 7d/24h/30m). The count of omitted rows is stated in the report; nothing is deleted.",
+          ),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(
+            ctx,
+            await opResearch(ctx, {
+              target: args.target,
+              connectionLimit: args.connectionLimit,
+              since: args.since,
+            }),
+          ),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_claims_list",
+    {
+      title: "List recorded claims",
+      description:
+        "The claims ledger for one target: active claims grouped by predicate with the predicate's relation label and source domains, plus retracted rows on request. Empty means nobody submitted research yet — it is not a statement that the account has no public footprint. Read-only.",
+      annotations: { readOnlyHint: true },
+      inputSchema: {
+        target: z.string().describe("Target id, username, @handle or instagram.com profile URL"),
+        predicate: z
+          .string()
+          .optional()
+          .describe("Filter to one predicate (normalized; refused predicates return the reason)"),
+        includeRetracted: z.boolean().optional().describe("Also return retracted rows"),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(
+            ctx,
+            await opClaimList(ctx, {
+              target: args.target,
+              predicate: args.predicate,
+              includeRetracted: args.includeRetracted,
+            }),
+          ),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_claim_add",
+    {
+      title: "Record a sourced claim",
+      description:
+        "Store ONE research finding you obtained OUTSIDE this tool set, with its source. Provide a predicate from the closed registry (see igtrack_claims_list for stored ones), a short value, and — for web findings — an http(s) sourceUrl plus a short excerpt (hashed at rest). Nothing is fetched, generated or verified against the platform: a claim is a cited statement, never an observation. Sensitive person-level predicates are REFUSED with the reason, and an exact duplicate is refused — duplication is not corroboration. Omit sourceUrl only for an operator assertion (your own knowledge); it can support a claim but never corroborates one.",
+      inputSchema: {
+        target: z.string().describe("Target id, username, @handle or instagram.com profile URL"),
+        predicate: z
+          .string()
+          .describe("e.g. ORGANIZATION_NAME, LOCATION_STATED, PRODUCT_OR_SERVICE, CONTACT_CHANNEL"),
+        value: z.string().describe("The claimed designation (short: a name, a city, a URL)"),
+        sourceUrl: z.string().optional().describe("Absolute http(s) URL of the source"),
+        sourceTitle: z.string().optional().describe("Page or article title, for readability"),
+        excerpt: z
+          .string()
+          .optional()
+          .describe("Short quotation supporting the claim (<=500 chars; hashed at rest)"),
+        statedAt: z
+          .string()
+          .optional()
+          .describe("ISO 8601 time the source stated it, when known"),
+        retrievedAt: z
+          .string()
+          .optional()
+          .describe("ISO 8601 time you retrieved the source; this is the review-basis clock"),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(
+            ctx,
+            await opClaimAdd(ctx, {
+              target: args.target,
+              predicate: args.predicate,
+              value: args.value,
+              sourceUrl: args.sourceUrl,
+              sourceTitle: args.sourceTitle,
+              excerpt: args.excerpt,
+              statedAt: args.statedAt,
+              retrievedAt: args.retrievedAt,
+            }),
+          ),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_claim_retract",
+    {
+      title: "Retract a claim",
+      description:
+        "Mark ONE claim retracted with the reason. The row stays readable (nothing is deleted), stops participating in relation labels, and remains visible in research with its retraction reason. Ask the user before retracting.",
+      inputSchema: {
+        claimId: z.string().describe("Claim id, from igtrack_claims_list"),
+        reason: z.string().describe("Why it is retracted — required, shown to the next reader"),
+        confirm: z
+          .literal(true)
+          .describe("Must be true — explicit confirmation that retraction is intended"),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(
+            ctx,
+            await opClaimRetract(ctx, {
+              claimId: args.claimId,
+              reason: args.reason,
+              confirm: args.confirm,
             }),
           ),
         ),

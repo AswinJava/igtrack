@@ -1082,6 +1082,10 @@ export interface TargetDossier {
     repostsObserved: DossierCount;
     insightPoints: DossierCount;
     interactions: DossierCount;
+    // FOUNDING §18: ACTIVE operator/agent-submitted claims (the writer behind
+    // the ACCOUNT_RESEARCH capability). Retracted rows stay in the table but
+    // are not counted here.
+    claims: DossierCount;
   };
   latestProfileSnapshot: Awaited<ReturnType<typeof listProfileSnapshots>>[number] | null;
   media: DossierMediaSummary | null;
@@ -1158,7 +1162,9 @@ export async function getTargetDossier(
             (SELECT count(*)::int FROM insight_points WHERE ig_account_id = ${account.id}) AS insight_points,
             (SELECT max(observed_at) FROM insight_points WHERE ig_account_id = ${account.id}) AS insight_points_at,
             (SELECT count(*)::int FROM interactions WHERE target_id = ${owned.id}) AS interactions,
-            (SELECT max(observed_at) FROM interactions WHERE target_id = ${owned.id}) AS interactions_at
+            (SELECT max(observed_at) FROM interactions WHERE target_id = ${owned.id}) AS interactions_at,
+            (SELECT count(*)::int FROM claims WHERE target_id = ${owned.id} AND status = 'ACTIVE') AS claims,
+            (SELECT max(recorded_at) FROM claims WHERE target_id = ${owned.id} AND status = 'ACTIVE') AS claims_at
         `,
       ),
       listProfileSnapshots(db, account.id, { limit: 1 }).catch(() => []),
@@ -1289,6 +1295,9 @@ export async function getTargetDossier(
       repostsObserved: { count: count("reposts_observed"), latestAt: at("reposts_observed_at") },
       insightPoints: { count: count("insight_points"), latestAt: at("insight_points_at") },
       interactions: { count: count("interactions"), latestAt: at("interactions_at") },
+      // FOUNDING §18: operator/agent-submitted claims. ACTIVE only — a
+      // retracted claim is kept readable but is not an observed row.
+      claims: { count: count("claims"), latestAt: at("claims_at") },
     },
     latestProfileSnapshot: latestSnapshots[0] ?? null,
     media,
@@ -1303,6 +1312,123 @@ export async function getTargetDossier(
         note: h.coverageNote ?? null,
         updatedAt: h.updatedAt,
       })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Research-report reads (DEEP-ACCOUNT-INTELLIGENCE §4.3): the stored text and
+// timestamp corpus the themes/cadence derivations are scoped to, and windowed
+// change-event counts. Plain reads of rows this deployment already recorded —
+// the report never fetches anything.
+// ---------------------------------------------------------------------------
+
+export interface StoredPostText {
+  postId: string;
+  caption: string | null;
+  /** The provider's published time; null when the source did not transport it. */
+  takenAt: Date | null;
+}
+
+/** Every stored caption/timestamp for a target, in publish order (nulls last).
+ * The report states its corpus size, so this must be the whole stored set for
+ * the target — never a sample that would silently shrink the denominators. */
+export async function listStoredPostTexts(
+  db: Database,
+  userId: string,
+  targetId: string,
+): Promise<StoredPostText[] | null> {
+  const owned = await getOwnedTarget(db, userId, targetId);
+  if (owned === null) return null;
+  const rows = await query<{
+    post_id: string;
+    caption: string | null;
+    taken_at: Date | string | null;
+  }>(
+    db,
+    sql`
+      SELECT post_id, caption, taken_at
+      FROM posts
+      WHERE target_id = ${owned.id}
+      ORDER BY taken_at DESC NULLS LAST, post_id
+    `,
+  );
+  return rows.map((r) => ({
+    postId: r.post_id,
+    caption: r.caption,
+    takenAt: nullableDate(r.taken_at),
+  }));
+}
+
+export interface ChangeWindowCount {
+  count: number;
+  latestAt: Date | null;
+}
+
+export interface TargetChangeSummary {
+  windowDays: number;
+  since: Date;
+  profileChanges: ChangeWindowCount;
+  postChanges: ChangeWindowCount;
+  followDeltas: ChangeWindowCount;
+}
+
+/**
+ * How many change events of each kind were RECORDED in the window. Zero rows
+ * means "nothing changed was recorded" — a gap between scans records nothing,
+ * so this must never be rendered as "nothing happened".
+ */
+export async function getTargetChangeSummary(
+  db: Database,
+  userId: string,
+  targetId: string,
+  windowDays: number,
+  now: Date = new Date(),
+): Promise<TargetChangeSummary | null> {
+  const owned = await getOwnedTarget(db, userId, targetId);
+  if (owned === null) return null;
+  const since = new Date(now.getTime() - windowDays * 86_400_000).toISOString();
+  const rows = await query<{
+    profile_changes: number;
+    profile_changes_at: Date | string | null;
+    post_changes: number;
+    post_changes_at: Date | string | null;
+    follow_deltas: number;
+    follow_deltas_at: Date | string | null;
+  }>(
+    db,
+    sql`
+      SELECT
+        (SELECT count(*)::int FROM profile_changes
+          WHERE ig_account_id = ${owned.igAccountId} AND created_at >= ${since}) AS profile_changes,
+        (SELECT max(created_at) FROM profile_changes
+          WHERE ig_account_id = ${owned.igAccountId} AND created_at >= ${since}) AS profile_changes_at,
+        (SELECT count(*)::int FROM post_changes
+          WHERE target_id = ${owned.id} AND detected_at >= ${since}) AS post_changes,
+        (SELECT max(detected_at) FROM post_changes
+          WHERE target_id = ${owned.id} AND detected_at >= ${since}) AS post_changes_at,
+        (SELECT count(*)::int FROM follow_deltas
+          WHERE target_id = ${owned.id} AND first_seen_at >= ${since}) AS follow_deltas,
+        (SELECT max(first_seen_at) FROM follow_deltas
+          WHERE target_id = ${owned.id} AND first_seen_at >= ${since}) AS follow_deltas_at
+    `,
+  );
+  const row = rows[0];
+  if (row === undefined) return null;
+  return {
+    windowDays,
+    since: new Date(since),
+    profileChanges: {
+      count: int(row.profile_changes),
+      latestAt: nullableDate(row.profile_changes_at),
+    },
+    postChanges: {
+      count: int(row.post_changes),
+      latestAt: nullableDate(row.post_changes_at),
+    },
+    followDeltas: {
+      count: int(row.follow_deltas),
+      latestAt: nullableDate(row.follow_deltas_at),
+    },
   };
 }
 

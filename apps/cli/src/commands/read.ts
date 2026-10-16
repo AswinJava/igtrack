@@ -1,5 +1,5 @@
 import { ACTIVITY_TYPES, type ActivityType } from "@igtrack/database";
-import { CAPABILITY_REGISTRY } from "@igtrack/core";
+import { CAPABILITY_REGISTRY, isCapabilityAvailable } from "@igtrack/core";
 import {
   CliError,
   capabilityLines,
@@ -690,9 +690,7 @@ export async function runCapabilities(args: ParsedArgs): Promise<number> {
 
   const data = {
     capabilities: CAPABILITY_REGISTRY.filter((entry) =>
-      onlyAvailable
-        ? entry.whyUnavailable === null && entry.providerMethods.length > 0
-        : true,
+      onlyAvailable ? isCapabilityAvailable(entry) : true,
     ),
     summary: {
       available: capabilityLines().filter((l) => l.available).length,

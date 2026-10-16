@@ -17,6 +17,8 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 import {
+  claimSourceKindEnum,
+  claimStatusEnum,
   confidenceLevelEnum,
   followChangeEnum,
   followDirectionEnum,
@@ -132,6 +134,54 @@ export const targets = pgTable(
     uniqueIndex("targets_user_account_unique_idx").on(table.userId, table.igAccountId),
     index("targets_user_idx").on(table.userId),
     index("targets_status_created_idx").on(table.status, table.createdAt, table.id),
+  ],
+);
+
+// The claims ledger (FOUNDING §18, D67): operator/agent-submitted findings
+// about an observed account, each carrying its source. Claims are never
+// platform facts — the research report renders them in their own section and
+// platform observations are never merged into them. Cascade on the target:
+// a claim without its subject is unreadable, and target removal already
+// proceeds through the retention boundary with --yes.
+export const claims = pgTable(
+  "claims",
+  {
+    id: uuid(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => targets.id, { onDelete: "cascade" }),
+    predicate: text("predicate").notNull(),
+    value: text("value").notNull(),
+    sourceKind: claimSourceKindEnum("source_kind").notNull(),
+    // Null for OPERATOR claims: there is no URL to cite, and an empty string
+    // would render downstream as "a source".
+    sourceUrl: text("source_url"),
+    sourceTitle: text("source_title"),
+    excerpt: text("excerpt"),
+    excerptHash: text("excerpt_hash"),
+    statedAt: timestamptz("stated_at"),
+    retrievedAt: timestamptz("retrieved_at"),
+    recordedAt: timestamptz("recorded_at").notNull().defaultNow(),
+    status: claimStatusEnum("status").notNull().default("ACTIVE"),
+    retractedAt: timestamptz("retracted_at"),
+    retractionReason: text("retraction_reason"),
+  },
+  (table) => [
+    // Re-submitting the same finding is not corroboration. The coalesce is
+    // load-bearing: under Postgres' default NULL semantics every repeated
+    // operator claim (source_url IS NULL) would slip past the index, so the
+    // expression folds "no URL" into one deduplicable value.
+    uniqueIndex("claims_dedup_idx").on(
+      table.targetId,
+      table.predicate,
+      table.value,
+      sql`coalesce(${table.sourceUrl}, '')`,
+    ),
+    index("claims_target_status_idx").on(table.targetId, table.status),
+    index("claims_user_idx").on(table.userId),
   ],
 );
 

@@ -28,6 +28,14 @@ import {
   TAGS_HELP,
 } from "./commands/read.js";
 import { runMcp } from "./mcp/server.js";
+import {
+  CLAIMS_HELP,
+  PLAN_HELP,
+  RESEARCH_HELP,
+  runClaims,
+  runPlan,
+  runResearch,
+} from "./commands/intel.js";
 
 // ---------------------------------------------------------------------------
 // igtrack — the command line for a self-hosted, agent-driven observation engine.
@@ -67,6 +75,11 @@ Observe
 
 Know the limits
   capabilities          What can and cannot be observed, and exactly why
+
+Research (claims ledger; IGTrack stores, never generates)
+  claims <sub>          list | add | retract                       (claims --help)
+  research <target>     The full report: observations, claims, contradictions
+  plan <target>         The stateless next step for a goal, from stored state
 
 Agent surface
   mcp                   stdio MCP server exposing every operation above as a tool
@@ -161,6 +174,24 @@ async function dispatch(args: ParsedArgs): Promise<number> {
         return 0;
       }
       return runInsights(args);
+    case "claims":
+      if (wantsHelp(args) || args.positionals[0] === "help") {
+        process.stdout.write(`${CLAIMS_HELP}\n`);
+        return 0;
+      }
+      return runClaims(args);
+    case "research":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${RESEARCH_HELP}\n`);
+        return 0;
+      }
+      return runResearch(args);
+    case "plan":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${PLAN_HELP}\n`);
+        return 0;
+      }
+      return runPlan(args);
     case "capabilities":
       if (wantsHelp(args)) {
         process.stdout.write(`${CAPABILITIES_HELP}\n`);

@@ -52,8 +52,8 @@ cannot be quietly re-implemented in a UI.
    the lease expires. `started_at` is preserved across retries and reclaims,
    which is what makes a *logical scan* identifiable.
 3. **Execute** — one executor per kind (`PROFILE_SCAN`, `FOLLOWER_SCAN`,
-   `FOLLOWING_SCAN`, `STORY_SCAN`, `POSTS_SCAN`, `INSIGHTS_SCAN`, and
-   `DISCOVERY_SCAN` for observed accounts). Every provider call crosses
+   `FOLLOWING_SCAN`, `STORY_SCAN`, `POSTS_SCAN`, `TAGS_SCAN`, `INSIGHTS_SCAN`,
+   and `DISCOVERY_SCAN` for observed accounts). Every provider call crosses
    `providerCall()`, which applies a timeout, counts the call, and converts a
    hang into a typed retryable `TIMEOUT` — never a silent success.
 4. **Persist** — repositories write observations *and* their evidence row. The

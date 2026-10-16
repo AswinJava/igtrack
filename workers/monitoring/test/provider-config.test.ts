@@ -1,6 +1,9 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { SourceKind } from "@igtrack/core";
+import { CapabilityErrorKind, CapabilityStatus, SourceKind } from "@igtrack/core";
 import { providerFromEnv } from "../src/provider.js";
 
 const sampleExportDir = fileURLToPath(
@@ -147,6 +150,39 @@ describe("import provider configuration (Phase B)", () => {
       expect(src.source.providerVersion).toBe("v1");
     } finally {
       restore();
+    }
+  });
+});
+
+describe("fixture directory override (drift closure 2026-10-16)", () => {
+  it("reads IGTRACK_FIXTURES_DIR instead of the packaged default", async () => {
+    // .env.example and `igtrack config` documented this override while
+    // providerFromEnv ignored it. An empty directory can only fail if the
+    // override path was actually read — the packaged set knows aurora.wilde,
+    // so a resolver hit on the default would succeed.
+    const prev = process.env.IGTRACK_FIXTURES_DIR;
+    const dir = await mkdtemp(join(tmpdir(), "igtrack-fixtures-override-"));
+    process.env.IGTRACK_FIXTURES_DIR = dir;
+    try {
+      const result = await providerFromEnv().provider.resolveAccount("aurora.wilde");
+      expect(result.status).toBe(CapabilityStatus.ERROR);
+      expect(result.error?.kind).toBe(CapabilityErrorKind.SOURCE_NOT_FOUND);
+    } finally {
+      if (prev === undefined) delete process.env.IGTRACK_FIXTURES_DIR;
+      else process.env.IGTRACK_FIXTURES_DIR = prev;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats an empty IGTRACK_FIXTURES_DIR as unset, never a silent redirect", async () => {
+    const prev = process.env.IGTRACK_FIXTURES_DIR;
+    process.env.IGTRACK_FIXTURES_DIR = "";
+    try {
+      const result = await providerFromEnv().provider.resolveAccount("aurora.wilde");
+      expect(result.status).toBe(CapabilityStatus.AVAILABLE);
+    } finally {
+      if (prev === undefined) delete process.env.IGTRACK_FIXTURES_DIR;
+      else process.env.IGTRACK_FIXTURES_DIR = prev;
     }
   });
 });

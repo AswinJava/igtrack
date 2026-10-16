@@ -134,6 +134,20 @@
       "when": 1792500000000,
       "tag": "0018_tagged_media_reposts",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1792600000000,
+      "tag": "0019_scan_cadence_real",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1792700000000,
+      "tag": "0020_claims",
+      "breakpoints": true
     }
   ]
 }

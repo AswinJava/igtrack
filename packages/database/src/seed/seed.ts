@@ -1,6 +1,7 @@
-import { Confidence, ObservationCategory, SourceKind } from "@igtrack/core";
+import { AppError, AppErrorCode, Confidence, ObservationCategory, SourceKind } from "@igtrack/core";
 import type { Database } from "../client/client.js";
 import { upsertAccount } from "../repositories/accounts.js";
+import { addClaim, listClaims, retractClaim } from "../repositories/claims.js";
 import { createTarget } from "../repositories/targets.js";
 import { recordProfileSnapshot } from "../repositories/observations.js";
 import { recordStory } from "../repositories/stories.js";
@@ -267,6 +268,113 @@ export async function seed(db: Database): Promise<void> {
     coverageNote:
       "Instagram does not expose a complete public feed of everything an account liked.",
   });
+
+  // Claims fixtures (FOUNDING §18): a corroborated pair on one predicate, a
+  // conflicting pair on another, an operator assertion, one retracted row, and
+  // one past the 180-day review horizon. Fixed dates, like the rest of the
+  // seed; relation labels are computed at read time from exactly these rows.
+  const seedClaims: Array<{
+    predicate:
+      | "ORGANIZATION_NAME"
+      | "LOCATION_STATED"
+      | "CONTACT_CHANNEL"
+      | "PRODUCT_OR_SERVICE"
+      | "HISTORICAL_CHANGE_STATED";
+    value: string;
+    sourceUrl?: string;
+    sourceTitle?: string;
+    excerpt?: string;
+    statedAt?: Date;
+    retrievedAt?: Date;
+  }> = [
+    {
+      predicate: "ORGANIZATION_NAME",
+      value: "Aurora Print Studio",
+      sourceUrl: "https://auroraprint.example.org/about",
+      sourceTitle: "About — Aurora Print Studio",
+      excerpt: "Aurora Print Studio is a two-person printing studio.",
+      statedAt: at(-30),
+      retrievedAt: at(1),
+    },
+    {
+      predicate: "ORGANIZATION_NAME",
+      value: "Aurora Print Studio",
+      sourceUrl: "https://directory.example.net/aurora-print-studio",
+      sourceTitle: "Craft directory listing",
+      excerpt: "Aurora Print Studio — listing in the craft directory.",
+      retrievedAt: at(1),
+    },
+    {
+      predicate: "LOCATION_STATED",
+      value: "Lisbon",
+      sourceUrl: "https://news.example.com/aurora-lisbon",
+      excerpt: "The studio works out of Lisbon.",
+      retrievedAt: at(2),
+    },
+    {
+      predicate: "LOCATION_STATED",
+      value: "Porto",
+      sourceUrl: "https://blog.example.org/aurora-porto",
+      excerpt: "Based in Porto since the move.",
+      retrievedAt: at(2),
+    },
+    {
+      predicate: "CONTACT_CHANNEL",
+      value: "studio@aurora.example",
+      // Operator assertion: no source URL, so it can support but never
+      // corroborate a value.
+    },
+    {
+      predicate: "PRODUCT_OR_SERVICE",
+      value: "Ceramics",
+      sourceUrl: "https://auroraprint.example.org/services",
+      excerpt: "The studio also sells ceramics.",
+      retrievedAt: at(2),
+    },
+    {
+      predicate: "HISTORICAL_CHANGE_STATED",
+      value: "Moved from Lisbon to Porto",
+      sourceUrl: "https://blog.example.org/aurora-porto",
+      excerpt: "We left Lisbon for Porto last spring.",
+      statedAt: at(-240),
+      retrievedAt: at(-200),
+    },
+  ];
+  for (const claim of seedClaims) {
+    try {
+      await addClaim(db, {
+        userId,
+        targetId: target.id,
+        predicate: claim.predicate,
+        value: claim.value,
+        sourceKind: claim.sourceUrl === undefined ? "OPERATOR" : "WEB",
+        ...(claim.sourceUrl !== undefined ? { sourceUrl: claim.sourceUrl } : {}),
+        ...(claim.sourceTitle !== undefined ? { sourceTitle: claim.sourceTitle } : {}),
+        ...(claim.excerpt !== undefined ? { excerpt: claim.excerpt } : {}),
+        ...(claim.statedAt !== undefined ? { statedAt: claim.statedAt } : {}),
+        ...(claim.retrievedAt !== undefined ? { retrievedAt: claim.retrievedAt } : {}),
+      });
+    } catch (err) {
+      // Re-running the seed is expected: an identical existing claim is the
+      // same finding (dedup refused the repeat), not an error.
+      if (!(err instanceof AppError && err.code === AppErrorCode.CONFLICT)) throw err;
+    }
+  }
+  const ceramics = (
+    await listClaims(db, {
+      userId,
+      targetId: target.id,
+      predicate: "PRODUCT_OR_SERVICE",
+      includeRetracted: true,
+    })
+  ).find((row) => row.value === "Ceramics");
+  if (ceramics !== undefined && ceramics.status === "ACTIVE") {
+    await retractClaim(db, {
+      userId,
+      claimId: ceramics.id,
+      reason: "Source updated: the ceramics service was discontinued — row kept for the record.",
+    });
+  }
 
   await enqueueJob(db, {
     kind: "PROFILE_SCAN",

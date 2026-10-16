@@ -1,16 +1,37 @@
 import {
+  AppError,
+  AppErrorCode,
   CAPABILITY_REGISTRY,
+  CLAIM_PREDICATES,
   CapabilityErrorKind,
   CapabilityName,
   CapabilityStatus,
   RegistryCapabilityId,
+  claimAgeDays,
+  claimSourceDomain,
+  classifyClaimPredicate,
+  deriveCadence,
+  deriveClaimRelation,
+  deriveThemes,
+  isCapabilityAvailable,
+  isClaimDueForReview,
+  normalizeClaimValue,
+  parseAccountReference,
+  validateClaimExcerpt,
+  validateClaimSourceUrl,
+  validateClaimValue,
   type CapabilityResult,
+  type ClaimPredicate,
+  type ClaimRelation,
+  type ClaimRelationLabel,
   type InstagramProvider,
   type NormalizedAccountRef,
   type NormalizedMentionedComment,
+  type SynthesisTerm,
 } from "@igtrack/core";
 import {
   ACTIVITY_TYPES,
+  addClaim,
   createTarget,
   deleteOwnedTarget,
   enqueueJob,
@@ -20,27 +41,33 @@ import {
   getOwnedTarget,
   getUserActivityFeed,
   getRelationshipsForUser,
+  getTargetChangeSummary,
   getTargetDossier,
   insightLatest,
   insightState,
   isScanKindAllowedForMode,
   latestTagsListingEvidence,
+  listClaims,
   listInsightSeries,
   listJobsForTarget,
   listProviderMetrics,
   listQueueJobs,
   listScopedEvidence,
+  listStoredPostTexts,
   listTaggedMedia,
   listTargets,
   listTargetsForUser,
   RELATIONSHIP_RECENCY_WINDOW_DAYS,
   RELATIONSHIP_SIGNAL_WEIGHTS,
   resolveScanIntervals,
+  retractClaim,
   schedulingWindowStart,
   transitionTargetStatus,
   type ActivityType,
+  type ClaimRecord,
   type Database,
   type DashboardOverview,
+  type JobQueueSummary,
   type RelationshipRank,
   type ScopedEvidenceRow,
   type TargetDossier,
@@ -106,14 +133,28 @@ export async function resolveTarget(
   userId: string,
   reference: string,
 ): Promise<ResolvedTarget> {
-  const cleaned = reference.trim().replace(/^@/, "");
-  if (cleaned === "") {
+  const trimmed = reference.trim();
+  if (trimmed === "") {
     throw new UsageError("A target id or username is required.");
   }
   const rows = await listTargetsForUser(db, userId);
-  const match =
-    rows.find((r) => r.id === cleaned) ??
-    rows.find((r) => r.username.toLowerCase() === cleaned.toLowerCase());
+  // Ids are matched first: a uuid-shaped reference must never have to satisfy
+  // username syntax. Only then does the parser run — so "invalid reference"
+  // and "valid but not tracked" stay different, typed answers instead of one
+  // silent NOT_FOUND that an agent retries forever.
+  let match = rows.find((r) => r.id === trimmed);
+  if (match === undefined) {
+    const parsed = parseAccountReference(trimmed);
+    if (!parsed.ok) {
+      throw new CliError(
+        "TARGET_REFERENCE_INVALID",
+        `${parsed.message} Accepted: a tracked target id, a username, an @handle, or an instagram.com/<username> profile URL.`,
+        2,
+      );
+    }
+    const candidate = parsed.reference.username.toLowerCase();
+    match = rows.find((r) => r.username.toLowerCase() === candidate);
+  }
   if (match === undefined) {
     throw new CliError(
       "TARGET_NOT_FOUND",
@@ -253,8 +294,13 @@ export async function opTargetAdd(
   ctx: CliContext,
   input: TargetAddInput,
 ): Promise<TargetAddResult> {
-  const username = input.username.trim().replace(/^@/, "");
-  if (username === "") throw new UsageError("targets add requires a username.");
+  const parsed = parseAccountReference(input.username);
+  if (!parsed.ok) {
+    throw new UsageError(
+      `${parsed.message} \`targets add\` accepts a username, an @handle, or an instagram.com profile URL.`,
+    );
+  }
+  const username = parsed.reference.username;
 
   let probe: TargetAddResult["probe"] = null;
   if (input.observed === true) {
@@ -711,6 +757,9 @@ const CAPABILITY_SURFACES: Partial<
   // counts exactly those rows — zero is "never returned", not "no reposts".
   TAGS: ["taggedMedia"],
   REPOSTS: ["repostsObserved"],
+  // FOUNDING §18: the claims ledger is written by the operator/agent, not by a
+  // provider, so its surface is the claims table itself.
+  ACCOUNT_RESEARCH: ["claims"],
 };
 
 export interface DossierCoverageRow {
@@ -833,9 +882,11 @@ export async function opDossier(
     (e) => e.id === RegistryCapabilityId.OTHER_ACCOUNT_PUBLIC,
   );
   const isObserved = (entry: (typeof CAPABILITY_REGISTRY)[number]): boolean =>
-    mode === "DISCOVERY"
-      ? entry.providerMethods.includes(CapabilityName.DISCOVER_ACCOUNT)
-      : entry.providerMethods.some((m) => m !== CapabilityName.DISCOVER_ACCOUNT);
+    entry.operatorSupplied === true
+      ? true // supplied by the operator in every mode (FOUNDING §18)
+      : mode === "DISCOVERY"
+        ? entry.providerMethods.includes(CapabilityName.DISCOVER_ACCOUNT)
+        : entry.providerMethods.some((m) => m !== CapabilityName.DISCOVER_ACCOUNT);
 
   const boundedStatement =
     dossier.media !== null && dossier.media.previewBounded === true
@@ -891,9 +942,11 @@ export async function opDossier(
     } else {
       state = "NOT_OBSERVED";
       reason =
-        mode === "DISCOVERY"
-          ? "Not observed yet: no scan through the documented route has stored rows for this capability."
-          : "Not observed yet: no scan has stored rows for this capability. A scan can still run.";
+        entry.operatorSupplied === true
+          ? "No claims recorded yet: a claim exists only when a source states it and the operator or their agent submits it (`igtrack claims add`). IGTrack never generates claims, so an empty ledger is the honest state, not a gap."
+          : mode === "DISCOVERY"
+            ? "Not observed yet: no scan through the documented route has stored rows for this capability."
+            : "Not observed yet: no scan has stored rows for this capability. A scan can still run.";
     }
 
     return {
@@ -1220,7 +1273,7 @@ export function opCapabilities(): CapabilityReport {
   const full = CAPABILITY_REGISTRY.map((entry) => ({
     id: entry.id,
     label: entry.label,
-    available: entry.whyUnavailable === null && entry.providerMethods.length > 0,
+    available: isCapabilityAvailable(entry),
     why: entry.whyUnavailable,
     liveState: entry.liveState as string,
     providerMethods: [...entry.providerMethods],
@@ -1567,8 +1620,1022 @@ export async function opMentionedCommentProbe(
 }
 
 // ---------------------------------------------------------------------------
+// Claims ledger (FOUNDING §18, D67) — the operator's agent researches OUTSIDE
+// IGTrack and submits findings here; IGTrack validates, stores, cites, and
+// renders them. Nothing on these paths fetches anything, there is no LLM in
+// this process, and a claim is never merged into a platform observation.
+// ---------------------------------------------------------------------------
 
-function parseSinceDate(raw: string | undefined): Date | null {
+export interface ClaimView {
+  id: string;
+  predicate: string;
+  value: string;
+  sourceKind: "OPERATOR" | "WEB";
+  sourceUrl: string | null;
+  sourceDomain: string | null;
+  sourceTitle: string | null;
+  excerpt: string | null;
+  excerptHash: string | null;
+  statedAt: string | null;
+  retrievedAt: string | null;
+  recordedAt: string;
+  status: "ACTIVE" | "RETRACTED";
+  retractedAt: string | null;
+  retractionReason: string | null;
+  /** Relation of this claim's predicate cluster; null for retracted rows (they do not participate). */
+  relation: ClaimRelationLabel | null;
+  relationSourceDomains: string[];
+  conflicted: boolean;
+  /** Retrieval basis older than 180 days: flagged, never hidden or auto-retracted. */
+  dueForReview: boolean;
+  ageDays: number;
+}
+
+export interface ClaimGroupView {
+  predicate: string;
+  relation: ClaimRelationLabel;
+  conflicted: boolean;
+  sourceDomains: string[];
+  claims: ClaimView[];
+}
+
+function predicateRank(predicate: string): number {
+  const index = (CLAIM_PREDICATES as readonly string[]).indexOf(predicate);
+  return index === -1 ? 999 : index;
+}
+
+function relationForRows(rows: ClaimRecord[]): ClaimRelation {
+  return deriveClaimRelation(
+    rows.map((r) => ({ value: r.value, sourceKind: r.sourceKind, sourceUrl: r.sourceUrl })),
+  );
+}
+
+function toClaimView(record: ClaimRecord, relation: ClaimRelation | null, now: Date): ClaimView {
+  return {
+    id: record.id,
+    predicate: record.predicate,
+    value: record.value,
+    sourceKind: record.sourceKind,
+    sourceUrl: record.sourceUrl,
+    sourceDomain: record.sourceUrl === null ? null : claimSourceDomain(record.sourceUrl),
+    sourceTitle: record.sourceTitle,
+    excerpt: record.excerpt,
+    excerptHash: record.excerptHash,
+    statedAt: record.statedAt === null ? null : record.statedAt.toISOString(),
+    retrievedAt: record.retrievedAt === null ? null : record.retrievedAt.toISOString(),
+    recordedAt: record.recordedAt.toISOString(),
+    status: record.status,
+    retractedAt: record.retractedAt === null ? null : record.retractedAt.toISOString(),
+    retractionReason: record.retractionReason,
+    relation: relation === null ? null : relation.label,
+    relationSourceDomains: relation === null ? [] : relation.sourceDomains,
+    conflicted: relation === null ? false : relation.conflicted,
+    dueForReview: isClaimDueForReview(record, now),
+    ageDays: claimAgeDays(record, now),
+  };
+}
+
+function groupActiveClaims(rows: ClaimRecord[], now: Date): ClaimGroupView[] {
+  const byPredicate = new Map<string, ClaimRecord[]>();
+  for (const row of rows) {
+    if (row.status !== "ACTIVE") continue;
+    const list = byPredicate.get(row.predicate);
+    if (list === undefined) {
+      byPredicate.set(row.predicate, [row]);
+    } else {
+      list.push(row);
+    }
+  }
+  return [...byPredicate.entries()]
+    .sort(([a], [b]) => predicateRank(a) - predicateRank(b) || a.localeCompare(b))
+    .map(([predicate, claims]) => {
+      const relation = relationForRows(claims);
+      return {
+        predicate,
+        relation: relation.label,
+        conflicted: relation.conflicted,
+        sourceDomains: relation.sourceDomains,
+        claims: claims.map((claim) => toClaimView(claim, relation, now)),
+      };
+    });
+}
+
+function contradictionGroups(
+  groups: ClaimGroupView[],
+): Array<{ predicate: string; values: Array<{ value: string; sources: string[] }> }> {
+  return groups
+    .filter((group) => group.conflicted)
+    .map((group) => {
+      const byValue = new Map<string, { value: string; sources: string[] }>();
+      for (const claim of group.claims) {
+        const key = normalizeClaimValue(claim.value);
+        let entry = byValue.get(key);
+        if (entry === undefined) {
+          entry = { value: claim.value, sources: [] };
+          byValue.set(key, entry);
+        }
+        entry.sources.push(claim.sourceUrl ?? `operator assertion (claim ${claim.id})`);
+      }
+      return { predicate: group.predicate, values: [...byValue.values()] };
+    });
+}
+
+function parseOptionalTimestamp(raw: string | undefined, flag: string): Date | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new UsageError(`${flag} expects an ISO 8601 timestamp, received "${raw}".`);
+  }
+  return parsed;
+}
+
+export interface ClaimAddInput {
+  target: string;
+  predicate: string;
+  value: string;
+  sourceUrl?: string | undefined;
+  sourceTitle?: string | undefined;
+  excerpt?: string | undefined;
+  statedAt?: string | undefined;
+  retrievedAt?: string | undefined;
+}
+
+export async function opClaimAdd(
+  ctx: CliContext,
+  input: ClaimAddInput,
+): Promise<{ claim: ClaimView; target: ResolvedTarget; note: string }> {
+  const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
+  const classified = classifyClaimPredicate(input.predicate);
+  if (classified.kind === "REFUSED") {
+    throw new CliError("CLAIM_PREDICATE_REFUSED", classified.reason, 2);
+  }
+  if (classified.kind === "UNKNOWN") {
+    throw new CliError("CLAIM_PREDICATE_UNKNOWN", classified.message, 2);
+  }
+  const value = validateClaimValue(input.value);
+  if (!value.ok) throw new CliError("CLAIM_VALUE_INVALID", value.message, 2);
+
+  let sourceKind: "OPERATOR" | "WEB" = "OPERATOR";
+  let sourceUrl: string | null = null;
+  if (input.sourceUrl !== undefined && input.sourceUrl.trim() !== "") {
+    const validated = validateClaimSourceUrl(input.sourceUrl);
+    if (!validated.ok) throw new CliError("CLAIM_SOURCE_URL_INVALID", validated.message, 2);
+    sourceKind = "WEB";
+    sourceUrl = validated.url;
+  }
+  let excerpt: string | null = null;
+  if (input.excerpt !== undefined && input.excerpt.trim() !== "") {
+    const validated = validateClaimExcerpt(input.excerpt);
+    if (!validated.ok) throw new CliError("CLAIM_EXCERPT_INVALID", validated.message, 2);
+    excerpt = validated.excerpt;
+  }
+  const statedAt = parseOptionalTimestamp(input.statedAt, "--stated-at");
+  const retrievedAt = parseOptionalTimestamp(input.retrievedAt, "--retrieved-at");
+
+  let record: ClaimRecord;
+  try {
+    record = await addClaim(ctx.db, {
+      userId: ctx.userId,
+      targetId: resolved.id,
+      predicate: classified.predicate,
+      value: value.value,
+      sourceKind,
+      sourceUrl,
+      ...(input.sourceTitle !== undefined && input.sourceTitle.trim() !== ""
+        ? { sourceTitle: input.sourceTitle.trim() }
+        : {}),
+      ...(excerpt !== null ? { excerpt } : {}),
+      ...(statedAt !== null ? { statedAt } : {}),
+      ...(retrievedAt !== null ? { retrievedAt } : {}),
+    });
+  } catch (err) {
+    if (err instanceof AppError && err.code === AppErrorCode.CONFLICT) {
+      throw new CliError(
+        "CLAIM_DUPLICATE",
+        `${err.message} Re-submitting the same finding is not corroboration — cite a different source or value, or drop it.`,
+        2,
+      );
+    }
+    throw err;
+  }
+  const now = new Date();
+  // The label on the response is the CLUSTER's label, not the new row's: the
+  // second source for a value must come back CORROBORATED, and the honest
+  // answer for the whole predicate is what the caller now sees.
+  const cluster = await listClaims(ctx.db, {
+    userId: ctx.userId,
+    targetId: resolved.id,
+    predicate: classified.predicate,
+  });
+  return {
+    claim: toClaimView(record, relationForRows(cluster), now),
+    target: resolved,
+    note:
+      sourceKind === "WEB"
+        ? "Stored with its source URL and excerpt hash. Claims stay separate from platform observations in every report."
+        : "Stored as an operator assertion (no source URL). It can support a claim but never corroborates one.",
+  };
+}
+
+export interface ClaimsListResult {
+  target: ResolvedTarget;
+  groups: ClaimGroupView[];
+  retracted: ClaimView[];
+  totals: { active: number; retracted: number; predicates: number };
+  note: string | null;
+}
+
+export async function opClaimList(
+  ctx: CliContext,
+  input: { target: string; predicate?: string | undefined; includeRetracted?: boolean | undefined },
+): Promise<ClaimsListResult> {
+  const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
+  let predicate: ClaimPredicate | undefined;
+  if (input.predicate !== undefined) {
+    const classified = classifyClaimPredicate(input.predicate);
+    if (classified.kind === "REFUSED") {
+      throw new CliError("CLAIM_PREDICATE_REFUSED", classified.reason, 2);
+    }
+    if (classified.kind === "UNKNOWN") {
+      throw new CliError("CLAIM_PREDICATE_UNKNOWN", classified.message, 2);
+    }
+    predicate = classified.predicate;
+  }
+  const includeRetracted = input.includeRetracted === true;
+  const rows = await listClaims(ctx.db, {
+    userId: ctx.userId,
+    targetId: resolved.id,
+    includeRetracted: true,
+    ...(predicate !== undefined ? { predicate } : {}),
+  });
+  const now = new Date();
+  const groups = groupActiveClaims(rows, now);
+  const retractedRows = rows.filter((row) => row.status === "RETRACTED");
+  const active = groups.reduce((count, group) => count + group.claims.length, 0);
+  return {
+    target: resolved,
+    groups,
+    retracted: includeRetracted ? retractedRows.map((row) => toClaimView(row, null, now)) : [],
+    totals: { active, retracted: retractedRows.length, predicates: groups.length },
+    note:
+      active === 0 && retractedRows.length === 0
+        ? "No claims are recorded for this target. Empty means nobody submitted research yet — it is not a statement that the account has no public footprint."
+        : includeRetracted === false && retractedRows.length > 0
+          ? `${retractedRows.length} retracted claim(s) are not shown; pass --include-retracted to read them.`
+          : null,
+  };
+}
+
+export async function opClaimRetract(
+  ctx: CliContext,
+  input: { claimId: string; reason: string; confirm: boolean },
+): Promise<{ claim: ClaimView; note: string }> {
+  if (input.confirm !== true) {
+    throw new CliError(
+      "CONFIRMATION_REQUIRED",
+      "Retracting a claim changes the record permanently; pass confirm: true (CLI: --yes).",
+      2,
+    );
+  }
+  const reason = input.reason.trim();
+  if (reason === "") {
+    throw new UsageError(
+      "A retraction reason is required — a retraction without a why is unreadable to the next operator.",
+    );
+  }
+  let record: ClaimRecord;
+  try {
+    record = await retractClaim(ctx.db, { userId: ctx.userId, claimId: input.claimId, reason });
+  } catch (err) {
+    if (err instanceof AppError && err.code === AppErrorCode.NOT_FOUND) {
+      throw new CliError("CLAIM_NOT_FOUND", err.message, 2);
+    }
+    if (err instanceof AppError && err.code === AppErrorCode.CONFLICT) {
+      throw new CliError("CLAIM_ALREADY_RETRACTED", err.message, 2);
+    }
+    throw err;
+  }
+  return {
+    claim: toClaimView(record, null, new Date()),
+    note:
+      "The row stays readable with its retraction reason; it no longer participates in relation labels or the active sections.",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// research — the honest report over stored rows. Platform observations and
+// operator claims are rendered in separate sections and are never merged;
+// every empty or unavailable section states its reason in the output itself.
+// Deterministic: no provider call, no clock beyond computedAt, no ranking
+// beyond what is already stored.
+// ---------------------------------------------------------------------------
+
+export interface ResearchResult {
+  computedAt: string;
+  target: DossierResult["target"];
+  identity: { account: DossierResult["account"]; route: DossierResult["route"] };
+  platform: {
+    counts: DossierResult["counts"];
+    profile: DossierResult["profile"];
+    media: DossierResult["media"];
+  };
+  /** Derived from stored captions; the corpus size is part of the payload. */
+  themes: {
+    state: "DERIVED" | "UNAVAILABLE";
+    reason: string | null;
+    captionRows: number;
+    terms: SynthesisTerm[];
+    hashtags: SynthesisTerm[];
+    note: string;
+  };
+  /** Derived from stored publish timestamps; the formula is stated. */
+  cadence: {
+    state: "DERIVED" | "UNAVAILABLE";
+    reason: string | null;
+    timestampRows: number;
+    firstPublishedAt: string | null;
+    lastPublishedAt: string | null;
+    medianGapDays: number | null;
+    note: string;
+  };
+  /** Platform-reported insights for OWNED targets; null counts = never read. */
+  audience: {
+    state: "OBSERVED" | "UNAVAILABLE";
+    reason: string | null;
+    points: number | null;
+    absences: number | null;
+    latestObservedAt: string | null;
+    latest: Array<{
+      metric: string;
+      period: string;
+      dimension: string | null;
+      dimensionValue: string | null;
+      value: number;
+      endTime: string | null;
+      observedAt: string;
+    }>;
+    latestAbsences: Array<{ metric: string; period: string; reason: string }>;
+    note: string;
+  };
+  claims: {
+    groups: ClaimGroupView[];
+    retracted: ClaimView[];
+    /** --since (ISO) narrowing this section only; null when unfiltered. */
+    since: string | null;
+    /** Claim rows the filter hid — stated, never silently dropped. */
+    omittedBefore: number;
+    totals: { active: number; retracted: number; predicates: number };
+    statement: string;
+  };
+  contradictions: Array<{ predicate: string; values: Array<{ value: string; sources: string[] }> }>;
+  /** Recorded change events in a stated window; null counts = never read (mode-absent). */
+  changes: {
+    state: "OBSERVED" | "UNAVAILABLE";
+    reason: string | null;
+    windowDays: number;
+    since: string | null;
+    profileChanges: { count: number; latestAt: string | null } | null;
+    postChanges: { count: number; latestAt: string | null } | null;
+    followDeltas: { count: number; latestAt: string | null } | null;
+    note: string;
+  };
+  leads: {
+    state: "OBSERVED" | "UNAVAILABLE";
+    reason: string | null;
+    note: string;
+    items: Array<{ username: string; signals: string[] }>;
+  };
+  connections: {
+    state: "OBSERVED" | "UNAVAILABLE";
+    reason: string | null;
+    note: string;
+    truncated: boolean;
+    method: RelationshipsResult["method"] | null;
+    ranks: RelationshipRank[];
+  };
+  coverage: DossierCoverageRow[];
+  routeUnavailability: DossierResult["routeUnavailability"];
+  notes: string[];
+}
+
+/** Window for the temporal change summary (Phase 3). Stated in the payload so
+ * a zero can only ever be read as "nothing recorded in these N days". */
+const RESEARCH_CHANGE_WINDOW_DAYS = 90;
+
+export async function opResearch(
+  ctx: CliContext,
+  input: { target: string; connectionLimit?: number | undefined; since?: string | undefined },
+): Promise<ResearchResult> {
+  const computedAt = new Date();
+  // Relative forms (7d/24h) resolve against computedAt, so two runs of the same
+  // report compose the same filter — the report stays deterministic.
+  const since = parseSinceDate(input.since, computedAt);
+  const dossier = await opDossier(ctx, { target: input.target });
+  const observationMode = dossier.target.observationMode;
+
+  const claimRows = await listClaims(ctx.db, {
+    userId: ctx.userId,
+    targetId: dossier.target.id,
+    includeRetracted: true,
+  });
+  // --since narrows the claims VIEW only, and the count it hid travels with the
+  // report: a filtered report that silently drops rows is a half-truth.
+  const visibleClaimRows =
+    since === null
+      ? claimRows
+      : claimRows.filter((row) => (row.retrievedAt ?? row.recordedAt) >= since);
+  const omittedBefore = claimRows.length - visibleClaimRows.length;
+  const groups = groupActiveClaims(visibleClaimRows, computedAt);
+  const retractedRows = visibleClaimRows.filter((row) => row.status === "RETRACTED");
+  const contradictions = contradictionGroups(groups);
+  const active = groups.reduce((count, group) => count + group.claims.length, 0);
+
+  // --- Phase 2: themes and cadence, derived from stored rows, corpus stated. ---
+  const storedTexts = (await listStoredPostTexts(ctx.db, ctx.userId, dossier.target.id)) ?? [];
+  const themesDerived = deriveThemes(storedTexts.map((row) => row.caption));
+  const cadenceDerived = deriveCadence(storedTexts.map((row) => row.takenAt));
+  const corpusCap = dossier.media?.previewLimit ?? null;
+  // A bounded preview's figures describe the preview; the caveat travels with
+  // every derived section, not just the media listing (FOUNDING §14.1/D48).
+  const boundedNote =
+    dossier.media?.bounded === true
+      ? ` The corpus is the BOUNDED discovery media preview${corpusCap === null ? "" : ` (cap ${corpusCap} rows)`} (FOUNDING §14.1/D48) — it is not "the account's posts", so these figures describe the preview only.`
+      : "";
+
+  let themes: ResearchResult["themes"];
+  if (storedTexts.length === 0) {
+    themes = {
+      state: "UNAVAILABLE",
+      reason:
+        observationMode === "OWNED"
+          ? "No post rows are stored yet; themes are counted from stored captions — run a POSTS_SCAN to record some."
+          : "The discovery probe has stored no media rows for this account yet; themes are counted from the stored bounded preview.",
+      captionRows: 0,
+      terms: [],
+      hashtags: [],
+      note: "Nothing is generated when nothing is stored: an empty corpus is not a quiet account.",
+    };
+  } else if (themesDerived.captionRows === 0) {
+    themes = {
+      state: "UNAVAILABLE",
+      reason: `${storedTexts.length} stored media row(s) carry no caption text; there is nothing to count.`,
+      captionRows: 0,
+      terms: [],
+      hashtags: [],
+      note: `Corpus: ${storedTexts.length} stored media row(s), none with text.${boundedNote}`,
+    };
+  } else {
+    themes = {
+      state: "DERIVED",
+      reason: null,
+      captionRows: themesDerived.captionRows,
+      terms: themesDerived.terms,
+      hashtags: themesDerived.hashtags,
+      note: `Occurrences counted across ${themesDerived.captionRows} stored caption(s) (corpus: ${storedTexts.length} stored media row(s)); a word counts once per occurrence, hashtags separately.${boundedNote}`,
+    };
+  }
+
+  let cadence: ResearchResult["cadence"];
+  if (cadenceDerived.timestampRows === 0) {
+    cadence = {
+      state: "UNAVAILABLE",
+      reason:
+        "No publish timestamps are stored for this target; cadence needs the provider's published times, and deriving one from first-observed times would answer a different question.",
+      timestampRows: 0,
+      firstPublishedAt: null,
+      lastPublishedAt: null,
+      medianGapDays: null,
+      note: `Corpus: ${storedTexts.length} stored media row(s), none with a published timestamp.${boundedNote}`,
+    };
+  } else {
+    cadence = {
+      state: "DERIVED",
+      reason: null,
+      timestampRows: cadenceDerived.timestampRows,
+      firstPublishedAt: cadenceDerived.firstPublishedAt,
+      lastPublishedAt: cadenceDerived.lastPublishedAt,
+      medianGapDays: cadenceDerived.medianGapDays,
+      note:
+        cadenceDerived.medianGapDays === null
+          ? `Only one distinct publish timestamp is stored; a median gap needs at least two. Published times are the provider's, not first-observed.${boundedNote}`
+          : `Median of the gaps between ${cadenceDerived.timestampRows} distinct stored publish timestamps (the formula); these are provider times, not first-observed.${boundedNote}`,
+    };
+  }
+
+  // --- Phase 2: audience, platform-reported insights for OWNED targets only. ---
+  let audience: ResearchResult["audience"];
+  if (observationMode === "OWNED") {
+    const insight = await insightState(ctx.db, dossier.target.igAccountId);
+    const latest = await insightLatest(ctx.db, dossier.target.igAccountId);
+    audience =
+      insight.latestObservedAt === null
+        ? {
+            state: "UNAVAILABLE",
+            reason:
+              "No insight rows are recorded for this account; audience metrics require an INSIGHTS_SCAN (an owned-account edge).",
+            points: 0,
+            absences: 0,
+            latestObservedAt: null,
+            latest: [],
+            latestAbsences: [],
+            note: "Nothing is inferred from follower counts or captions to fill this section.",
+          }
+        : {
+            state: "OBSERVED",
+            reason: null,
+            points: insight.points,
+            absences: insight.absences,
+            latestObservedAt: insight.latestObservedAt.toISOString(),
+            latest: latest.map((point) => ({
+              metric: point.metric,
+              period: point.period,
+              dimension: point.dimension,
+              dimensionValue: point.dimensionValue,
+              value: point.value,
+              endTime: point.endTime === null ? null : point.endTime.toISOString(),
+              observedAt: point.observedAt.toISOString(),
+            })),
+            latestAbsences: insight.latestAbsences,
+            note:
+              insight.absences > 0
+                ? `${insight.absences} row(s) are the platform reporting a metric ABSENT with its reason — absence rows are an answer, never a zero. Latest observed values are one row per (metric, period, dimension).`
+                : "Latest observed value per (metric, period, dimension); these are platform-reported figures, not estimates.",
+          };
+  } else {
+    audience = {
+      state: "UNAVAILABLE",
+      reason:
+        "Account insights are an owned-account edge (Instagram API with Instagram Login); the documented Business Discovery route exposes no audience metrics for other accounts (FOUNDING §14). This is platform-absent, not empty.",
+      points: null,
+      absences: null,
+      latestObservedAt: null,
+      latest: [],
+      latestAbsences: [],
+      note: "No audience figure is inferred for an observed account.",
+    };
+  }
+
+  // --- Phase 3: recorded change events in a stated window. ---
+  let changes: ResearchResult["changes"];
+  if (observationMode === "OWNED") {
+    const summary = await getTargetChangeSummary(
+      ctx.db,
+      ctx.userId,
+      dossier.target.id,
+      RESEARCH_CHANGE_WINDOW_DAYS,
+      daysStartUtc(computedAt),
+    );
+    if (summary === null) {
+      // The dossier resolved the same ownership moments ago; a null here is an
+      // internal inconsistency, and quietly reporting an empty window for it
+      // would be exactly the kind of silent half-truth this report refuses.
+      throw new CliError(
+        "TARGET_NOT_FOUND",
+        "The target became unreadable while composing the change summary.",
+        2,
+      );
+    }
+    const recorded =
+      summary.profileChanges.count + summary.postChanges.count + summary.followDeltas.count;
+    const row = (v: { count: number; latestAt: Date | null }): { count: number; latestAt: string | null } => ({
+      count: v.count,
+      latestAt: v.latestAt === null ? null : v.latestAt.toISOString(),
+    });
+    changes = {
+      state: "OBSERVED",
+      reason: null,
+      windowDays: summary.windowDays,
+      since: summary.since.toISOString(),
+      profileChanges: row(summary.profileChanges),
+      postChanges: row(summary.postChanges),
+      followDeltas: row(summary.followDeltas),
+      note: `${recorded} change event(s) recorded in the last ${summary.windowDays} days. Zero recorded rows in this window means no change was RECORDED (gaps between scans record nothing) — it is never evidence that nothing happened.`,
+    };
+  } else {
+    changes = {
+      state: "UNAVAILABLE",
+      reason:
+        "Change detection (profile diffs, post presence, follow deltas) is recorded for accounts this deployment owns; a DISCOVERY target stores bounded preview rows only (FOUNDING §14/§15).",
+      windowDays: RESEARCH_CHANGE_WINDOW_DAYS,
+      since: null,
+      profileChanges: null,
+      postChanges: null,
+      followDeltas: null,
+      note: "This is platform-absent for the mode, not an empty window.",
+    };
+  }
+
+  let connections: ResearchResult["connections"];
+  let leads: ResearchResult["leads"];
+  if (observationMode === "OWNED") {
+    const relationships = await opRelationships(ctx, {
+      target: dossier.target.username,
+      limit: input.connectionLimit ?? 10,
+    });
+    connections = {
+      state: "OBSERVED",
+      reason: null,
+      note: "Evidence-ranked from stored rows only (method below); a count of stored rows, never an inferred affinity.",
+      truncated: relationships.truncated,
+      method: relationships.method,
+      ranks: relationships.ranks,
+    };
+    leads = {
+      state: "OBSERVED",
+      reason: null,
+      note: "Leads, not claims: accounts that appear in stored signal rows. Nothing here has been researched or asserted.",
+      items: relationships.ranks
+        .filter((rank) => rank.signals.mentions > 0 || rank.signals.deltas > 0)
+        .slice(0, 10)
+        .map((rank) => ({
+          username: rank.username,
+          signals: [
+            `mentions x${rank.signals.mentions}`,
+            `comments x${rank.signals.comments}`,
+            `deltas x${rank.signals.deltas}`,
+          ],
+        })),
+    };
+  } else {
+    const reason =
+      "Follow deltas and relationship signals are recorded only for accounts this deployment owns; the documented Business Discovery route exposes no relationship edges (FOUNDING §14/§15). This is a platform-absent result, not an empty one.";
+    connections = {
+      state: "UNAVAILABLE",
+      reason,
+      note: "No relationship ranking exists for an observed account, by platform design.",
+      truncated: false,
+      method: null,
+      ranks: [],
+    };
+    leads = {
+      state: "UNAVAILABLE",
+      reason,
+      note: "No leads can be derived from rows that the platform never exposes.",
+      items: [],
+    };
+  }
+
+  const notes = [...dossier.notes];
+  if (contradictions.length > 0) {
+    notes.push(
+      "Conflicting claims are surfaced with both sources; IGTrack never chooses between sources.",
+    );
+  }
+  if (since !== null) {
+    notes.push(
+      `--since ${since.toISOString()} filtered the CLAIMS section only: ${omittedBefore} older claim row(s) are omitted from this report (nothing was deleted; drop --since to read them).`,
+    );
+  }
+  notes.push(
+    "Claims and platform observations are reported in separate sections and are never blended; a claim is a sourced finding, not an observation.",
+  );
+
+  return {
+    computedAt: computedAt.toISOString(),
+    target: dossier.target,
+    identity: { account: dossier.account, route: dossier.route },
+    platform: {
+      counts: dossier.counts,
+      profile: dossier.profile,
+      media: dossier.media,
+    },
+    themes,
+    cadence,
+    audience,
+    claims: {
+      groups,
+      retracted: retractedRows.map((row) => toClaimView(row, null, computedAt)),
+      since: since === null ? null : since.toISOString(),
+      omittedBefore,
+      totals: { active, retracted: retractedRows.length, predicates: groups.length },
+      statement:
+        active === 0
+          ? "No claims are recorded for this account: nobody has submitted research yet. Claims require an operator- or agent-supplied source (igtrack_claim_add); IGTrack never generates them."
+          : `${active} active claim(s) across ${groups.length} predicate(s); ${contradictions.length} predicate(s) CONFLICTED; ${retractedRows.length} retracted. Claims are operator-submitted findings about outside sources — they are not platform observations.`,
+    },
+    contradictions,
+    changes,
+    leads,
+    connections,
+    coverage: dossier.coverage,
+    routeUnavailability: dossier.routeUnavailability,
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// plan — the investigation planner. Stateless by design: every status is
+// recomputed from stored rows (jobs, targets, claims) on each call, so an
+// interrupted investigation resumes by asking again; there is no cursor to
+// lose and no plan record to drift from reality.
+// ---------------------------------------------------------------------------
+
+export const PLAN_GOALS = [
+  "FULL",
+  "PROFILE",
+  "POSTS",
+  "STORIES",
+  "TAGS",
+  "INSIGHTS",
+  "CONNECTIONS",
+  "RESEARCH",
+] as const;
+export type PlanGoal = (typeof PLAN_GOALS)[number];
+
+const GOAL_KINDS: Record<PlanGoal, readonly ScanKind[]> = {
+  FULL: SCAN_KINDS,
+  PROFILE: ["PROFILE_SCAN"],
+  POSTS: ["POSTS_SCAN"],
+  STORIES: ["STORY_SCAN"],
+  TAGS: ["TAGS_SCAN"],
+  INSIGHTS: ["INSIGHTS_SCAN"],
+  CONNECTIONS: ["FOLLOWER_SCAN", "FOLLOWING_SCAN"],
+  RESEARCH: ["PROFILE_SCAN"],
+};
+
+export type PlanStepStatus =
+  | "DONE"
+  | "PENDING"
+  | "READY"
+  | "STALE"
+  | "BLOCKED"
+  | "NOT_APPLICABLE";
+
+export interface PlanStep {
+  id: string;
+  goal: PlanGoal;
+  objective: string;
+  /** Exact MCP tool that performs this step (the CLI equivalent is its command). */
+  tool: string;
+  params: Record<string, string | string[] | boolean | number>;
+  status: PlanStepStatus;
+  reason: string | null;
+  dependsOn: string[];
+  expectedOutput: string;
+  completionCriteria: string;
+  evidence: string[];
+}
+
+export interface PlanResult {
+  computedAt: string;
+  target: {
+    id: string;
+    username: string;
+    observationMode: "OWNED" | "DISCOVERY";
+    status: string;
+  };
+  goal: PlanGoal;
+  steps: PlanStep[];
+  nextAction: {
+    tool: string;
+    params: Record<string, string | string[] | boolean | number>;
+    because: string;
+  } | null;
+  notes: string[];
+}
+
+function jobErrorMessage(job: JobQueueSummary): string {
+  return job.errorMessage ?? "see igtrack_scans_list for the recorded failure detail";
+}
+
+export async function opPlan(
+  ctx: CliContext,
+  input: { target: string; goal?: string | undefined },
+): Promise<PlanResult> {
+  const requested = (input.goal ?? "FULL").toUpperCase();
+  if (!(PLAN_GOALS as readonly string[]).includes(requested)) {
+    throw new UsageError(`Unknown goal "${input.goal}". Allowed: ${PLAN_GOALS.join(", ")}.`);
+  }
+  const goal = requested as PlanGoal;
+  const computedAt = new Date();
+  const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
+  const full = await getOwnedTarget(ctx.db, ctx.userId, resolved.id);
+  if (full === null) {
+    throw new CliError("TARGET_NOT_FOUND", `Target "${input.target}" is not owned by this user.`, 2);
+  }
+  const jobs = await listJobsForTarget(ctx.db, resolved.id, 100);
+  const intervals = resolveScanIntervals(process.env);
+
+  const steps: PlanStep[] = [];
+  steps.push({
+    id: "target",
+    goal: "FULL",
+    objective: `Resolve "${input.target}" to a tracked target`,
+    tool: "igtrack_status",
+    params: {},
+    status: "DONE",
+    reason: null,
+    dependsOn: [],
+    expectedOutput: "target identity, mode and status",
+    completionCriteria: "the reference resolves to an owned target",
+    evidence: [
+      `target ${resolved.id} (@${resolved.username}) is ${full.observationMode} and ${full.status}`,
+    ],
+  });
+
+  for (const kind of GOAL_KINDS[goal]) {
+    const base = {
+      id: `observe:${kind}`,
+      goal,
+      objective: `Observe ${kind} through the provider route`,
+      tool: "igtrack_scans_run",
+      params: { target: resolved.id, kinds: [kind] },
+      dependsOn: ["target"],
+      expectedOutput: "a queued job; execute it with igtrack_work",
+      completionCriteria:
+        "a job for this kind completes with an outcome (COMPLETED, COMPLETED_EMPTY or COMPLETED_PARTIAL)",
+    };
+    if (!isScanKindAllowedForMode(kind, full.observationMode)) {
+      steps.push({
+        ...base,
+        status: "NOT_APPLICABLE",
+        reason:
+          full.observationMode === "DISCOVERY"
+            ? "DISCOVERY target: only DISCOVERY_SCAN is answerable for another account (D47)."
+            : "OWNED target: DISCOVERY_SCAN observes another account, not this one (D47).",
+        evidence: [],
+      });
+      continue;
+    }
+    if (ctx.provider.provider === null) {
+      steps.push({
+        ...base,
+        status: "BLOCKED",
+        reason: `provider "${ctx.provider.name}" is not usable: ${ctx.provider.error ?? "unknown reason"}`,
+        evidence: [],
+      });
+      continue;
+    }
+    if (full.status !== "ACTIVE") {
+      steps.push({
+        ...base,
+        status: "BLOCKED",
+        reason: `target is ${full.status}; resume it with igtrack_target_set_status before queueing scans`,
+        evidence: [],
+      });
+      continue;
+    }
+    if (
+      full.scanKinds !== null &&
+      full.scanKinds.length > 0 &&
+      !full.scanKinds.includes(kind)
+    ) {
+      steps.push({
+        ...base,
+        status: "NOT_APPLICABLE",
+        reason: "excluded by this target's scan preferences",
+        evidence: [],
+      });
+      continue;
+    }
+    const kindJobs = jobs.filter((job) => job.kind === kind);
+    const activeJob = kindJobs.find(
+      (job) => job.status === "queued" || job.status === "running" || job.status === "retry_wait",
+    );
+    if (activeJob !== undefined) {
+      steps.push({
+        ...base,
+        status: "PENDING",
+        reason: `job ${activeJob.id} is ${activeJob.status}; run igtrack_work to execute it`,
+        evidence: [`job ${activeJob.id} ${activeJob.status}`],
+      });
+      continue;
+    }
+    const succeeded = kindJobs.find((job) => job.status === "succeeded");
+    if (succeeded !== undefined) {
+      const completedAt = succeeded.completedAt;
+      const stale =
+        completedAt !== null && computedAt.getTime() - completedAt.getTime() > 2 * intervals[kind];
+      steps.push({
+        ...base,
+        status: stale ? "STALE" : "DONE",
+        reason: stale
+          ? `last successful ${kind} completed at ${completedAt.toISOString()}; the cadence is ${Math.round(intervals[kind] / 1000)}s`
+          : null,
+        evidence: [
+          `job ${succeeded.id} ${succeeded.status}${succeeded.outcome !== null ? ` (${succeeded.outcome})` : ""} at ${completedAt?.toISOString() ?? "unknown time"}`,
+        ],
+      });
+      continue;
+    }
+    const failed = kindJobs.find((job) => job.status === "failed");
+    steps.push({
+      ...base,
+      status: "READY",
+      reason:
+        failed === undefined
+          ? null
+          : `last attempt failed: ${jobErrorMessage(failed)} (a retry is a new job, not a resumed one)`,
+      evidence: failed === undefined ? [] : [`job ${failed.id} failed after ${failed.attempts} attempt(s)`],
+    });
+  }
+
+  const claimRows = await listClaims(ctx.db, {
+    userId: ctx.userId,
+    targetId: resolved.id,
+    includeRetracted: true,
+  });
+  const activeClaims = claimRows.filter((row) => row.status === "ACTIVE");
+
+  const claimsRelevant = goal === "FULL" || goal === "RESEARCH";
+  if (claimsRelevant) {
+    steps.push({
+      id: "claims:record",
+      goal,
+      objective: "Submit operator/agent research findings as sourced claims",
+      tool: "igtrack_claim_add",
+      params: {
+        target: resolved.id,
+        predicate: "<CLAIM_PREDICATES entry>",
+        value: "<short value>",
+        sourceUrl: "https://...",
+        excerpt: "<short quotation, <=500 chars>",
+      },
+      status: activeClaims.length > 0 ? "DONE" : "READY",
+      reason:
+        activeClaims.length > 0
+          ? null
+          : "no claims exist yet; research happens outside IGTrack and is submitted, never generated — sensitive person-level predicates are refused at write time",
+      dependsOn: ["target"],
+      expectedOutput: "claims rows carrying source URLs, excerpts and hashes",
+      completionCriteria: "every finding you rely on is stored with its source",
+      evidence: activeClaims.length > 0 ? [`${activeClaims.length} active claim(s) recorded`] : [],
+    });
+  }
+
+  steps.push({
+    id: "report:research",
+    goal,
+    objective: "Read back the honest report: observations and claims in separate sections",
+    tool: "igtrack_research",
+    params: { target: resolved.id },
+    status: "READY",
+    reason:
+      "the report is a stateless read over stored rows — safe to repeat, deterministic within a day",
+    dependsOn: claimsRelevant ? ["target", "claims:record"] : ["target"],
+    expectedOutput:
+      "sections: identity, platform observations, themes, cadence, audience, recent changes, claims, contradictions, leads, connections, coverage",
+    completionCriteria: "every empty or unavailable section states its reason in the output itself",
+    evidence: [],
+  });
+
+  let nextAction: PlanResult["nextAction"] = null;
+  const pending = steps.find((step) => step.status === "PENDING");
+  if (pending !== undefined) {
+    nextAction = {
+      tool: "igtrack_work",
+      params: { max: 25 },
+      because: `${pending.evidence[0] ?? "a job is queued"} — execution is what produces the observation`,
+    };
+  } else {
+    const chosen =
+      steps.find((step) => step.status === "READY") ??
+      steps.find((step) => step.status === "STALE");
+    if (chosen !== undefined) {
+      nextAction = {
+        tool: chosen.tool,
+        params: chosen.params,
+        because: chosen.reason ?? `step "${chosen.id}" is ${chosen.status}`,
+      };
+    }
+  }
+
+  const notes: string[] = [
+    "This plan is recomputed from stored rows on every call — there is no plan record and no cursor, so an interrupted investigation resumes by asking again.",
+  ];
+  if (steps.some((step) => step.status === "BLOCKED")) {
+    notes.push("BLOCKED steps name their prerequisite; they cannot be worked around by retrying.");
+  }
+  if (steps.some((step) => step.status === "NOT_APPLICABLE")) {
+    notes.push(
+      "NOT_APPLICABLE steps are platform-absent for this target's observation mode, not failures.",
+    );
+  }
+
+  return {
+    computedAt: computedAt.toISOString(),
+    target: {
+      id: resolved.id,
+      username: resolved.username,
+      observationMode: full.observationMode,
+      status: full.status,
+    },
+    goal,
+    steps,
+    nextAction,
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+
+/** Midnight UTC of `at`. Window boundaries must not move between two runs on
+ * the same day, or "deterministic within a day" would be a lie. */
+function daysStartUtc(at: Date): Date {
+  return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()));
+}
+
+function parseSinceDate(raw: string | undefined, now: Date = new Date()): Date | null {
   if (raw === undefined || raw === "") return null;
   const relative = /^(\d+)([smhd])$/.exec(raw);
   if (relative !== null) {
@@ -1576,7 +2643,7 @@ function parseSinceDate(raw: string | undefined): Date | null {
     const unit = relative[2];
     const unitMs =
       unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
-    return new Date(Date.now() - amount * unitMs);
+    return new Date(now.getTime() - amount * unitMs);
   }
   const parsed = new Date(raw);
   if (Number.isNaN(parsed.getTime())) {

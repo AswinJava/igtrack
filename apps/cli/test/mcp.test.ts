@@ -14,6 +14,9 @@ import { buildServer } from "../src/mcp/server.js";
 const EXPECTED_TOOLS = [
   "igtrack_activity",
   "igtrack_capabilities",
+  "igtrack_claim_add",
+  "igtrack_claim_retract",
+  "igtrack_claims_list",
   "igtrack_doctor",
   "igtrack_dossier",
   "igtrack_evidence",
@@ -21,7 +24,9 @@ const EXPECTED_TOOLS = [
   "igtrack_insights",
   "igtrack_lookup",
   "igtrack_mention_read",
+  "igtrack_plan",
   "igtrack_relationships",
+  "igtrack_research",
   "igtrack_scans_list",
   "igtrack_scans_run",
   "igtrack_status",
@@ -142,6 +147,29 @@ describe("igtrack mcp", () => {
       const confirmed = await client.callTool({
         name: "igtrack_target_remove",
         arguments: { target: "x", confirm: true },
+      });
+      expect(confirmed.isError).toBe(true);
+      expect(errCode(confirmed)).toBe("DB_UNAVAILABLE");
+    } finally {
+      await close();
+    }
+  });
+
+  it("gates claim retraction behind explicit confirmation, before any dependency", async () => {
+    const { client, close } = await connect();
+    try {
+      // Retraction is a write with a reader-visible reason; the schema demands
+      // confirm: true so an agent cannot retract by accident.
+      const missing = await client.callTool({
+        name: "igtrack_claim_retract",
+        arguments: { claimId: "x", reason: "changed my mind" },
+      });
+      expect(missing.isError).toBe(true);
+      expect(errCode(missing)).toBeNull();
+
+      const confirmed = await client.callTool({
+        name: "igtrack_claim_retract",
+        arguments: { claimId: "x", reason: "changed my mind", confirm: true },
       });
       expect(confirmed.isError).toBe(true);
       expect(errCode(confirmed)).toBe("DB_UNAVAILABLE");

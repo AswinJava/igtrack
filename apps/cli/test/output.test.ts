@@ -102,11 +102,16 @@ describe("envelopes", () => {
 });
 
 describe("capability honesty", () => {
-  it("reports a capability with no provider method as unavailable", () => {
+  it("reports a capability with no source at all as unavailable", () => {
     for (const line of capabilityLines()) {
       const entry = CAPABILITY_REGISTRY.find((e) => e.id === line.id);
       expect(entry).toBeDefined();
-      if (entry !== undefined && entry.providerMethods.length === 0) {
+      if (entry === undefined) continue;
+      // "No platform method" and "no source at all" are different facts: the
+      // claims ledger has no provider route and is still available because the
+      // operator supplies its rows (FOUNDING §18, D70).
+      const hasSource = entry.providerMethods.length > 0 || entry.operatorSupplied === true;
+      if (!hasSource) {
         expect(line.available).toBe(false);
       }
       if (line.available === false) {
@@ -114,6 +119,8 @@ describe("capability honesty", () => {
         expect(line.why === null || line.why.length > 0).toBe(true);
       }
     }
+    const claimsLedger = capabilityLines().find((l) => l.id === "ACCOUNT_RESEARCH");
+    expect(claimsLedger?.available).toBe(true);
   });
 });
 

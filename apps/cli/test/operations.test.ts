@@ -3,14 +3,20 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, runMigrations, seed, type DatabaseHandle } from "@igtrack/database";
 import type { InstagramProvider } from "@igtrack/core";
 import { createContext, type CliContext } from "../src/context.js";
+import { runResearch } from "../src/commands/intel.js";
 import { CliError, UsageError } from "../src/output.js";
 import {
   opActivity,
+  opClaimAdd,
+  opClaimList,
+  opClaimRetract,
   opDossier,
   opEvidence,
   opInsights,
   opLookup,
   opMentionedCommentProbe,
+  opPlan,
+  opResearch,
   opScanRun,
   opStatus,
   opTaggedMedia,
@@ -228,8 +234,19 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     expect(probe.note).toContain("nothing was persisted");
   });
 
-  it("refuses to resolve a target that is not tracked", async () => {
-    await expect(resolveTarget(ctx.db, ctx.userId, "definitely-not-tracked")).rejects.toThrow(
+  it("separates invalid reference syntax from a valid-but-untracked account", async () => {
+    // A hyphenated reference is not username syntax. The answer is a typed
+    // usage error naming what was accepted — not a NOT_FOUND an agent retries.
+    try {
+      await resolveTarget(ctx.db, ctx.userId, "definitely-not-tracked");
+      expect.unreachable("a hyphenated reference is not a valid username");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CliError);
+      expect((err as CliError).code).toBe("TARGET_REFERENCE_INVALID");
+      expect((err as Error).message).toContain("Accepted:");
+    }
+    // A valid username that simply is not on record answers NOT_FOUND.
+    await expect(resolveTarget(ctx.db, ctx.userId, "not.tracked.anywhere")).rejects.toThrow(
       /No tracked target matches/,
     );
     const resolved = await resolveTarget(ctx.db, ctx.userId, FIXTURE_USERNAME);
@@ -357,7 +374,7 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
 
     // The dossier's report is scoped like every other read: another user sees
     // none of it.
-    await expect(opDossier(ctx, { target: "definitely-not-tracked" })).rejects.toThrow(
+    await expect(opDossier(ctx, { target: "not.tracked.anywhere" })).rejects.toThrow(
       /No tracked target matches/,
     );
   });
@@ -439,5 +456,356 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
     const post2 = dossier.media?.rows.find((r) => r.postId === "post-2");
     expect(post1?.repostsCount).toBe(128);
     expect(post2?.repostsCount).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Claims ledger, research report and stateless planner (FOUNDING §18).
+  //
+  // The claims here are attached to the fixture target this suite owns, so
+  // the seed's own claim fixtures on target_a stay untouched.
+  // -------------------------------------------------------------------------
+
+  it("resolves a target by id, @handle and profile URL; an account-less URL is its own typed refusal", async () => {
+    const byUsername = await resolveTarget(ctx.db, ctx.userId, FIXTURE_USERNAME);
+    const byHandle = await resolveTarget(ctx.db, ctx.userId, `@${FIXTURE_USERNAME}`);
+    const byUrl = await resolveTarget(
+      ctx.db,
+      ctx.userId,
+      `https://www.instagram.com/${FIXTURE_USERNAME}/?hl=en`,
+    );
+    const byId = await resolveTarget(ctx.db, ctx.userId, targetId);
+    expect(new Set([byUsername.id, byHandle.id, byUrl.id, byId.id])).toEqual(new Set([targetId]));
+
+    // A post URL is a well-formed Instagram URL that does not name an account:
+    // the parser says exactly that, so an agent does not retry a NOT_FOUND.
+    for (const bad of ["https://www.instagram.com/p/ABC123/", "not a username!!"]) {
+      try {
+        await resolveTarget(ctx.db, ctx.userId, bad);
+        expect.unreachable(`"${bad}" must not resolve`);
+      } catch (err) {
+        expect(err).toBeInstanceOf(CliError);
+        expect((err as CliError).code).toBe("TARGET_REFERENCE_INVALID");
+      }
+    }
+  });
+
+  it("stores web claims with their source and derives SINGLE_SOURCE → CORROBORATED, never a score", async () => {
+    const first = await opClaimAdd(ctx, {
+      target: FIXTURE_USERNAME,
+      predicate: "organization-name",
+      value: "Aurora Print Studio",
+      sourceUrl: "https://alpha.example.com/about",
+      excerpt: "Aurora Print Studio is a two-person printing studio.",
+      retrievedAt: "2026-10-01T00:00:00.000Z",
+    });
+    expect(first.claim.predicate).toBe("ORGANIZATION_NAME");
+    expect(first.claim.sourceKind).toBe("WEB");
+    expect(first.claim.sourceDomain).toBe("alpha.example.com");
+    expect(first.claim.excerptHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.claim.relation).toBe("SINGLE_SOURCE");
+
+    // A second, distinct domain asserting the same value corroborates it.
+    const second = await opClaimAdd(ctx, {
+      target: FIXTURE_USERNAME,
+      predicate: "ORGANIZATION_NAME",
+      value: "Aurora Print Studio",
+      sourceUrl: "https://beta.example.net/studio",
+    });
+    expect(second.claim.relation).toBe("CORROBORATED");
+
+    // The exact same finding again is refused, and the refusal names the row:
+    // re-submission is not a second source.
+    try {
+      await opClaimAdd(ctx, {
+        target: FIXTURE_USERNAME,
+        predicate: "ORGANIZATION_NAME",
+        value: "Aurora Print Studio",
+        sourceUrl: "https://alpha.example.com/about",
+      });
+      expect.unreachable("a duplicate claim must be refused");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CliError);
+      expect((err as CliError).code).toBe("CLAIM_DUPLICATE");
+      expect((err as Error).message).toContain(first.claim.id);
+    }
+
+    // An operator assertion is stored, labelled as such, and never dressed as
+    // a sourced finding.
+    const operator = await opClaimAdd(ctx, {
+      target: FIXTURE_USERNAME,
+      predicate: "CONTACT_CHANNEL",
+      value: "hello@aurora.example",
+    });
+    expect(operator.claim.sourceKind).toBe("OPERATOR");
+    expect(operator.claim.relation).toBe("OPERATOR_ASSERTED");
+
+    // Sensitive person-level predicates and non-http(s) sources are refused
+    // at write time, with the reason — not stored and flagged later.
+    try {
+      await opClaimAdd(ctx, {
+        target: FIXTURE_USERNAME,
+        predicate: "job-title",
+        value: "Barista",
+      });
+      expect.unreachable("an employment predicate must be refused");
+    } catch (err) {
+      expect((err as CliError).code).toBe("CLAIM_PREDICATE_REFUSED");
+    }
+    await expect(
+      opClaimAdd(ctx, {
+        target: FIXTURE_USERNAME,
+        predicate: "LOCATION_STATED",
+        value: "Nowhere",
+        sourceUrl: "javascript:alert(1)",
+      }),
+    ).rejects.toMatchObject({ code: "CLAIM_SOURCE_URL_INVALID" });
+  });
+
+  it("keeps conflicting values visible with both sides and reports the contradiction", async () => {
+    await opClaimAdd(ctx, {
+      target: FIXTURE_USERNAME,
+      predicate: "LOCATION_STATED",
+      value: "Lisbon",
+      sourceUrl: "https://news.example.org/lisbon",
+      retrievedAt: "2026-10-01T00:00:00.000Z",
+    });
+    await opClaimAdd(ctx, {
+      target: FIXTURE_USERNAME,
+      predicate: "LOCATION_STATED",
+      value: "Porto",
+      sourceUrl: "https://blog.example.org/porto",
+      retrievedAt: "2026-10-01T00:00:00.000Z",
+    });
+
+    const listed = await opClaimList(ctx, {
+      target: FIXTURE_USERNAME,
+      predicate: "LOCATION_STATED",
+    });
+    const group = listed.groups.find((g) => g.predicate === "LOCATION_STATED");
+    expect(group?.relation).toBe("CONFLICTED");
+    expect(group?.claims.map((c) => c.value).sort()).toEqual(["Lisbon", "Porto"]);
+    // Every member of a conflicted cluster is marked conflicted; none is
+    // silently promoted to "the answer".
+    expect(group?.claims.every((c) => c.conflicted)).toBe(true);
+    expect(group?.sourceDomains.sort()).toEqual(["blog.example.org", "news.example.org"]);
+
+    const research = await opResearch(ctx, { target: FIXTURE_USERNAME });
+    const contradiction = research.contradictions.find((c) => c.predicate === "LOCATION_STATED");
+    expect(contradiction?.values.map((v) => v.value).sort()).toEqual(["Lisbon", "Porto"]);
+    expect(contradiction?.values.flatMap((v) => v.sources).length).toBe(2);
+  });
+
+  it("retracts only on explicit confirmation, keeps the row readable, and drops it from relation labels", async () => {
+    const added = await opClaimAdd(ctx, {
+      target: FIXTURE_USERNAME,
+      predicate: "PRODUCT_OR_SERVICE",
+      value: "Ceramics",
+      sourceUrl: "https://alpha.example.com/shop",
+    });
+    await expect(
+      opClaimRetract(ctx, { claimId: added.claim.id, reason: "discontinued", confirm: false }),
+    ).rejects.toMatchObject({ code: "CONFIRMATION_REQUIRED" });
+
+    const retracted = await opClaimRetract(ctx, {
+      claimId: added.claim.id,
+      reason: "Service discontinued; source page removed.",
+      confirm: true,
+    });
+    expect(retracted.claim.status).toBe("RETRACTED");
+
+    // Gone from the active view, still readable on request — nothing deleted.
+    const active = await opClaimList(ctx, { target: FIXTURE_USERNAME });
+    expect(active.groups.some((g) => g.predicate === "PRODUCT_OR_SERVICE")).toBe(false);
+    expect(active.totals.retracted).toBeGreaterThan(0);
+    const withRetracted = await opClaimList(ctx, {
+      target: FIXTURE_USERNAME,
+      includeRetracted: true,
+    });
+    const row = withRetracted.retracted.find((c) => c.id === added.claim.id);
+    expect(row?.retractionReason).toContain("discontinued");
+    expect(row?.relation).toBeNull();
+
+    // Retracting twice is a typed conflict, never a silent no-op.
+    await expect(
+      opClaimRetract(ctx, { claimId: added.claim.id, reason: "again", confirm: true }),
+    ).rejects.toMatchObject({ code: "CLAIM_ALREADY_RETRACTED" });
+  });
+
+  it("states DISCOVERY-target connections as platform-absent, with the reason (FOUNDING §14/§15)", async () => {
+    try {
+      await opTargetAdd(ctx, { username: DISCOVERY_USERNAME, observed: true });
+    } catch {
+      // Already tracked by an earlier test — that is exactly the state needed.
+    }
+    const research = await opResearch(ctx, { target: DISCOVERY_USERNAME });
+    expect(research.target.observationMode).toBe("DISCOVERY");
+    expect(research.connections.state).toBe("UNAVAILABLE");
+    expect((research.connections.reason ?? "").length).toBeGreaterThan(0);
+    expect(research.connections.ranks).toEqual([]);
+    // Mode-absent sections say why, and carry null — never 0 — where a figure
+    // was never read: audience and change detection are owned-account edges.
+    expect(research.audience.state).toBe("UNAVAILABLE");
+    expect(research.audience.points).toBeNull();
+    expect(research.audience.absences).toBeNull();
+    expect(research.audience.reason).toMatch(/owned-account edge/);
+    expect(research.changes.state).toBe("UNAVAILABLE");
+    expect(research.changes.profileChanges).toBeNull();
+    expect(research.changes.postChanges).toBeNull();
+    expect(research.changes.followDeltas).toBeNull();
+    // Derived figures that exist carry the bounded-preview caveat with them.
+    if (research.themes.state === "DERIVED") {
+      expect(research.themes.note).toContain("BOUNDED discovery media preview");
+    }
+    if (research.cadence.state === "DERIVED") {
+      expect(research.cadence.note).toContain("BOUNDED discovery media preview");
+    }
+    // Claims and platform observations appear as separate sections; with no
+    // claims yet the section says exactly that, without implying the account
+    // has no footprint.
+    expect(research.claims.statement).toMatch(/No claims are recorded/);
+    expect(research.computedAt.length).toBeGreaterThan(0);
+  });
+
+  it("plans from stored state: owned-only vs discovery kinds, claims status, and an actionable next step", async () => {
+    const plan = await opPlan(ctx, { target: FIXTURE_USERNAME });
+    expect(plan.goal).toBe("FULL");
+    const byId = new Map(plan.steps.map((step) => [step.id, step]));
+
+    // D47 at plan time: an OWNED target is never asked to run DISCOVERY_SCAN.
+    const discoveryStep = byId.get("observe:DISCOVERY_SCAN");
+    expect(discoveryStep?.status).toBe("NOT_APPLICABLE");
+    expect(discoveryStep?.reason).toMatch(/DISCOVERY_SCAN observes another account/);
+
+    // Claims were added earlier in this suite, so the step is DONE with the
+    // count as evidence — the planner reads rows, it does not assume.
+    const claimsStep = byId.get("claims:record");
+    expect(claimsStep?.status).toBe("DONE");
+    expect(claimsStep?.evidence[0]).toMatch(/active claim/);
+
+    expect(byId.get("report:research")?.tool).toBe("igtrack_research");
+    // Whatever the next action is, it is a tool name plus params an agent can
+    // execute verbatim — or null when nothing is left to run.
+    if (plan.nextAction !== null) {
+      expect(plan.nextAction.tool.startsWith("igtrack_")).toBe(true);
+      expect(plan.nextAction.because.length).toBeGreaterThan(0);
+    }
+
+    const discoveryPlan = await opPlan(ctx, { target: DISCOVERY_USERNAME });
+    const discoveryById = new Map(discoveryPlan.steps.map((step) => [step.id, step]));
+    expect(discoveryById.get("observe:DISCOVERY_SCAN")?.status).not.toBe("NOT_APPLICABLE");
+    expect(discoveryById.get("observe:PROFILE_SCAN")?.status).toBe("NOT_APPLICABLE");
+    expect(discoveryById.get("observe:PROFILE_SCAN")?.reason).toMatch(/only DISCOVERY_SCAN/);
+
+    await expect(opPlan(ctx, { target: FIXTURE_USERNAME, goal: "SPY" })).rejects.toMatchObject({
+      code: "USAGE",
+    });
+  });
+
+  it("derives themes and cadence from the stored corpus and names that corpus", async () => {
+    const research = await opResearch(ctx, { target: FIXTURE_USERNAME });
+    const mediaRows = research.platform.media?.rows ?? [];
+
+    if (research.themes.state === "DERIVED") {
+      // The corpus in the note is the same corpus the counts came from.
+      expect(research.themes.note).toContain(`corpus: ${mediaRows.length} stored media row(s)`);
+      const counts = research.themes.terms.map((t) => t.count);
+      expect([...counts].sort((a, b) => b - a)).toEqual(counts);
+      for (const term of research.themes.terms) {
+        expect(term.term).toBe(term.term.toLowerCase());
+      }
+      expect(research.themes.captionRows).toBeGreaterThan(0);
+      expect(research.themes.captionRows).toBeLessThanOrEqual(mediaRows.length);
+    } else {
+      expect((research.themes.reason ?? "").length).toBeGreaterThan(0);
+      expect(research.themes.terms).toEqual([]);
+    }
+
+    if (research.cadence.state === "DERIVED") {
+      const distinct = new Set(
+        mediaRows.map((row) => row.publishedAt).filter((v): v is string => v !== null),
+      ).size;
+      // This fixture stores two media rows, well under the dossier preview cap,
+      // so the stored corpus equals what the report shows.
+      expect(research.cadence.timestampRows).toBe(distinct);
+      expect(research.cadence.medianGapDays === null).toBe(distinct < 2);
+      expect(research.cadence.note).toContain("provider times, not first-observed");
+    } else {
+      expect((research.cadence.reason ?? "").length).toBeGreaterThan(0);
+    }
+  });
+
+  it("counts recorded change events in a stated window and never reads a gap as 'nothing happened'", async () => {
+    const research = await opResearch(ctx, { target: FIXTURE_USERNAME });
+    expect(research.changes.state).toBe("OBSERVED");
+    expect(research.changes.windowDays).toBe(90);
+    expect(research.changes.since).not.toBeNull();
+    expect(research.changes.profileChanges).not.toBeNull();
+    expect(research.changes.postChanges).not.toBeNull();
+    expect(research.changes.followDeltas).not.toBeNull();
+    expect(research.changes.note).toMatch(/never evidence that nothing happened/);
+  });
+
+  it("surfaces platform-reported insight absences and never infers audience numbers", async () => {
+    const research = await opResearch(ctx, { target: FIXTURE_USERNAME });
+    expect(research.audience.state).toBe("OBSERVED");
+    expect(research.audience.latestObservedAt).not.toBeNull();
+    for (const point of research.audience.latest) {
+      expect(Number.isFinite(point.value)).toBe(true);
+    }
+    if ((research.audience.absences ?? 0) > 0) {
+      expect(research.audience.note).toContain("ABSENT");
+      expect(research.audience.latestAbsences.length).toBeGreaterThan(0);
+      for (const absence of research.audience.latestAbsences) {
+        expect(absence.reason.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("narrows only the claims section with --since and states what it omitted", async () => {
+    const all = await opResearch(ctx, { target: FIXTURE_USERNAME });
+    const cutoff = "2026-10-05T00:00:00.000Z";
+    const filtered = await opResearch(ctx, { target: FIXTURE_USERNAME, since: cutoff });
+
+    const allRows = [...all.claims.groups.flatMap((g) => g.claims), ...all.claims.retracted];
+    const expectedOmitted = allRows.filter(
+      (claim) => new Date(claim.retrievedAt ?? claim.recordedAt).getTime() < Date.parse(cutoff),
+    ).length;
+    // The suite's fixture claims straddle the cutoff, so the assertion bites.
+    expect(expectedOmitted).toBeGreaterThan(0);
+    expect(expectedOmitted).toBeLessThan(allRows.length);
+
+    expect(filtered.claims.since).toBe(cutoff);
+    expect(filtered.claims.omittedBefore).toBe(expectedOmitted);
+    const visible = [
+      ...filtered.claims.groups.flatMap((g) => g.claims),
+      ...filtered.claims.retracted,
+    ];
+    expect(visible.length).toBe(allRows.length - expectedOmitted);
+    // The filter states itself in the notes; nothing is silently dropped.
+    expect(filtered.notes.some((note) => note.includes("filtered the CLAIMS section only"))).toBe(
+      true,
+    );
+    // Platform sections are untouched by a claims filter.
+    expect(filtered.platform.counts).toEqual(all.platform.counts);
+    // Both LOCATION_STATED claims predate the cutoff, so the contradiction is
+    // out of view — and comes back the moment the filter is dropped.
+    expect(filtered.contradictions).toEqual([]);
+    expect(all.contradictions.some((c) => c.predicate === "LOCATION_STATED")).toBe(true);
+  });
+
+  it("is deterministic: two consecutive reports differ only in computedAt", async () => {
+    const first = await opResearch(ctx, { target: FIXTURE_USERNAME });
+    const second = await opResearch(ctx, { target: FIXTURE_USERNAME });
+    expect(second).toEqual({ ...first, computedAt: second.computedAt });
+  });
+
+  it("refuses --json together with --format md before it touches a database", async () => {
+    await expect(
+      runResearch({
+        command: "research",
+        positionals: [FIXTURE_USERNAME],
+        flags: { json: true, format: "md" },
+      }),
+    ).rejects.toMatchObject({ code: "USAGE" });
   });
 });

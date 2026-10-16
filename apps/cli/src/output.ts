@@ -1,4 +1,4 @@
-import { CAPABILITY_REGISTRY, type CapabilityRegistryEntry } from "@igtrack/core";
+import { CAPABILITY_REGISTRY, isCapabilityAvailable, type CapabilityRegistryEntry } from "@igtrack/core";
 
 // ---------------------------------------------------------------------------
 // Output conventions for the agent-native surface.
@@ -209,7 +209,7 @@ export function capabilityLines(): CapabilityLine[] {
   return CAPABILITY_REGISTRY.map((entry) => ({
     id: entry.id,
     label: entry.label,
-    available: entry.whyUnavailable === null && entry.providerMethods.length > 0,
+    available: isCapabilityAvailable(entry),
     why: entry.whyUnavailable,
     liveState: entry.liveState,
   }));

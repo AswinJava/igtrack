@@ -4,7 +4,7 @@
 > from `CAPABILITY_REGISTRY` (`packages/core/src/capabilities.ts`); a test fails if it
 > is stale. Prose cannot drift from the product because there is no prose.
 
-18 of 23 capabilities are obtainable from a lawful source; 5 have no provider method at all. Separately, 7 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
+19 of 24 capabilities are obtainable from a lawful source; 5 have no source at all (no provider method exists, and no operator-supplied rows can stand in). Separately, 8 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
 
 A capability can be available **and** documented-absent at the same time, and saying so is the point of this table: follower and following rosters are `DOCUMENTED_ABSENT` for any live interface — no roster edge exists — while the synthetic fixture provider exposes rosters so the pipeline can be built and tested end to end, and the operator's own Instagram export (`import:v1`) supplies the real roster lawfully.
 
@@ -12,7 +12,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 
 | State | Means |
 |---|---|
-| `available` | At least one provider method supplies it, and its pipeline is wired end to end. |
+| `available` | At least one provider method supplies it — or, for the claims ledger, the operator does (the platform exposes no route and none can exist) — and its pipeline is wired end to end. |
 | `UNAVAILABLE` | No provider method exists. The product reports it as unavailable **with the reason below** — never as zero, never as empty data. |
 | `LIVE_VERIFIED` | Observed against the real provider during a live check. |
 | `NOT_VERIFIED` | Implemented against documented fields; a live check under your credentials is still outstanding. |
@@ -45,6 +45,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 | **Repost count metadata** | available · `NOT_VERIFIED` | `getPublicPosts` | `posts` |
 | **Reshare relations (who reposted media)** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | — |
 | **Media bytes and assets** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | `mediaAssets` |
+| **Cited claims ledger and account research report** | available · `DOCUMENTED_ABSENT` | operator submissions (no platform route exists) | `claims` |
 
 ## The detail
 
@@ -336,3 +337,14 @@ A capability can be available **and** documented-absent at the same time, and sa
 **What would unlock it.** Provider-supplied stable URLs plus documented download permission and expiry semantics; then write metadata-first rows and cache bytes behind retention rules.
 
 **Pipeline.** Metadata (types, shortcodes, permalinks, link URLs) persists on posts and stories. The media_assets table stays writerless by decision: neither provider yields archivable asset URLs today, and storing bytes without settled expiry, permission, and retention answers would be the real integrity violation. Images are never auto-fetched (no third-party IP leak, no SSRF).
+
+### Cited claims ledger and account research report — `available`
+
+- **Registry id:** `ACCOUNT_RESEARCH`
+- **Live state:** `DOCUMENTED_ABSENT` — The platform exposes no documented edge for claim-predicate facts (no identity/organization/contact fields on any IG node) — their absence from the API is a finding, restated in FOUNDING §18. Live verification is a category that does not apply: the pipeline is local (validate, hash, store, render) and fully exercised by tests without credentials, and a claim is never a platform observation regardless of what a credential would return.
+- **Permissions:** No provider permission applies: claims are submitted by the operator or their agent, each with the source that stated it, and the report reads stored claims plus stored observations only. The platform exposes no edge for any claim predicate (organization, industry, contact, affiliation, stated relationships), which is why no provider method is listed — and none can be added.
+- **Supplied by:** operator/agent submissions — no provider method exists, and none can (the platform exposes no route)
+- **Persists to:** `claims`
+- **Surfaced in:** `igtrack claims add/list/retract (CLI)`, `igtrack research (CLI, --format md for a hand-off document)`, `claim_add / claims_list / claim_retract / research (MCP tools)`, `igtrack dossier (ACCOUNT_RESEARCH coverage row)`
+
+**Pipeline.** A claim is a finding the operator (or their agent) researched: a predicate from a closed 9-entry registry, a value, an optional absolute http(s) source URL, an excerpt (hashed on write), and stated/retrieved times. Writes are validated and deduplicated — re-submitting the same finding is refused, because it is not corroboration. `igtrack research <account>` composes a deterministic report: sections built only from stored observations (identity and route, observation summary, leads, closest connections, coverage) and one section built only from claims, with per-predicate relation labels derived from distinct web domains (CORROBORATED at two or more domains, SINGLE_SOURCE at one, OPERATOR_ASSERTED for operator-only, CONFLICTED when values disagree — both sides kept, nothing chosen). Sensitive person-level predicates (employment, health, religion, politics, sexuality, ethnicity, criminal or legal history, home address, education records, family and personal relationships) are refused at write time, from every source. Claims are never merged into platform observations, never upgraded to facts, and never expire silently: a claim whose retrieval basis is older than 180 days is flagged DUE_FOR_REVIEW and stays exactly as it was recorded.
