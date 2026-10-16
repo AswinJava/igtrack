@@ -233,7 +233,13 @@ Each need states the market evidence and IGTrack's fit.
 - Reddit thread bodies (every variant of `reddit.com`/`old.reddit.com` is rejected by the fetcher): quotes from Reddit are search-result snippets only. All conclusions resting on Reddit are marked `[C snippet]`.
 - HypeAuditor: no public price exists to verify (self-serve pricing removed/gated); third-party figures conflict and are labeled contested.
 - Social Blade: capability confirmed at the homepage/claim level; per-account stat tables did not render server-side for scraping, so "what an IG profile page actually shows" is not fully verified.
-- MCP registry "social media monitoring" query timed out; a second pass with narrower keywords is recommended before release copy cites registry breadth.
+- MCP registry: the prior pass's query timed out; the narrower follow-up
+  (`search=instagram`, fetched 2026-10-16 during this audit) returns **60
+  versioned rows / 30 unique server names** — the row count is versioning
+  noise, the unique count is the usable breadth figure, and the
+  `instagram-private-profile-viewer` entry re-confirmed in place. Capability
+  auditing of this frame was done at the name/market-position level only; the
+  per-server capability survey remains the earlier pass's 30+ entries.
 - Meta One exact prices were not scraped (help page fetched confirms the feature gating only).
 - One candidate source (Mashable "Instagram security feature") appeared undated in snippets and was excluded rather than guess its era.
 - Social Status (`socialstatus.io/pricing`) rendered no price text to the fetcher this pass; dropped rather than guessed.
