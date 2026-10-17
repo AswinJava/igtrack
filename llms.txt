@@ -1,0 +1,44 @@
+# IGTrack
+
+> Evidence-first Instagram observation engine. Self-hosted, JSON-first CLI plus a
+> stdio MCP server with 38 tools. Every stored value carries its source, time,
+> confidence and SHA-256 hash; anything the platform does not expose is reported
+> UNAVAILABLE with a reason instead of zero.
+
+IGTrack is for operators who are authorized to observe an account and need to
+prove what changed. It runs entirely on your infrastructure, stores observations
+in PostgreSQL, and answers only from rows it actually recorded. Partial reads are
+labelled and never diffed, so a truncated scan cannot become a false claim.
+
+- License: AGPL-3.0-or-later
+- Runtime: Node.js >= 22, PostgreSQL 16
+- Install: `git clone https://github.com/AswinJava/igtrack && pnpm install && pnpm igtrack setup`
+- Default demo path is synthetic fixture data, labelled `_meta.synthetic: true`.
+
+## Docs
+
+- [README](README.md): what it does, quickstart, MCP setup
+- [Architecture](docs/ARCHITECTURE.md): package layout, evidence ledger, job queue
+- [Features](docs/FEATURES.md): the full product surface, capability by capability
+- [Capabilities](docs/CAPABILITIES.md): machine-generated registry of every capability and its state
+- [User guide](docs/USER-GUIDE.md): task-oriented walkthroughs
+- [Deployment](docs/DEPLOY.md): Docker Compose, workers, operations
+- [Roadmap](docs/ROADMAP.md): what is next
+- [Security](SECURITY.md): threat model and reporting
+- [Contributing](CONTRIBUTING.md): invariants, tests, review
+
+## Surfaces
+
+- CLI: `igtrack <command>` — JSON by default, human rendering on request
+- MCP: `igtrack mcp` exposes the same operations over stdio
+- Workers: `pnpm worker` runs the job queue
+
+## Core invariants
+
+1. Never zero-fill a value that was not observed.
+2. Refusals are typed and carry a reason; "could not look" is not "absent".
+3. Evidence classes are never merged.
+4. A partial read is never diffed.
+5. Facts are never dropped, replayed or downgraded.
+6. The capability registry decides what is possible, not ad-hoc code.
+7. No fabricated absence, no secrets in output, no unmetered synthetic paths.
