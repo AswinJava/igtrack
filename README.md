@@ -41,6 +41,7 @@ could.
 
 - **Observes** — profile, active stories, story mentions, following/follower counts, public posts, comments, carousels, **tagged media** (media by other accounts that tag the owned account, through the documented tags edge — stored first-observed-wins; removal is never claimed), and **own-account insights** (follower-count series, daily reach/views/engagement, country demographics). Each observation is stored with source id, observation id, observed vs. captured time, confidence, and SHA-256 hashes in an append-only evidence ledger. When explicitly enabled, `igtrack lookup <username>` also **probes** another public professional account's public profile and recent media through the documented Business Discovery edge — read-through, persisted nowhere. Recording such an account is a second, explicit act: `igtrack targets add <username> --observed` probes the route once, refuses with the platform's reason if it cannot answer, and only then tracks it; `igtrack dossier <username>` reads the recorded profile, its bounded media preview (the ceiling is stated, never shown as "the account's posts"), the per-capability coverage, and the refusals, each with its reason. `igtrack mention <commentId>` reads one comment that mentions the owned account, on demand, from an id delivered by a Meta webhook — read-through, persisted nowhere.
 - **Derives** — follow deltas, profile changes, **post caption edits and disappearances** (posts no longer observed in a complete media listing — never called "deleted"), story lifetimes, mention roll-ups, relationship rankings (story mentions, comment authorship on owned media, follow deltas) and **insight series**. Every derived row points at the observations it came from. Truncated (PARTIAL) scans are recorded but **never diffed**, so partiality cannot fabricate a "lost follower" or a vanished post, and a metric the platform did not return is stored as an **absence with a reason**, never a zero.
+- **Records what sources say** — a **claims ledger** for findings your own agent researches on the open web: a closed predicate registry, source URL + short excerpt + SHA-256 hash, stated/retrieved/recorded times kept as distinct facts, and hard write-time refusals for sensitive person-level predicates. Derived labels (`CORROBORATED` = ≥2 distinct source domains, `CONFLICTED` = both sides shown, no winner) are computed from stored rows, never stored; duplicates are refused — re-submitting the same finding is not corroboration; retraction keeps the row readable with its reason. `igtrack research <target>` renders one deterministic report — platform observations and external claims in separate, labelled sections, stale claims flagged for review but never hidden, and every empty section states why. IGTrack never *generates* or infers claims (FOUNDING D67/D68) — and when the engine fetches them itself under `--run`, it does so through the bounded, SSRF-gated, predicate-checked acquisition layer described below (D69).
 - **Refuses, out loud** — follower/following *rosters* of other accounts, liker lists, another account's comments/likes, repost identities, other accounts' highlights, and media bytes are not exposed by any supported interface. IGTrack names the reason instead of inventing a number — including on the one cross-account route it does support, where unreachable classes (consumer, private, age-gated) return the platform's reason, never an empty profile. `igtrack capabilities` prints the whole registry.
 - **Runs itself** — a Postgres-backed job queue (`FOR UPDATE SKIP LOCKED`, leases, heartbeats, resumable paged scans, checkpoints, retry classification) plus a scheduler with per-target cadence.
 - **Speaks agent** — `igtrack`, a JSON-first CLI, and `igtrack mcp`, a stdio MCP server exposing the same operations as tools. One operations layer, two surfaces, no drift.
@@ -95,7 +96,7 @@ Then ask your agent things like:
 
 > *"Queue a scan, run the worker, and tell me everything that changed on aurora.wilde in the last 7 days. Quote the evidence id for each claim. If something isn't observable, say so instead of guessing."*
 
-The server ships instructions that tell the agent the same rules this README does: `null` means *not observable* (never zero), synthetic data must be declared as synthetic, and lawfully unavailable data must not be chased. Nineteen tools are exposed, all backed by the same operations the CLI uses.
+The server ships instructions that tell the agent the same rules this README does: `null` means *not observable* (never zero), synthetic data must be declared as synthetic, and lawfully unavailable data must not be chased. Twenty-six tools are exposed, all backed by the same operations the CLI uses.
 
 Prefer plain CLI? Everything is JSON-first and scriptable:
 
@@ -110,13 +111,112 @@ piping is always safe. The launcher is a plain Node script, so anything that can
 run Node can call it without pnpm:
 `node apps/cli/bin/igtrack.mjs status --json`.
 
+## Research with cited claims
+
+Your agent researches the open web under your own authority and submits
+findings; IGTrack validates, stores, and cites them — kept physically separate
+from what the platform returned:
+
+```bash
+pnpm igtrack claims add target_a --predicate ORGANIZATION_NAME \
+  --value "Aurora Print Studio" --source-url https://example.org/about \
+  --excerpt "Aurora Print Studio is a ceramics workshop in Lisbon."
+pnpm igtrack claims list target_a     # relation labels, ages, due-for-review flags
+pnpm igtrack research target_a        # the deterministic report; --format md for hand-off
+pnpm igtrack plan target_a            # the one next action, recomputed on every call
+```
+
+Duplicate submissions are refused with the existing claim named — re-submitting
+the same finding is not corroboration. Contradictions are shown with both
+sources and no winner. Sensitive person-level predicates (employment, health,
+politics, and the rest of the refusal list) are refused at write time with the
+FOUNDING pointer. Via MCP: `igtrack_claim_add`, `igtrack_claims_list`,
+`igtrack_claim_retract`, `igtrack_research`, `igtrack_plan`.
+
+## Let the engine research, within bounds
+
+The engine can acquire findings itself — asking a question about a tracked
+account makes IGTrack plan, fetch, extract, validate and store source-backed
+evidence:
+
+```bash
+pnpm igtrack research target_a --run \
+  --question "Who runs this account and what do they do?" \
+  --url https://example.org/about
+```
+
+Bounds live in code, not configuration: **10 documents at depth 1** (links on
+fetched pages are counted, never followed), a 10s per-document timeout, a 512KB
+byte cap, 3 redirects each re-validated, a 24h freshness window (a document
+fetched minutes ago is reused unless you pass `--refresh`). Every
+URL is SSRF-gated — private, loopback, link-local and metadata addresses are
+refused, Instagram-family hosts are refused by policy (platform data stays with
+the Graph API adapters), robots.txt is respected — and every document's
+outcome, including refusals and failures, is recorded on the run. Extraction
+reads four fixed field families (JSON-LD, meta tags, mailto, public profile
+links), never page prose, so a page cannot prompt-inject its way into a claim;
+each candidate then passes the same closed predicate registry as operator
+claims. Without a configured search provider the engine says so and researches
+only the URLs you name and the sources of prior claims — it never invents
+candidate sources. Runs are refused for DISCOVERY targets (D47). Via MCP:
+`igtrack_research_run`.
+
+## Investigate an arbitrary username — the central use case
+
+You have a handle and nothing else: no credentials, no cooperation, no
+registration. `igtrack audit` answers what is known about that one account,
+from where, and what can never be known — in five sections, all read-only:
+
+```bash
+pnpm igtrack audit sel_win_                                   # config + probe + stored record + public web + refusals
+pnpm igtrack audit sel_win_ --url https://example.org/about   # …plus operator-named pages in the public-web phase
+pnpm igtrack audit sel_win_ --json                            # the same report, machine-readable
+```
+
+The public-web phase plans the pages you name with `--url`, plus candidates
+from the configured search provider — `IGTRACK_RESEARCH_SEARCH_PROVIDER=auto`
+(the shipped default) uses the official Brave API when
+`IGTRACK_RESEARCH_SEARCH_API_KEY` is present and otherwise the **keyless,
+unmetered FreeSerp index**, so a fresh install runs a real search with no
+account and no key; set `=none` to keep every search request on the machine —
+capped at 5 documents at depth 1, and
+reads them through the same gate as the acquisition layer: SSRF-guarded,
+robots-respecting, Instagram-family hosts refused by policy (platform data has
+one lawful route — the Graph adapters). Every fact carries its source URL,
+page title, exact field, extraction method, retrieval time and the document's
+SHA-256, and is labelled a **third-party statement about a handle** — never an
+observation of an account, and never proof of who operates it. The search asks
+a fixed budget of **4 distinct query forms** for the handle (quoted,
+profile-URL, `@`-mention, bare — D74), deduplicates candidates to canonical
+URLs and ranks them by explainable relevance (exact handle in the URL, then
+title, then snippet; policy-refused hosts last), reporting every candidate's
+disposition and reason. Two sources
+agreeing is `CORROBORATED`; two sources disagreeing is `CONFLICTED` with both
+values shown and no winner chosen; **inference is always `NONE`**, because the
+product stores no model output as evidence. The report's `outcome` label says
+where the phase stopped — one of seven states, from `SEARCH_UNAVAILABLE` to
+`EVIDENCE_EXTRACTED` — so a zero produced by one index's weak coverage is
+never rendered as proof that no public evidence exists. With neither `--url` nor a search
+provider the phase reports `NOT_ATTEMPTED` with the exact remedy, and it never
+writes a row or registers a target — filing a citation you judge worth keeping
+is a separate, explicit act (`igtrack claims add`). Via MCP: `igtrack_audit`
+with optional `urls`/`maxSources`.
+
+Anything the audit reads back that is **old** says so: a stored claim past the
+180-day review horizon is flagged `DUE_FOR_REVIEW` (with a `Stale evidence:`
+limitation), and a recommended next step whose stored observation is older
+than its cadence is prefixed `STALE —`. Staleness is a flag, never a verdict —
+nothing is expired, retracted or dropped. The clause-by-clause map of this
+requirement to code, source, auth and verification lives in
+[docs/verification/REQUIREMENT-AUDIT.md](docs/verification/REQUIREMENT-AUDIT.md).
+
 ## Capability honesty, in one screen
 
 ```bash
 pnpm igtrack capabilities
 ```
 
-`18 of 23 capabilities are obtainable from a lawful source.` The rest are marked
+`20 of 25 capabilities are obtainable from a lawful source.` The rest are marked
 `DOCUMENTED_ABSENT` with the exact reason and what would unlock them. This table
 is generated from the same registry the CLI reads — the CLI cannot advertise
 more than the code delivers. See [docs/CAPABILITIES.md](docs/CAPABILITIES.md).

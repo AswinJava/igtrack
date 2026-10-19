@@ -127,3 +127,27 @@ export const retentionStateEnum = pgEnum("retention_state", [
 export const claimSourceKindEnum = pgEnum("claim_source_kind", ["OPERATOR", "WEB"]);
 
 export const claimStatusEnum = pgEnum("claim_status", ["ACTIVE", "RETRACTED"]);
+
+// FOUNDING 19 (D69): autonomous public-web research runs. A run is the
+// record of WHAT THE ENGINE TRIED and what came of it — including refusals
+// and failures, which are findings, not noise.
+export const researchRunStatusEnum = pgEnum("research_run_status", [
+  "COMPLETED",
+  "COMPLETED_PARTIAL",
+  "FAILED",
+]);
+
+export const researchDocumentOutcomeEnum = pgEnum("research_document_outcome", [
+  "FETCHED",
+  "REUSED",
+  "FAILED",
+  "BLOCKED_BY_POLICY",
+  "BLOCKED_BY_ROBOTS",
+  "UNSAFE_URL",
+  "BLOCKED_CONTENT_TYPE",
+  "TOO_LARGE",
+  "TIMEOUT",
+  "NOT_FOUND",
+  "RATE_LIMITED",
+  "NETWORK_ERROR",
+]);

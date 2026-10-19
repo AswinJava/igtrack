@@ -120,7 +120,9 @@ describe("ImportProvider (import:v1)", () => {
       "noon.archive",
     ]);
     expect(f.confidence).toBe(Confidence.HIGH);
-    expect(f.note).toMatch(/freshness equals the export date/);
+    expect(f.note).toMatch(/record no generation timestamp/);
+    expect(f.note).toMatch(/when igtrack read them/);
+    expect(f.note).not.toMatch(/freshness equals the export date/);
   });
 
   it("answers out-of-roster capabilities UNAVAILABLE with the reason — never zero", async () => {

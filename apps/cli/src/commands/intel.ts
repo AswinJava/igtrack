@@ -16,6 +16,7 @@ import {
   opClaimRetract,
   opPlan,
   opResearch,
+  opResearchRun,
   type ClaimGroupView,
   type ClaimView,
   type ResearchResult,
@@ -55,6 +56,7 @@ refused: duplication is not corroboration. Retraction keeps the row readable
 with its reason; nothing is deleted.`;
 
 export const RESEARCH_HELP = `igtrack research <target id|username> [--connections N] [--since ISO|7d] [--format md] [--json]
+igtrack research <target id|username> --run --question "..." [--url URL ...] [--max-sources N] [--refresh] [--json]
 
 The full read-back for ONE account in separate sections: identity and route,
 platform observations (counts, profile, media — with the bounded-preview caveat
@@ -64,8 +66,8 @@ publish timestamps (each section states its corpus and formula), audience
 platform-absent for DISCOVERY with the reason), recorded CLAIMS with relation
 labels and review flags, contradictions with both sides, recorded change events
 in a stated window, leads (stored follow/mention/comment signals, which are not
-claims), connections (evidence-ranked for OWNED targets only), per-capability
-coverage, and notes.
+claims), connections (evidence-ranked for OWNED targets only), research runs,
+per-capability coverage, and notes.
 
 --since 7d (or an ISO date) narrows the CLAIMS section to rows retrieved since
 that time and states how many rows the filter omitted; nothing else is filtered
@@ -74,9 +76,23 @@ and nothing is deleted.
 --format md prints the same report as a Markdown hand-off document (sections,
 tables and source citations intact) for a human reader or a ticket.
 
+--run ACQUIRES new evidence instead of only reading what is stored: it fetches
+each planned public URL through the SSRF/robots/size/time gate (≤10 documents,
+depth 1 — links found on a fetched page are counted, never followed), extracts
+candidates from four fixed structured field families (JSON-LD, meta tags,
+mailto, public profile links — never page prose), and stores every candidate
+through the same claim predicate registry \`igtrack claims add\` uses. Page
+text is data, never instructions. Sources are: --url URLs you name, results
+from a configured search provider (IGTRACK_RESEARCH_SEARCH_PROVIDER=brave +
+IGTRACK_RESEARCH_SEARCH_API_KEY; without a key the run says exactly that and
+uses only your URLs), and the source URLs of claims already recorded. Every
+per-document outcome — fetched, reused, refused, failed — is recorded on the
+run and shown in the report.
+
 Platform observations and claims are never blended. Every empty or unavailable
-section states its reason in the output itself. Read-only and deterministic
-within a day: nothing is fetched and nothing is written.`;
+section states its reason in the output itself. The report is read-only and
+deterministic within a day; --run is the one flag that writes (claims + a run
+record), and only where validation passes.`;
 
 export const PLAN_HELP = `igtrack plan <target id|username> [--goal G] [--json]
 
@@ -342,6 +358,37 @@ function researchMarkdown(result: ResearchResult): string {
     }
   }
 
+  lines.push("", "## Research runs (autonomous public-web acquisition)", "");
+  if (result.researchRuns.state === "UNAVAILABLE") {
+    lines.push(`${display(result.researchRuns.reason)}`, "", result.researchRuns.note);
+  } else {
+    lines.push(
+      ...mdTable(
+        ["run", "question", "focus", "status", "docs fetched/planned", "failed", "candidates", "stored", "duplicate", "refused", "started"],
+        result.researchRuns.runs.map((run) => [
+          run.id.slice(0, 8),
+          run.question,
+          run.focusIntent,
+          run.status,
+          `${run.documentsFetched}/${run.documentsPlanned}`,
+          String(run.documentsFailed),
+          String(run.candidatesFound),
+          String(run.claimsStored),
+          String(run.claimsDuplicate),
+          String(run.claimsRefused),
+          run.startedAt.slice(0, 10),
+        ]),
+      ),
+      "",
+      result.researchRuns.note,
+    );
+    for (const run of result.researchRuns.runs) {
+      if (run.searchUnavailableReason !== null) {
+        lines.push("", `Run ${run.id.slice(0, 8)}: search UNAVAILABLE — ${run.searchUnavailableReason}`);
+      }
+    }
+  }
+
   lines.push(
     "",
     "## Coverage",
@@ -493,8 +540,102 @@ export async function runResearch(args: ParsedArgs): Promise<number> {
     );
   }
   const since = flagString(args.flags, "since");
+  const runMode = flagBool(args.flags, "run");
   const ctx = await createContext();
   try {
+    if (runMode) {
+      // The acquisition path (D69): fetch named/public sources through the
+      // gate, extract, validate, store. It writes claims + a run record —
+      // the ONLY research flag that writes.
+      const question = flagString(args.flags, "question");
+      if (question === undefined || question.trim() === "") {
+        throw new UsageError(
+          "--run needs --question \"What are we trying to find out about this account?\"",
+        );
+      }
+      if (format !== "text") {
+        throw new UsageError(
+          "--run prints the acquisition summary as text (or --json for the machine envelope); run the report separately with --format md.",
+        );
+      }
+      const urlFlag = flagString(args.flags, "url");
+      const urls =
+        urlFlag === undefined
+          ? []
+          : urlFlag
+              .split(",")
+              .map((u) => u.trim())
+              .filter((u) => u !== "");
+      const maxSources =
+        args.flags["max-sources"] === undefined
+          ? undefined
+          : flagNumber(args.flags, "max-sources", 10);
+      const refresh = flagBool(args.flags, "refresh");
+      const runResult = await opResearchRun(ctx, {
+        target,
+        question,
+        ...(urls.length > 0 ? { urls } : {}),
+        ...(maxSources !== undefined ? { maxSources } : {}),
+        ...(refresh ? { refresh: true } : {}),
+      });
+      const runSections: string[] = [
+        `Research run ${runResult.runId}  @${runResult.target.username}  ${runResult.status}`,
+        "",
+        `Question   ${runResult.question}`,
+        `Focus      ${runResult.focus.intent} — ${runResult.focus.rationale}`,
+        `Bounds     ${runResult.bounds.enforced}`,
+        `Search     provider ${display(runResult.search.provider)} · ${runResult.search.queries.length} query(ies) · ${runResult.search.candidateUrls} candidate URL(s)`,
+      ];
+      if (runResult.search.unavailableReason !== null) {
+        runSections.push(`           UNAVAILABLE — ${runResult.search.unavailableReason}`);
+      }
+      runSections.push(
+        "",
+        "Documents",
+        table(
+          ["outcome", "url", "title", "detail"],
+          runResult.documents.map((doc) => [
+            doc.outcome,
+            doc.url,
+            display(doc.title),
+            [
+              doc.httpStatus === null ? null : `HTTP ${doc.httpStatus}`,
+              doc.byteSize === null ? null : `${doc.byteSize} B`,
+              `${doc.candidatesFound} candidate(s)`,
+              doc.outcomeReason,
+            ]
+              .filter((part): part is string => part !== null)
+              .join(" · "),
+          ]),
+        ),
+        "",
+        "Totals",
+        `  planned ${runResult.totals.planned} · fetched ${runResult.totals.fetched} · reused ${runResult.totals.reused} · failed ${runResult.totals.failed}`,
+        `  candidates ${runResult.totals.candidates} · claims stored ${runResult.totals.claimsStored} · duplicates refused ${runResult.totals.claimsDuplicate} · predicate refusals ${runResult.totals.claimsRefused}`,
+      );
+      if (runResult.claims.length > 0) {
+        runSections.push(
+          "",
+          "Claims stored (each with source URL, excerpt and SHA-256; visible in the next report)",
+          table(
+            ["predicate", "value", "source"],
+            runResult.claims.map((claim) => [
+              claim.predicate,
+              claim.value,
+              display(claim.sourceUrl),
+            ]),
+          ),
+        );
+      }
+      runSections.push("", "Notes:", ...runResult.notes.map((note) => `  · ${note}`));
+      emit({
+        json,
+        meta: ctx.meta,
+        data: runResult,
+        human: runSections.join("\n"),
+      });
+      return runResult.status === "FAILED" ? 1 : 0;
+    }
     const result = await opResearch(ctx, {
       target,
       connectionLimit,
@@ -665,6 +806,34 @@ export async function runResearch(args: ParsedArgs): Promise<number> {
       if (result.connections.truncated) {
         sections.push("  Note: more ranked accounts are stored than this list shows.");
       }
+    }
+
+    sections.push("", "Research runs (autonomous public-web acquisition; refusals and failures are findings)");
+    if (result.researchRuns.state === "UNAVAILABLE") {
+      sections.push(`  ${display(result.researchRuns.reason)}`);
+      sections.push(`  ${result.researchRuns.note}`);
+    } else {
+      sections.push(
+        table(
+          ["run", "question", "focus", "status", "docs", "candidates", "stored/dup/refused", "started"],
+          result.researchRuns.runs.map((run) => [
+            run.id.slice(0, 8),
+            run.question.length > 40 ? `${run.question.slice(0, 39)}…` : run.question,
+            run.focusIntent,
+            run.status,
+            `${run.documentsFetched}/${run.documentsPlanned} fetched, ${run.documentsFailed} failed`,
+            String(run.candidatesFound),
+            `${run.claimsStored}/${run.claimsDuplicate}/${run.claimsRefused}`,
+            run.startedAt.slice(0, 10),
+          ]),
+        ),
+      );
+      for (const run of result.researchRuns.runs) {
+        if (run.searchUnavailableReason !== null) {
+          sections.push(`  run ${run.id.slice(0, 8)} search UNAVAILABLE — ${run.searchUnavailableReason}`);
+        }
+      }
+      sections.push(`  ${result.researchRuns.note}`);
     }
 
     sections.push(

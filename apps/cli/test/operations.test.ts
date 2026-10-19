@@ -1,12 +1,15 @@
 import postgres from "postgres";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createDb, runMigrations, seed, type DatabaseHandle } from "@igtrack/database";
 import type { InstagramProvider } from "@igtrack/core";
 import { createContext, type CliContext } from "../src/context.js";
 import { runResearch } from "../src/commands/intel.js";
+import { runDossier } from "../src/commands/read.js";
+import { doctorExitCode, renderDoctorHuman, runDoctor } from "../src/commands/setup.js";
 import { CliError, UsageError } from "../src/output.js";
 import {
   opActivity,
+  type DoctorReport,
   opClaimAdd,
   opClaimList,
   opClaimRetract,
@@ -808,4 +811,262 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
       }),
     ).rejects.toMatchObject({ code: "USAGE" });
   });
+});
+
+// ---------------------------------------------------------------------------
+// Provider readiness and report honesty (config layer).
+  //
+  // The defect these pin: a presence check answered "are the credentials set?"
+  // while the deployment still held the literal `PASTE_..._HERE` markers a
+  // fresh `.env` ships with, so an unusable configuration read as ready. Same
+  // class of lie as drawing absence as zero.
+  // ---------------------------------------------------------------------------
+
+/** The markers a fresh `.env` ships with — set explicitly so no test depends on the developer's file. */
+const GRAPH_PLACEHOLDERS = {
+  IGTRACK_PROVIDER: "graph",
+  IGTRACK_GRAPH_ACCESS_TOKEN: "PASTE_LONG_LIVED_TOKEN_HERE",
+  IGTRACK_GRAPH_IG_USER_ID: "PASTE_IG_USER_ID_HERE",
+  IGTRACK_GRAPH_USERNAME: "PASTE_OWNED_USERNAME_HERE",
+};
+const GRAPH_PLACEHOLDER_VALUES = [
+  GRAPH_PLACEHOLDERS.IGTRACK_GRAPH_ACCESS_TOKEN,
+  GRAPH_PLACEHOLDERS.IGTRACK_GRAPH_IG_USER_ID,
+  GRAPH_PLACEHOLDERS.IGTRACK_GRAPH_USERNAME,
+];
+
+/** Swap the graph configuration in for the body of a test, restoring exactly what was there. */
+async function withGraphConfig<T>(body: () => Promise<T>): Promise<T> {
+  const keys = Object.keys(GRAPH_PLACEHOLDERS);
+  const saved = new Map(keys.map((k) => [k, process.env[k]]));
+  for (const [k, v] of Object.entries(GRAPH_PLACEHOLDERS)) process.env[k] = v;
+  try {
+    return await body();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+/** Capture what a command actually writes, so JSON and human output can be compared. */
+async function captureOutput(run: () => Promise<number>): Promise<{ code: number; out: string }> {
+  const chunks: string[] = [];
+  const spy = vi.spyOn(process.stdout, "write");
+  spy.mockImplementation((chunk: unknown): boolean => {
+    chunks.push(String(chunk));
+    return true;
+  });
+  try {
+    const code = await run();
+    return { code, out: chunks.join("") };
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+describe.skipIf(!databaseUp)("provider readiness", () => {
+  let ctx: CliContext;
+
+  beforeAll(async () => {
+    // Same test database the suite above migrated and seeded; this describe
+    // runs after it, so its recorded targets are on record here too. The
+    // provider is pinned to fixture so the repository's own .env can never
+    // redirect a test run at real data.
+    process.env.IGTRACK_DATABASE_URL = TEST_DATABASE_URL;
+    process.env.IGTRACK_PROVIDER = "fixture";
+    delete process.env.IGTRACK_USER_EMAIL;
+    ctx = await createContext();
+
+    // Assert on both targets this describe reads. Registering them here makes
+    // the block self-contained instead of inheriting whatever the suite above
+    // happened to get through: `targets add` is idempotent, so a target the
+    // earlier suite already recorded is simply reused.
+    await opTargetAdd(ctx, { username: FIXTURE_USERNAME });
+    await opTargetAdd(ctx, { username: DISCOVERY_USERNAME, observed: true });
+  });
+
+  afterAll(async () => {
+    await ctx?.close();
+  });
+
+  it("6. answers a known fixture account as local synthetic data, not a live request", async () => {
+    const result = await opLookup(ctx, { username: FIXTURE_USERNAME });
+    expect(result.provider).toBe("fixture");
+    expect(result.sourceKind).toBe("local");
+    expect(result.businessDiscovery).toBeNull();
+    expect(result.status).toBe("AVAILABLE");
+    expect(result.account).not.toBeNull();
+    expect(result.why).toMatch(/local data set|synthetic/i);
+  });
+
+  it("7. distinguishes 'not in the fixture set' from 'Instagram said no'", async () => {
+    const result = await opLookup(ctx, { username: "sel_win_" });
+    expect(result.status).toBe("ERROR");
+    expect(result.error?.kind).toBe("ACCOUNT_NOT_FOUND");
+    expect(result.sourceKind).toBe("local");
+    expect(result.account).toBeNull();
+    // The sentence a bare ACCOUNT_NOT_FOUND would otherwise let an agent
+    // over-read: this is an absence from local rows, not a platform verdict.
+    expect(result.why).toContain("never contacts Instagram");
+    expect(result.why).toContain("not evidence that the account does not exist");
+  });
+
+  it("11. never falls back to fixture data when the graph configuration is unusable", async () => {
+    await withGraphConfig(async () => {
+      const fresh = await createContext();
+      try {
+        expect(fresh.provider.name).toBe("graph");
+        expect(fresh.provider.provider).toBeNull();
+        expect(fresh.provider.sourceId).toBeNull();
+        // The failure names variables and fixes — never the values themselves.
+        expect(fresh.provider.error).toMatch(/PLACEHOLDER/);
+        for (const value of GRAPH_PLACEHOLDER_VALUES) {
+          expect(fresh.provider.error).not.toContain(value);
+        }
+        await expect(opLookup(fresh, { username: FIXTURE_USERNAME })).rejects.toMatchObject({
+          code: "PROVIDER_UNAVAILABLE",
+        });
+      } finally {
+        await fresh.close();
+      }
+    });
+  });
+
+  it("12. refuses a live registration attempt while the graph credentials are placeholders", async () => {
+    const before = await opStatus(ctx);
+    await withGraphConfig(async () => {
+      const fresh = await createContext();
+      try {
+        await expect(
+          opTargetAdd(fresh, { username: "sel_win_", observed: true }),
+        ).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE" });
+      } finally {
+        await fresh.close();
+      }
+    });
+    const after = await opStatus(ctx);
+    expect(after.targets.items.length).toBe(before.targets.items.length);
+    expect(after.targets.items.map((t) => t.username)).not.toContain("sel_win_");
+  });
+
+  it("12. a failed discovery probe leaves the database unchanged", async () => {
+    const before = await opStatus(ctx);
+    await expect(
+      opTargetAdd(ctx, { username: "sel_win_", observed: true }),
+    ).rejects.toMatchObject({ code: "ACCOUNT_NOT_FOUND" });
+    const after = await opStatus(ctx);
+    expect(after.targets.items.length).toBe(before.targets.items.length);
+    expect(after.targets.items.map((t) => t.username)).not.toContain("sel_win_");
+    await expect(resolveTarget(ctx.db, ctx.userId, "sel_win_")).rejects.toThrow(
+      /No tracked target matches/,
+    );
+  });
+
+  it("8. reports the same configuration in JSON as on the human screen", async () => {
+    await withGraphConfig(async () => {
+      const human = await captureOutput(() =>
+        runDoctor({ command: "doctor", positionals: [], flags: {} }),
+      );
+      const json = await captureOutput(() =>
+        runDoctor({ command: "doctor", positionals: [], flags: { json: true } }),
+      );
+      const parsed = JSON.parse(json.out) as { ok: boolean; data: DoctorReport };
+      expect(parsed.ok).toBe(true);
+
+      const cfg = parsed.data.env.config;
+      expect(cfg.status).toBe("PLACEHOLDER");
+      // Readiness is local by construction — the payload says so itself.
+      expect(cfg.networkCallMade).toBe(false);
+      expect(cfg.problems.length).toBeGreaterThan(0);
+
+      // Same object, two renderings: the screen is exactly what the JSON says.
+      expect(human.out).toBe(`${renderDoctorHuman(parsed.data)}\n`);
+      expect(human.out).toContain(`BLOCKED (${cfg.status})`);
+      expect(human.out).toContain("NOT_VERIFIED — doctor makes no network request");
+      for (const variable of cfg.variables) expect(human.out).toContain(variable.name);
+
+      // And the exit code follows from the same report on both paths.
+      expect(doctorExitCode(parsed.data)).toBe(3);
+      expect(human.code).toBe(3);
+      expect(json.code).toBe(3);
+      for (const value of GRAPH_PLACEHOLDER_VALUES) {
+        expect(human.out).not.toContain(value);
+        expect(json.out).not.toContain(value);
+      }
+    });
+    // Both paths build a full doctor report; the budget follows the work, not
+    // the machine's mood.
+  }, 30_000);
+
+  it("9. stays exit 0 for the fixture workflow and non-zero when graph readiness is claimed but absent", async () => {
+    const fixtureRun = await captureOutput(() =>
+      runDoctor({ command: "doctor", positionals: [], flags: {} }),
+    );
+    // Fixtures are legitimate; doctor must keep working for them.
+    expect(fixtureRun.code).toBe(0);
+    expect(fixtureRun.out).toContain("IGTRACK_PROVIDER=fixture");
+    expect(fixtureRun.out).toContain("NOT_VERIFIED — doctor makes no network request");
+
+    // A switch to graph on the example text must not read as healthy.
+    await withGraphConfig(async () => {
+      const graphRun = await captureOutput(() =>
+        runDoctor({ command: "doctor", positionals: [], flags: {} }),
+      );
+      expect(graphRun.code).toBe(3);
+      expect(graphRun.out).toContain("BLOCKED (PLACEHOLDER)");
+      expect(graphRun.out).toContain("no API request was made");
+    });
+    // Two full doctor passes, each opening its own context: generous under
+    // load rather than a silent 5s default.
+  }, 30_000);
+
+  it("13. labels the dossier's evidence and names the provider it came from", async () => {
+    const dossier = await opDossier(ctx, { target: FIXTURE_USERNAME });
+    expect(dossier.route.observingSources.every((s) => s.startsWith("fixture:"))).toBe(true);
+
+    const human = await captureOutput(() =>
+      runDossier({ command: "dossier", positionals: [FIXTURE_USERNAME], flags: {} }),
+    );
+    expect(human.out).toContain("Evidence");
+    expect(human.out).toContain("SYNTHETIC — generated fixture data");
+    expect(human.out).toContain("Not live Instagram evidence");
+
+    const json = await captureOutput(() =>
+      runDossier({ command: "dossier", positionals: [FIXTURE_USERNAME], flags: { json: true } }),
+    );
+    const parsed = JSON.parse(json.out) as {
+      data: { route: { observingSources: string[] } };
+      _meta: { synthetic: boolean; provider: string };
+    };
+    expect(parsed._meta.synthetic).toBe(true);
+    expect(parsed._meta.provider).toBe("fixture");
+    expect(parsed.data.route.observingSources.every((s) => s.startsWith("fixture:"))).toBe(true);
+    // One dossier read plus two CLI renders; the timeout follows the work.
+  }, 30_000);
+
+  it("14. reports coverage per capability with a reason, never an empty row or an implied zero", async () => {
+    const dossier = await opDossier(ctx, { target: DISCOVERY_USERNAME });
+    expect(dossier.coverage.length).toBeGreaterThan(0);
+    const unobserved = dossier.coverage.filter((row) => row.state !== "OBSERVED");
+    expect(unobserved.length).toBeGreaterThan(0);
+    for (const row of dossier.coverage) {
+      if (row.state === "OBSERVED") {
+        // An observed state must have rows behind it, or it is a claim.
+        expect(row.observedRows, row.capability).not.toBeNull();
+        expect(row.observedRows as number).toBeGreaterThan(0);
+      } else {
+        // Not observed and unavailable are both stated with their reason —
+        // registry text or a recorded route note, never silence.
+        expect(row.reason, `${row.capability} has no reason`).toBeTruthy();
+        expect((row.reason ?? "").length).toBeGreaterThan(0);
+      }
+    }
+    // The refusals are on record alongside what was observed.
+    expect(dossier.coverage.some((r) => r.state === "UNAVAILABLE")).toBe(true);
+    expect(dossier.route.observingSources.every((s) => s.startsWith("fixture:"))).toBe(true);
+    // A whole-dossier coverage pass over every registry row; the timeout
+    // follows the work rather than the machine's mood.
+  }, 30_000);
 });

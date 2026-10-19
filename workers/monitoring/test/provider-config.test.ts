@@ -40,7 +40,22 @@ describe("provider credential safety (Phase 10 §7)", () => {
     delete process.env.IGTRACK_GRAPH_IG_USER_ID;
     delete process.env.IGTRACK_GRAPH_USERNAME;
     try {
-      expect(() => providerFromEnv()).toThrow(/missing required env/);
+      // The failure must still be a loud configuration error, not UNAVAILABLE.
+      // It now names each variable AND the corrective action, and states that
+      // no request was made — the old "missing required env: ..." named the
+      // variables and nothing else, so an operator still had to guess the fix.
+      let message = "";
+      try {
+        providerFromEnv();
+      } catch (err) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+      expect(message).toMatch(/MISSING/);
+      expect(message).toContain("IGTRACK_GRAPH_ACCESS_TOKEN");
+      expect(message).toContain("IGTRACK_GRAPH_IG_USER_ID");
+      expect(message).toContain("IGTRACK_GRAPH_USERNAME");
+      expect(message).toMatch(/no API request was made/);
+      expect(message).not.toMatch(/UNAVAILABLE/i);
     } finally {
       if (prevProvider === undefined) delete process.env.IGTRACK_PROVIDER;
       else process.env.IGTRACK_PROVIDER = prevProvider;

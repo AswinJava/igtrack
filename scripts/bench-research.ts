@@ -6,6 +6,7 @@
 // claims list, research report, and plan. Nothing here observes a live account.
 
 import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import {
   addClaim,
   createDb,
@@ -13,8 +14,9 @@ import {
   runMigrations,
   seed,
 } from "../packages/database/src/index.js";
+import type { FetchResult, ResearchFetcher } from "../packages/ingestion/src/index.js";
 import { createContext } from "../apps/cli/src/context.js";
-import { opClaimList, opPlan, opResearch } from "../apps/cli/src/tools.js";
+import { opClaimList, opPlan, opResearch, opResearchRun } from "../apps/cli/src/tools.js";
 
 const SERVER_URL =
   process.env.IGTRACK_TEST_DATABASE_URL ??
@@ -113,18 +115,61 @@ async function main(): Promise<void> {
         claimsList: await bench(() => opClaimList(ctx, { target: TARGET, includeRetracted: true })),
         research: await bench(() => opResearch(ctx, { target: TARGET })),
         plan: await bench(() => opPlan(ctx, { target: TARGET })),
+        // The engine path: plan → (scripted) fetch → extract → validate →
+        // store → run record. Transport is injected, so this measures the
+        // engine's own cost, not a network's. Unique URLs per run keep every
+        // iteration a full fetch (no 24h freshness reuse), so the p95 is the
+        // worst-case single run, not the reuse shortcut.
+        researchRun: await bench(
+          () => {
+            const fetcher: Pick<ResearchFetcher, "fetchPage"> = {
+              fetchPage: async (url: string): Promise<FetchResult> => ({
+                ok: true,
+                finalUrl: url,
+                httpStatus: 200,
+                contentType: "text/html; charset=utf-8",
+                body: `<!doctype html><html><head><title>Bench Org</title>
+<meta property="og:site_name" content="Bench Org">
+<script type="application/ld+json">{"@type":"Organization","name":"Bench Org","address":{"addressLocality":"Lisbon"},"knowsAbout":"Bench work"}</script>
+</head><body>structured fields only</body></html>`,
+                byteSize: 512,
+                fetchedAt: new Date(),
+                redirectsFollowed: 0,
+                robotsChecked: false,
+              }),
+            };
+            let n = 0;
+            return opResearchRun(
+              ctx,
+              {
+                target: TARGET,
+                question: "Who runs this account?",
+                urls: Array.from(
+                  { length: 4 },
+                  () => `https://bench-run-${(n += 1)}.example.com/about`,
+                ),
+              },
+              { fetcher },
+            );
+          },
+          20,
+          3,
+        ),
       },
       cliStartup: null as unknown,
     };
 
     // Process boot + help render. The MCP process pays this once per session.
+    // Launched through the same tsx shim `pnpm igtrack` uses (pnpm itself adds
+    // its own bootstrap cost on top, which is not this CLI's to measure).
+    const tsxShim = join("node_modules", ".bin", process.platform === "win32" ? "tsx.CMD" : "tsx");
     const spawned = (): { ms: number; status: number | null } => {
+      const command =
+        process.platform === "win32"
+          ? `"${tsxShim}" apps/cli/src/main.ts help`
+          : `${tsxShim} apps/cli/src/main.ts help`;
       const start = performance.now();
-      const result = spawnSync(
-        process.execPath,
-        ["--import", "tsx", "apps/cli/src/main.ts", "help"],
-        { encoding: "utf8" },
-      );
+      const result = spawnSync(command, { shell: true, encoding: "utf8" });
       return { ms: performance.now() - start, status: result.status };
     };
     const probe = spawned();

@@ -36,6 +36,7 @@ export const RegistryCapabilityId = {
   RESHARES: "RESHARES",
   MEDIA: "MEDIA",
   ACCOUNT_RESEARCH: "ACCOUNT_RESEARCH",
+  WEB_RESEARCH: "WEB_RESEARCH",
 } as const;
 
 export type RegistryCapabilityId =
@@ -54,6 +55,14 @@ export interface CapabilityRegistryEntry {
    * fed by a human is being available, not being unavailable.
    */
   operatorSupplied?: boolean | undefined;
+  /**
+   * True for capabilities the in-process research engine supplies from
+   * lawful non-platform sources (the bounded public-web research run, D69):
+   * no platform method exists and none can, but the engine's own fetch path
+   * is real, bounded, and fully exercised by tests. Distinct from
+   * operatorSupplied, whose rows the operator types in themselves.
+   */
+  engineSupplied?: boolean | undefined;
   /** Account/permission the data requires. */
   permissions: string;
   /** Drizzle schema export names that persist it. */
@@ -477,5 +486,29 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     liveState: "DOCUMENTED_ABSENT",
     liveEvidence:
       "The platform exposes no documented edge for claim-predicate facts (no identity/organization/contact fields on any IG node) — their absence from the API is a finding, restated in FOUNDING §18. Live verification is a category that does not apply: the pipeline is local (validate, hash, store, render) and fully exercised by tests without credentials, and a claim is never a platform observation regardless of what a credential would return.",
+  },
+  {
+    id: "WEB_RESEARCH",
+    label: "Bounded public-web research acquisition",
+    providerMethods: [],
+    // Supplied by the in-process research engine, not by the operator's own
+    // submissions and not by any platform method — a third, honest supply
+    // mode rendered distinctly in the matrix.
+    engineSupplied: true,
+    permissions:
+      "No platform permission applies: the engine fetches only public web pages the operator named (or a configured search provider returned as candidates), through the SSRF-gated fetcher. Instagram-family hosts are refused by policy — platform data belongs to the Graph API adapters (FOUNDING §14/§19).",
+    persistence: ["researchRuns", "researchDocuments", "claims"],
+    ui: [
+      "igtrack research <target> --run --question \"...\" (CLI)",
+      "igtrack_research_run (MCP tool)",
+      "Research runs section of igtrack research (CLI report)",
+    ],
+    howItWorks:
+      "A run is created first (question, focus, bounds), then at most RESEARCH_MAX_SOURCES=10 documents are planned: operator URLs first, then search-provider candidates (no provider configured means UNAVAILABLE with the exact reason — never invented sources), then the source URLs of prior claims; deduplicated, sliced to the cap. Every URL and every redirect hop passes the static gate: http(s) on port 80/443 only, no embedded credentials, Instagram/localhost/metadata hosts refused by policy, DNS results checked against private, loopback, link-local and metadata ranges; robots.txt is respected, content types are allowlisted, the body is streamed to a 512KB byte cap under a 10s wall-clock timeout. Extraction reads four fixed field families (JSON-LD, meta tags, mailto addresses, public profile links) — never page prose, so a page cannot prompt-inject its way into a claim. Each candidate passes the same closed predicate registry as operator claims before storage; duplicates are counted, never re-stored; a document fetched within 24h is REUSED unless --refresh. Every per-document outcome, including refusals and failures, is recorded on the run. Depth is fixed at 1: the engine never follows links it did not plan.",
+    whyUnavailable: null,
+    unlock: null,
+    liveState: "LIVE_VERIFIED",
+    liveEvidence:
+      "Live-verified on the keyless default path (2026-10-19, Phase 2): probe `igtrack audit sel_win_` with IGTRACK_RESEARCH_SEARCH_PROVIDER=auto and no key — the keyless FreeSerp leg answered SEARCH_SUCCEEDED across the fixed 4-query budget (quoted form, profile-URL form, @-mention form, bare form), returning 20 results that deduplicated to 15 canonical candidates (25% tracking/slash duplicates removed); retrieval ended COMPLETED_PARTIAL (4 pages fetched, 1 timed out and reported as TIMEOUT), and the relevance gate discarded 22 structured values from 4 pages that never named the handle — 0 facts with outcome PAGES_IRRELEVANT (poor coverage of one index, explicitly NOT a verdict that no public evidence exists), every candidate carrying its ranking reason and disposition and every refusal a policy skip rather than a failed fetch, with no secret in either rendering. The same pipeline measured on a control handle with real web presence (`scripts/bench-search.ts`, nasa) produced 10 exact-handle summary hits, 4 of 4 fetched pages naming the handle and 41 registry-accepted facts with outcome EVIDENCE_EXTRACTED — the extractor and gate are proven to yield evidence when a source states it. Re-measured by the Phase-3 audit-quality benchmark (2026-10-19, `docs/verification/SOURCE-AUDIT.md` §11): on the same pipeline the before-run's defects are closed — every stored fact now literally involves the handle (a third-party article's publisher identity is counted as `unattributed`, never attributed), support re-verification is 100% on all seven benchmark handles (after canonicalizing entity/`\\/` escaping in the checker), and the ambiguous three-letter handle yields 0 attributed facts (`RELEVANT_NO_FACTS`) where the pre-fix run yielded 22 confident ones. The keyed Brave leg is implemented and pinned by mocked-transport tests (mapping, 401/429/500, key redaction) but has never been observed live — no API key in this environment: set IGTRACK_RESEARCH_SEARCH_PROVIDER=brave and IGTRACK_RESEARCH_SEARCH_API_KEY to verify it. Without either, search answers UNAVAILABLE with the exact reason rather than failing open. Search states (SEARCH_NOT_CONFIGURED/SEARCH_SUCCEEDED/SEARCH_NO_RESULTS/SEARCH_FAILED), retrieval states (NOT_ATTEMPTED/COMPLETED/COMPLETED_PARTIAL/FAILED) and the seven outcome classes (SEARCH_UNAVAILABLE…EVIDENCE_EXTRACTED) are pinned in apps/cli/test/audit.test.ts; the query strategy in packages/ingestion/test/research-queries.test.ts; provider selection (unset=none, auto=Brave-with-key else keyless, unknown=configuration error) in packages/ingestion/test/research-search.test.ts.",
   },
 ];

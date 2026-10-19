@@ -8,6 +8,7 @@ import {
   runStatus,
   SETUP_HELP,
 } from "./commands/setup.js";
+import { AUDIT_HELP, runAudit } from "./commands/audit.js";
 import { runTargets, TARGETS_HELP } from "./commands/targets.js";
 import { runScans, runWork, SCANS_HELP } from "./commands/scans.js";
 import {
@@ -63,6 +64,7 @@ Track
   scans <sub>           run | list                              (scans --help)
 
 Observe
+  audit <username>      One evidence-honest report: config, probe, stored record
   work                  Run the worker now: one scheduler tick + drain the queue
   activity              What changed, newest first, with evidence ids
   relationships <t>     Accounts ranked by observed signal, with provenance
@@ -108,6 +110,12 @@ async function dispatch(args: ParsedArgs): Promise<number> {
         return 0;
       }
       return runConfig(args);
+    case "audit":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${AUDIT_HELP}\n`);
+        return 0;
+      }
+      return runAudit(args);
     case "status":
       return runStatus(args);
     case "doctor":

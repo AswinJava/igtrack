@@ -12,9 +12,14 @@ describe("deriveThemes", () => {
     const first = deriveThemes(captions);
     const second = deriveThemes(captions);
     expect(second).toEqual(first);
-    expect(first.terms[0]).toEqual({ term: "aurora", count: 3 });
-    // "blue", "firing" and "glaze" each appear once; ties resolve alphabetically.
-    expect(first.terms.slice(1).map((t) => t.term)).toEqual(["blue", "firing", "glaze"]);
+    // aurora x3, glaze x2 (captions 1 and 2), then a tie between blue and
+    // firing that resolves alphabetically.
+    expect(first.terms).toEqual([
+      { term: "aurora", count: 3 },
+      { term: "glaze", count: 2 },
+      { term: "blue", count: 1 },
+      { term: "firing", count: 1 },
+    ]);
   });
 
   it("excludes stopwords, short tokens and bare numbers, and scopes the corpus", () => {
@@ -27,7 +32,9 @@ describe("deriveThemes", () => {
   it("tallies hashtags separately, lowercased and bounded by the limit", () => {
     const result = deriveThemes(["#Pottery #glaze day", "#pottery again"], { limit: 1 });
     expect(result.hashtags).toEqual([{ term: "pottery", count: 2 }]);
-    expect(result.terms).toEqual([{ term: "day", count: 1 }]);
+    // Hashtag words are still words of the text, so they appear in the term
+    // tally too — the two lists double-count by construction and are labelled.
+    expect(result.terms).toEqual([{ term: "pottery", count: 2 }]);
     // The default limit is in effect when none is given.
     const defaults = deriveThemes(Array.from({ length: 30 }, (_, i) => `word${String(i)}x`));
     expect(defaults.terms).toHaveLength(THEME_TERM_LIMIT);
@@ -49,7 +56,8 @@ describe("deriveCadence", () => {
     expect(result.timestampRows).toBe(3);
     expect(result.firstPublishedAt).toBe("2026-09-01T00:00:00.000Z");
     expect(result.lastPublishedAt).toBe("2026-09-08T00:00:00.000Z");
-    expect(result.medianGapDays).toBe(2);
+    // Two gaps: 2 days and 5 days -> (2 + 5) / 2 = 3.5.
+    expect(result.medianGapDays).toBe(3.5);
   });
 
   it("deduplicates timestamps so a re-observed post is not a zero-length gap", () => {

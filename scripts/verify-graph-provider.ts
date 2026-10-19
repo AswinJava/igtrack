@@ -9,9 +9,11 @@
 // TYPES and string lengths — never values. Nothing is written to disk; the
 // sanitized report goes to stdout (JSON with --json, human table otherwise).
 //
-// When credentials are absent the harness reports every capability as
-// NOT_VERIFIED with reason CREDENTIALS_NOT_CONFIGURED and exits 0 — the
-// honest state, not a failure. Distinguish LIVE / MOCK / FIXTURE / CODE /
+// When credentials are absent OR still the example text, the harness reports
+// every capability as NOT_VERIFIED with reason CREDENTIALS_NOT_CONFIGURED and
+// exits 0 — the honest state, not a failure. It decides that with the same
+// local readiness check `doctor` uses, before a request is ever planned:
+// presence is not validity. Distinguish LIVE / MOCK / FIXTURE / CODE /
 // DOCUMENTATION / NOT_VERIFIED per row (see `provenance`).
 
 import { CapabilityStatus, type CapabilityResult } from "../packages/core/src/index.js";
@@ -19,6 +21,10 @@ import {
   GraphProvider,
   graphConfigFromEnv,
 } from "../packages/ingestion/src/graph/graph-provider.js";
+import {
+  ConfigState,
+  assessReadiness,
+} from "../packages/ingestion/src/config/readiness.js";
 import {
   COVERAGE_AREA_BY_CAPABILITY,
   findUnmappedFields,
@@ -80,32 +86,35 @@ function summarize<T>(name: string, result: CapabilityResult<T>): CapabilityProb
 
 async function main(): Promise<void> {
   const asJson = process.argv.includes("--json");
-  const present = {
-    token: Boolean(process.env.IGTRACK_GRAPH_ACCESS_TOKEN),
-    igUserId: Boolean(process.env.IGTRACK_GRAPH_IG_USER_ID),
-    username: Boolean(process.env.IGTRACK_GRAPH_USERNAME),
-  };
+  // Assessed in the graph scope: this harness exists to exercise the graph
+  // provider, so its three credentials are required whatever else the
+  // environment says.
+  const readiness = assessReadiness({ ...process.env, IGTRACK_PROVIDER: "graph" });
+  const graphVars = readiness.variables.filter((v) => v.name.startsWith("IGTRACK_GRAPH_"));
+  const unusable = graphVars.filter((v) => v.required && v.state !== ConfigState.NOT_VERIFIED);
   const apiVersion = process.env.IGTRACK_GRAPH_API_VERSION ?? "v21.0";
 
-  if (!present.token || !present.igUserId || !present.username) {
-    const missing = Object.entries(present)
-      .filter(([, v]) => !v)
-      .map(([k]) => k);
+  if (unusable.length > 0) {
+    const missing = unusable.map((v) => v.name);
     const report = {
       provenance: "NOT_VERIFIED",
       reason: "CREDENTIALS_NOT_CONFIGURED",
       missing,
+      states: unusable.map((v) => `${v.name}: ${v.state}`),
       apiVersion,
       message:
-        "Graph credentials are not configured in this environment. No live request was made. " +
-        "Configure IGTRACK_GRAPH_ACCESS_TOKEN / IGTRACK_GRAPH_IG_USER_ID / IGTRACK_GRAPH_USERNAME " +
-        "to enable LIVE verification. Capability states below reflect DOCUMENTATION + CODE evidence only.",
+        "Graph credentials are not usable in this environment " +
+        `(${unusable.length} required variable(s) MISSING, the example placeholder, or structurally impossible). ` +
+        "No live request was made. " +
+        unusable.map((v) => `${v.name} — ${v.action}`).join("; ") +
+        ". Capability states below reflect DOCUMENTATION + CODE evidence only.",
     };
     if (asJson) {
       console.log(JSON.stringify(report, null, 2));
     } else {
       console.log("IGTrack live provider verification: NOT_VERIFIED");
-      console.log(`reason: ${report.reason} (missing: ${missing.join(", ")})`);
+      console.log(`reason: ${report.reason} (unusable: ${missing.join(", ")})`);
+      for (const state of report.states) console.log(`  ${state}`);
       console.log(`apiVersion: ${apiVersion}`);
       console.log("No live request was made. See the capability registry for per-capability evidence.");
     }

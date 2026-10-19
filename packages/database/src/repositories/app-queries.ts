@@ -1086,6 +1086,9 @@ export interface TargetDossier {
     // the ACCOUNT_RESEARCH capability). Retracted rows stay in the table but
     // are not counted here.
     claims: DossierCount;
+    // Bounded public-web research runs (D69). Runs are refused for DISCOVERY
+    // targets, so a row always means the operator directed one.
+    researchRuns: DossierCount;
   };
   latestProfileSnapshot: Awaited<ReturnType<typeof listProfileSnapshots>>[number] | null;
   media: DossierMediaSummary | null;
@@ -1164,7 +1167,9 @@ export async function getTargetDossier(
             (SELECT count(*)::int FROM interactions WHERE target_id = ${owned.id}) AS interactions,
             (SELECT max(observed_at) FROM interactions WHERE target_id = ${owned.id}) AS interactions_at,
             (SELECT count(*)::int FROM claims WHERE target_id = ${owned.id} AND status = 'ACTIVE') AS claims,
-            (SELECT max(recorded_at) FROM claims WHERE target_id = ${owned.id} AND status = 'ACTIVE') AS claims_at
+            (SELECT max(recorded_at) FROM claims WHERE target_id = ${owned.id} AND status = 'ACTIVE') AS claims_at,
+            (SELECT count(*)::int FROM research_runs WHERE target_id = ${owned.id}) AS research_runs,
+            (SELECT max(started_at) FROM research_runs WHERE target_id = ${owned.id}) AS research_runs_at
         `,
       ),
       listProfileSnapshots(db, account.id, { limit: 1 }).catch(() => []),
@@ -1298,6 +1303,7 @@ export async function getTargetDossier(
       // FOUNDING §18: operator/agent-submitted claims. ACTIVE only — a
       // retracted claim is kept readable but is not an observed row.
       claims: { count: count("claims"), latestAt: at("claims_at") },
+      researchRuns: { count: count("research_runs"), latestAt: at("research_runs_at") },
     },
     latestProfileSnapshot: latestSnapshots[0] ?? null,
     media,

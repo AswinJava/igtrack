@@ -44,6 +44,16 @@ export interface ContextOptions {
   skipProvider?: boolean;
 }
 
+/**
+ * Whether a provider of this name produces synthetic data. The fixture provider
+ * is the only synthetic source; everything else is the operator's own export or
+ * the live Graph API. Used wherever a descriptor has to say what kind of
+ * evidence it is *without* having a provider instance to ask.
+ */
+function isSyntheticProviderName(name: string): boolean {
+  return name !== "graph" && name !== "import";
+}
+
 function describeProvider(): ProviderDescriptor {
   const name = process.env.IGTRACK_PROVIDER ?? "fixture";
   try {
@@ -52,17 +62,23 @@ function describeProvider(): ProviderDescriptor {
       name,
       sourceId: provider.sourceId,
       error: null,
-      synthetic: provider.sourceId.includes("fixture"),
+      synthetic: isSyntheticProviderName(name),
       provider,
     };
   } catch (err) {
     // Unknown provider name or missing credentials: a configuration failure,
     // never an empty dataset (same rule the worker enforces at boot).
+    //
+    // `synthetic` describes what the SELECTED provider would have produced,
+    // not what a failure is. Hardcoding `true` here made an unusable graph
+    // deployment report "synthetic fixture data", which is the same class of
+    // mislabel the product refuses elsewhere: the fixture provider is the only
+    // synthetic source, and a graph failure is not one.
     return {
       name,
       sourceId: null,
       error: err instanceof Error ? err.message : String(err),
-      synthetic: true,
+      synthetic: isSyntheticProviderName(name),
       provider: null,
     };
   }
@@ -99,7 +115,10 @@ export async function createContext(options: ContextOptions = {}): Promise<CliCo
             name: process.env.IGTRACK_PROVIDER ?? "fixture",
             sourceId: null,
             error: null,
-            synthetic: true,
+            // Derived from the selected name, not hardcoded: a test that skips
+            // provider construction while the deployment selects `graph` must
+            // not have its metadata labelled synthetic fixture data.
+            synthetic: isSyntheticProviderName(process.env.IGTRACK_PROVIDER ?? "fixture"),
             provider: null,
           }
         : describeProvider();

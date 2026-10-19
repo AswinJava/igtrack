@@ -30,7 +30,10 @@ afterEach(() => {
 
 describe("graphConfigFromEnv", () => {
   it("fails fast listing every missing credential without printing values", () => {
-    expect(() => graphConfigFromEnv({})).toThrow(/missing required env/);
+    // Deliberately an empty environment with no IGTRACK_PROVIDER at all: the
+    // caller asked for a graph provider, so the graph credentials are required
+    // regardless of what the rest of the environment says.
+    expect(() => graphConfigFromEnv({})).toThrow(/MISSING/);
     try {
       graphConfigFromEnv({});
     } catch (err) {
@@ -38,8 +41,39 @@ describe("graphConfigFromEnv", () => {
       expect(msg).toContain("IGTRACK_GRAPH_ACCESS_TOKEN");
       expect(msg).toContain("IGTRACK_GRAPH_IG_USER_ID");
       expect(msg).toContain("IGTRACK_GRAPH_USERNAME");
+      expect(msg).toContain("no API request was made");
       expect(msg).not.toContain("test-token");
     }
+  });
+
+  it("fails fast on the literal placeholders a fresh .env ships with", () => {
+    // Presence is not validity: three template markers are three absences.
+    const placeholders = {
+      IGTRACK_GRAPH_ACCESS_TOKEN: "PASTE_LONG_LIVED_TOKEN_HERE",
+      IGTRACK_GRAPH_IG_USER_ID: "PASTE_IG_USER_ID_HERE",
+      IGTRACK_GRAPH_USERNAME: "PASTE_OWNED_USERNAME_HERE",
+    };
+    expect(() => graphConfigFromEnv(placeholders)).toThrow(/PLACEHOLDER/);
+    for (const value of Object.values(placeholders)) {
+      let message = "";
+      try {
+        graphConfigFromEnv(placeholders);
+      } catch (err) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+      // The message names the variable and the fix — never the value.
+      expect(message).not.toContain(value);
+    }
+  });
+
+  it("leaves an ordinary-looking credential to the API to judge, not to a heuristic", () => {
+    const config = graphConfigFromEnv({
+      IGTRACK_GRAPH_ACCESS_TOKEN: "test-token",
+      IGTRACK_GRAPH_IG_USER_ID: "17841400000000002",
+      IGTRACK_GRAPH_USERNAME: "owned.account",
+    });
+    expect(config.igUserId).toBe("17841400000000002");
+    expect(config.username).toBe("owned.account");
   });
 });
 

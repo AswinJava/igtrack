@@ -258,6 +258,7 @@ error messages (invariant 8).
 | `IGTRACK_JOB_LEASE_MS` | `300000` | job lease before reclaim | ” (instant-reclaim would duplicate scans) |
 | `IGTRACK_PROVIDER_TIMEOUT_MS` | `30000` | per provider call timeout; exceeding → typed retryable `TIMEOUT` | ” |
 | `IGTRACK_JOB_MAX_ITER` | ∞ (daemon); `25` for `--once` | drain bound | `<=0` → refuses to boot |
+| `IGTRACK_FOLLOW_MAX_PAGES` | `500` | pages one FOLLOWER/FOLLOWING scan may read before stopping — the bound for a provider that mints a fresh cursor every page (a repeating cursor is caught separately) | unset/`<=0`/NaN → 500; a capped scan stores **PARTIAL** with `pageCap` in its evidence, never COMPLETE |
 | `IGTRACK_WORKER_ONCE` | unset | `1` = bounded one-shot worker | — |
 | `IGTRACK_SCHEDULER_ENABLED` | enabled | only the exact string `"false"` disables ticking (queue still drains manual jobs) | — |
 | `IGTRACK_SCHEDULER_TICK_MS` | `60000` | scheduler tick cadence | `<=0` → refuses to boot (hot-spin) |
@@ -480,6 +481,12 @@ roster."* Capabilities: `resolveAccount`, `getFollowers`, `getFollowing` only,
   unknown cursor → `INTERNAL`, "never a guessed page"; COMPLETE only on the
   last file; each file carries `rawPayloadHash = sha256(file text)` and
   `rawReference = import:v1/<file>` — genuine payload hashes.
+- Freshness: roster files carry no export-generation timestamp, so `observedAt`
+  is when IGTrack read them and the completion note says exactly that; the
+  export date is never asserted. The note is not left on the capability result
+  to be dropped — the follow-scan executor carries the final page's note onto
+  the snapshot's evidence row as `providerNote`, so a later reader of the
+  stored timestamp still gets the caveat.
 - Every other method → UNAVAILABLE with a capability-specific reason
   (profile absent, insights not in export, discovery points at Business
   Discovery, etc.).
@@ -734,7 +741,7 @@ observations are genuine" (pinned).
 |---|---|---|
 | `PROFILE_SCAN` | `getProfile` | appends a `profile_snapshots` row (never overwrites), diffs field changes **only between COMPLETE snapshots**, one evidence row; observation id `profile:<username>@<observedAt>` |
 | `DISCOVERY_SCAN` | `discoverAccount` | execute-time mode guard (only DISCOVERY targets); profile snapshot written COMPLETE (the documented field set *is* the whole set, so it is diffable); media preview rows with `commentsState: UNAVAILABLE` (structural — no route returns another account's media comments); per-media evidence metadata carries `previewPosition`, `previewLimit`, `previewBounded`; **always `COMPLETED_PARTIAL` when a preview limit is set** (D48); re-runs dedupe |
-| `FOLLOWER_SCAN` / `FOLLOWING_SCAN` | `getFollowers`/`getFollowing` | one shared engine; logical scan identity = `job.startedAt` (preserved across retries); checkpoint owned by job id; **staging** (`follow_scan_staging`, unique `(job_id, username_lower)`) with per-page durable writes, lease heartbeat per page (lost → non-retryable `LEASE_LOST`), crash-resume keeps every acquired page; snapshot + members + one evidence row (confidence = final page's confidence, never forced HIGH); **deltas only between two COMPLETE snapshots**; empty roster → `succeeded-empty` |
+| `FOLLOWER_SCAN` / `FOLLOWING_SCAN` | `getFollowers`/`getFollowing` | one shared engine; logical scan identity = `job.startedAt` (preserved across retries); checkpoint owned by job id; **staging** (`follow_scan_staging`, unique `(job_id, username_lower)`) with per-page durable writes, lease heartbeat per page (lost → non-retryable `LEASE_LOST`), crash-resume keeps every acquired page; **a repeated cursor ends the scan as PARTIAL, never a loop**; **a page cap bounds a cursor stream that never repeats** (`IGTRACK_FOLLOW_MAX_PAGES`, default 500 — capped scans store PARTIAL and record `pageCap` in evidence); snapshot + members + one evidence row (confidence = final page's confidence, never forced HIGH; the final page's provider note rides along as `providerNote`); **deltas only between two COMPLETE snapshots**; empty roster → `succeeded-empty` |
 | `STORY_SCAN` | `getStories` | per story: row + mentions (per-mention evidence) + **sighting on every scan that sees it** (wall-clock scan time, deliberately not the provider timestamp); PARTIAL preserved, never upgraded; zero stories → `succeeded-empty`; dedup across scans → 1 row, 2 sightings |
 | `TAGS_SCAN` | `getTags` | owned-only execute-time guard (raw-inserted job still refused, zero provider calls); page cap 25 with cursor-loop guard; page UNAVAILABLE on page 0 → nothing stored, after items → break (tail unavailable, what was read is still real); writes one `tagged_media_listing` evidence row + append-only rows sharing it; first-observation-wins, removal never claimed |
 | `POSTS_SCAN` | `getPublicPosts` (+comments, +children) | checkpoint resume; comments fetched **before** each post row (posts are append-only, per-post comment state must be known at insert); duplicate cursor → truncated, never a loop; children only for `CAROUSEL` when the gate is on; owned targets record `post_presence` + `post_changes` (caption edits deduped on `(post, change, detected_at)`); **absence (`NO_LONGER_OBSERVED`) only from a COMPLETE media listing** — completeness tracked separately from comment/children truncation; media change tracking is owned-only (DISCOVERY previews record nothing) |
@@ -886,7 +893,7 @@ with the coverage note); one queued PROFILE_SCAN keyed
 | `follows.ts` | `recordFollowSnapshot` (5,000-row batches), `latestFollowSnapshot`, `listMembersForSnapshot`, `persistFollowDiff`, `listRecentDeltas` |
 | `insights.ts` | `recordInsightSet`, `listInsightSeries` (values only), `insightLatest` (DISTINCT ON incl. coalesced dimension), `insightState` (latest instant + absences with reasons) |
 | `evidence.ts` | `upsertEvidence` (insert-on-conflict re-read — evidence is immutable), `getEvidenceByObservation` |
-| `accounts.ts` | `upsertAccount` (zod-validated; matches by platform id first — rename rewrites, D52; presence-gated fields), `getAccountByUsername`, `getAccountById` |
+| `accounts.ts` | `upsertAccount` (zod-validated; matches by platform id first — rename rewrites, D52; presence-gated fields; a username bound to a different platform id is refused, never overwritten), `getAccountByUsername`, `getAccountById` |
 | `targets.ts` | `createTarget`, `listTargets`, `getTarget`, `setTargetStatus`, `updateTargetMeta`, `deleteTargetWithObservations`, `getOwnedTarget`, `updateOwnedTargetMeta`, `transitionTargetStatus` (core legality, illegal → CONFLICT), `deleteOwnedTarget` |
 | `source-health.ts` | `recordCapabilitySuccess/Failure`, `markCapabilityUnavailable`, `getSourceHealth` |
 | `capability-metrics.ts` | `recordProviderMetrics` (atomic increments, best-effort), `listProviderMetrics` |
@@ -1449,5 +1456,100 @@ Deployment: 3 run modes, 2 compose files, 1 Dockerfile, 6 root scripts,
 
 **The documentation pass created only this document.** The 2026-10-16
 verification pass added the fixes recorded in §17.2, three test files, and
-[`docs/verification/VERIFICATION.md`](verification/VERIFICATION.md). Nothing
-is committed; the tree sits on `04e2a46` with those uncommitted changes.
+[`docs/verification/VERIFICATION.md`](verification/VERIFICATION.md); that
+whole state was committed as `323a254`.
+
+### 17.5 Post-`04e2a46` delta (committed as `323a254`)
+
+Everything above describes `04e2a46`. Commit `323a254` ("claims ledger,
+deep-account intelligence design, and verification pass") adds the
+deep-intelligence Phase 1 surface recorded in FOUNDING §18; the counting
+surfaces change exactly as follows:
+
+- **MCP tools: 19 → 24** — `igtrack_plan`, `igtrack_research`,
+  `igtrack_claims_list`, `igtrack_claim_add`, `igtrack_claim_retract`
+  (pinned by `mcp.test.ts` `EXPECTED_TOOLS`).
+- **CLI router cases: 19 → 22** — `claims` (add/list/retract), `research`,
+  `plan`.
+- **Capabilities: 23 → 24 registry ids, 18 → 19 available** —
+  `ACCOUNT_RESEARCH` (operator submissions; zero provider methods), and
+  `docs/CAPABILITIES.md` regenerated (`19 of 24 ... obtainable`).
+- **Database: 28 → 29 tables, 20 → 21 migrations, 16 → 17 repositories** —
+  `claims` + `0020_claims.sql` + `repositories/claims.ts`.
+- **Core: +3 modules** (`references.ts` — reference parsing/normalization;
+  `claims.ts` — predicate registry, refusal list, relation derivation;
+  `synthesis.ts` — deterministic themes/cadence derivation with total
+  ordering); no existing module's surface changed.
+- **Providers: 3, unchanged** — no new data source; `research` makes zero
+  provider calls.
+- Additional files: `scripts/bench-research.ts` (latency bench; its
+  CLI-startup probe was fixed after the commit and remains uncommitted), and
+  the new test files (`packages/core/test/{claims,references,synthesis}.test.ts`,
+  `packages/database/test/claims.test.ts`,
+  `apps/cli/test/acceptance.test.ts`,
+  `apps/cli/test/research-benchmark.test.ts`).
+
+The working tree **on top of `323a254`** carries documentation reconciliation
+(this section, README counts, CHANGELOG, FOUNDING §18, DEEP-ACCOUNT-INTELLIGENCE
+status), the bench CLI-startup fix, and two test-correctness fixes (the
+benchmark's Q9 table key and three synthesis expectations).
+
+### 17.6 Working-tree delta: the `audit` command
+
+The working tree adds one read-only command and its MCP tool. The counting
+surfaces change as follows (the §3.1/§4.1 tables stay at the state documented
+above — this section is the delta record, in the §17.5 style):
+
+- **MCP tools: +1 — `igtrack_audit`** (`readOnlyHint: true`, registered
+  immediately before `igtrack_lookup`; input `username`, accepting a username,
+  `@handle` or instagram.com profile URL, plus OPTIONAL `urls` (≤10 public
+  non-Instagram pages for the web phase) and `maxSources` (1–10, default 5)).
+  Pinned by `mcp.test.ts` `EXPECTED_TOOLS` in `apps/cli/test/mcp.test.ts`
+  (asserted there as an exact set, so any tool added or removed must update
+  that test).
+- **CLI router cases: +1 — `audit`** — `audit <username|@handle|profile-url>
+  [--url URL[,URL…]] [--max-sources N] [--json]`, its HELP line under
+  "Observe". `AUDIT_HELP`
+  (`apps/cli/src/commands/audit.ts`) carries the arguments, the five phases,
+  examples, and the exit codes: `0` report produced, `2` usage/invalid
+  reference, `3` configuration blocked (the report is still printed — read its
+  "next steps"; a broken `IGTRACK_RESEARCH_SEARCH_PROVIDER` is the same class
+  of failure and also exits 3).
+- **Semantics** — read-only by construction: a LOCAL configuration check (no
+  request) → ONE stateless probe (the same call `lookup` makes) → a stored
+  read-back that REUSES `research` and `plan` for tracked targets → a BOUNDED
+  public-web probe (`opAuditWebProbe`, FOUNDING §19/D70: operator `--url`
+  pages first, then search-provider candidates, ≤5 documents at depth 1,
+  SSRF/robots/content-type/byte/timeout gated, Instagram-family hosts refused
+  by policy, the same four field-family extractor and closed predicate
+  registry, and NO database handle so it cannot store, register or queue) →
+  the capability registry's refusals, limitations and next steps. The `summary`
+  block names the six evidence classes separately — platform observation,
+  stored record, public-web statement, stored third-party claim, operator
+  evidence, inference (`NONE`, always). It queues no
+  scan, writes no row, and registers no target. A probe answering
+  `ACCOUNT_NOT_FOUND` reports `NOT_OBSERVED` with the "not evidence that the
+  account does not exist" sentence (and, on a synthetic source, with the
+  "property of the data set" sentence); a blocked configuration reports
+  `CONFIGURATION_ERROR` with `probe.state = NOT_ATTEMPTED` — never an empty
+  result and never a silent fallback to another source. Evidence is labelled
+  per provider: SYNTHETIC (fixture), IMPORTED (the operator's own export),
+  LIVE (Graph API); every web fact is `PUBLIC_WEB_DOCUMENTED` with source URL,
+  page title, field, method, retrieval time and the document's SHA-256, and
+  corroboration/contradiction are derived (≥2 domains agreeing is
+  `CORROBORATED`; a same-source disagreement is `SINGLE_SOURCE`, never
+  `CONFLICTED`). Human and `--json` renderings are derived from the same
+  `AuditReport`.
+- **Tests: +1 file** — `apps/cli/test/audit.test.ts` (21 tests: owned fixture
+  read-back with coverage, discovery bounded-preview caveats, absent-account
+  honesty + unchanged targets/queue, tracked-but-never-scanned separated from
+  observed, reference normalization, usage exit 2,
+  graph-placeholder block with exit 3 and no credential values in either
+  rendering, import success and missing export directory, broken fixture
+  source → `doctor` with exit 0, JSON↔human parity, help contract, plus a
+  9-scenario public-web matrix: third-party labelling + byte-identical ledger,
+  cross-domain corroboration/contradiction with no winner, a real-gate
+  Instagram refusal, failed-document reporting, `NOT_ATTEMPTED` with its
+  remedy, the enforced-and-reported source cap, sensitive-predicate silence,
+  the search-provider configuration error → exit 3, and human/JSON agreement
+  on the web section).

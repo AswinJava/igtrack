@@ -9,6 +9,7 @@ export * from "./repositories/sources.js";
 export * from "./repositories/accounts.js";
 export * from "./repositories/targets.js";
 export * from "./repositories/claims.js";
+export * from "./repositories/research.js";
 export * from "./repositories/observations.js";
 export * from "./repositories/stories.js";
 export * from "./repositories/posts.js";

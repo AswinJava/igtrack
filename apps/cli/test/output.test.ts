@@ -109,8 +109,13 @@ describe("capability honesty", () => {
       if (entry === undefined) continue;
       // "No platform method" and "no source at all" are different facts: the
       // claims ledger has no provider route and is still available because the
-      // operator supplies its rows (FOUNDING §18, D70).
-      const hasSource = entry.providerMethods.length > 0 || entry.operatorSupplied === true;
+      // operator supplies its rows (FOUNDING §18, D70); the research engine
+      // has no provider route and is available because the engine itself is
+      // the bounded, lawful source (D69).
+      const hasSource =
+        entry.providerMethods.length > 0 ||
+        entry.operatorSupplied === true ||
+        entry.engineSupplied === true;
       if (!hasSource) {
         expect(line.available).toBe(false);
       }
@@ -121,6 +126,10 @@ describe("capability honesty", () => {
     }
     const claimsLedger = capabilityLines().find((l) => l.id === "ACCOUNT_RESEARCH");
     expect(claimsLedger?.available).toBe(true);
+    // The research engine is available (the pipeline is real and tested) while
+    // its live search adapter stays honestly NOT_VERIFIED (D69).
+    const webResearch = capabilityLines().find((l) => l.id === "WEB_RESEARCH");
+    expect(webResearch?.available).toBe(true);
   });
 });
 

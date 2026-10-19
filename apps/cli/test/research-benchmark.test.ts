@@ -168,7 +168,9 @@ describe.skipIf(!databaseUp)("research benchmark (§7.2 questions, §7.3 metrics
   });
 
   it("Q9 follower count 30 days ago — stored snapshot history only, no backward projection", () => {
-    const snapshots = research.platform.counts.followerSnapshots;
+    // Follower counts arrive through profile snapshots (follower_snapshots is
+    // the follow-list machinery, a different table); three are stored.
+    const snapshots = research.platform.counts.profileSnapshots;
     expect(snapshots?.count).toBe(3);
     expect(snapshots?.latestAt).not.toBeNull();
     // The report exposes history as a count of stored rows plus the latest

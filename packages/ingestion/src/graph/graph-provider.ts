@@ -30,6 +30,7 @@ import {
   type ProviderCapabilities,
   type SourceRef,
 } from "@igtrack/core";
+import { IG_USERNAME_PATTERN, graphConfigBlocker } from "../config/readiness.js";
 
 export interface GraphProviderConfig {
   accessToken: string;
@@ -194,16 +195,15 @@ function insightPointsFromItem(
 export function graphConfigFromEnv(
   env: Record<string, string | undefined> = process.env,
 ): GraphProviderConfig {
-  const missing: string[] = [];
-  if (!env.IGTRACK_GRAPH_ACCESS_TOKEN) missing.push("IGTRACK_GRAPH_ACCESS_TOKEN");
-  if (!env.IGTRACK_GRAPH_IG_USER_ID) missing.push("IGTRACK_GRAPH_IG_USER_ID");
-  if (!env.IGTRACK_GRAPH_USERNAME) missing.push("IGTRACK_GRAPH_USERNAME");
-  if (missing.length > 0) {
-    throw new Error(
-      `igtrack graph provider: missing required env: ${missing.join(", ")}. ` +
-        `Provision an owned Business/Creator account + Meta app + long-lived token; ` +
-        `never commit token values — env/secret-store only.`,
-    );
+  // Fail fast on "there is no credential here at all": a missing value or the
+  // literal `PASTE_..._HERE` the example file ships with is a configuration
+  // defect, and letting it through would surface as an API error that reads
+  // like a permission problem. The message names variables and corrective
+  // actions — never the values, and never a guess about whether a credential
+  // would work (no request is made to decide this).
+  const blocker = graphConfigBlocker(env);
+  if (blocker !== null) {
+    throw new Error(`igtrack graph provider: ${blocker}`);
   }
   return {
     accessToken: env.IGTRACK_GRAPH_ACCESS_TOKEN as string,
@@ -213,7 +213,9 @@ export function graphConfigFromEnv(
       ? { apiVersion: env.IGTRACK_GRAPH_API_VERSION }
       : {}),
     // Only the literal "1" enables it: an empty, misspelled, or placeholder
-    // value must not silently widen the provider's read scope.
+    // value must not silently widen the provider's read scope. Anything else
+    // is reported by `igtrack doctor` as INVALID_CONFIGURATION rather than
+    // accepted as an apparent opt-in.
     ...(env.IGTRACK_GRAPH_BUSINESS_DISCOVERY === "1" ? { businessDiscovery: true } : {}),
   };
 }
@@ -893,8 +895,10 @@ export class GraphProvider implements InstagramProvider {
     // 30). This guard is about more than honesty: the username is embedded in
     // the fields expression, so anything else must never reach the request
     // builder — and no such account can exist, so the answer is "not found",
-    // not "unavailable".
-    if (!/^[a-z0-9._]{1,30}$/.test(target)) {
+    // not "unavailable". The same pattern is what `igtrack doctor` checks the
+    // configured IGTRACK_GRAPH_USERNAME against, so config and runtime cannot
+    // disagree about what a valid handle looks like.
+    if (!IG_USERNAME_PATTERN.test(target)) {
       return errored(meta, {
         kind: CapabilityErrorKind.ACCOUNT_NOT_FOUND,
         message: `"${username.trim()}" is not a possible Instagram username (documented charset: letters, digits, periods, underscores; at most 30 characters) — nothing was requested.`,

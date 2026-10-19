@@ -49,6 +49,7 @@ interface StubPage {
   usernames: string[];
   complete: boolean;
   nextCursor?: string;
+  note?: string;
 }
 
 function paginatedFollowingSource(pages: StubPage[]): ExecutionSource {
@@ -115,6 +116,7 @@ function paginatedFollowingSource(pages: StubPage[]): ExecutionSource {
           observedAt: OBSERVED_AT,
           source: sourceRef,
           confidence: page.complete ? Confidence.HIGH : Confidence.MEDIUM,
+          ...(page.note !== undefined ? { note: page.note } : {}),
         },
       );
     },
@@ -147,6 +149,47 @@ function sourceWithCapability(getFollowing: boolean): ExecutionSource {
     provider: {
       ...base.provider,
       capabilities: () => ({ ...base.provider.capabilities(), getFollowing }),
+    },
+  };
+}
+
+// Cursor-driven stub for cases a fixed page list cannot express: cursor cycles,
+// a provider that echoes the cursor it was handed, and an unbounded stream of
+// fresh cursors. `calls` counts provider invocations so a test can assert the
+// loop is BOUNDED rather than merely that it eventually returned.
+function scriptedFollowingSource(
+  script: (calls: number, cursor: string | undefined) => StubPage,
+  calls: { count: number },
+): ExecutionSource {
+  const base = paginatedFollowingSource([{ usernames: [], complete: true }]);
+  return {
+    ...base,
+    provider: {
+      ...base.provider,
+      getFollowing: async (
+        _account: NormalizedAccountRef,
+        cursor?: Cursor,
+      ): Promise<CapabilityResult<NormalizedFollowPage>> => {
+        calls.count += 1;
+        const page = script(calls.count, cursor?.value);
+        return available(
+          {
+            entries: page.usernames.map((username) => ({ username })),
+            ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
+            complete: page.complete,
+            meta: {
+              category: ObservationCategory.OBSERVED,
+              confidence: page.complete ? Confidence.HIGH : Confidence.MEDIUM,
+              observedAt: OBSERVED_AT,
+            },
+          },
+          {
+            observedAt: OBSERVED_AT,
+            source: { sourceId: "stub:following", kind: SourceKind.FIXTURE },
+            confidence: page.complete ? Confidence.HIGH : Confidence.MEDIUM,
+          },
+        );
+      },
     },
   };
 }
@@ -293,6 +336,23 @@ describe.runIf(dbAvailable)("worker FOLLOWING_SCAN", () => {
       .where(sql`${evidenceTable.id} = ${rows[0]?.evidenceId}`);
     expect((ev[0]?.metadata as { completion?: string })?.completion).toBe("PARTIAL");
     expect(ev[0]?.rawHash).toBeNull();
+  });
+
+  it("stops on a repeated cursor and reports PARTIAL instead of looping", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const src = paginatedFollowingSource([
+      { usernames: ["alpha"], complete: false, nextCursor: "loop" },
+      { usernames: ["bravo"], complete: false, nextCursor: "loop" },
+    ]);
+
+    const result = await runFollowingScan(handle.db, job, src);
+
+    expect(result).toBe("succeeded-partial");
+    const rows = await followingSnapshotRows(targetId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.completeness).toBe("PARTIAL");
+    expect(await memberUsernames(targetId)).toEqual(["alpha", "bravo"]);
   });
 
   it("capability off → no rows, source health UNAVAILABLE (F3)", async () => {
@@ -448,5 +508,133 @@ describe.runIf(dbAvailable)("worker FOLLOWING_SCAN", () => {
     expect(await deltaCount(targetId, "LOST_FOLLOWING")).toBe(1);
     expect(await deltaCount(targetId, "NEW_FOLLOWER")).toBe(0);
     expect(await deltaCount(targetId, "LOST_FOLLOWER")).toBe(0);
+  });
+
+  it("stops a cursor cycle (A → B → A) as PARTIAL in a bounded number of fetches", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const calls = { count: 0 };
+    const src = scriptedFollowingSource((_n, cursor) => {
+      if (cursor === undefined) return { usernames: ["cycle_a"], complete: false, nextCursor: "A" };
+      if (cursor === "A") return { usernames: ["cycle_b"], complete: false, nextCursor: "B" };
+      return { usernames: ["cycle_c"], complete: false, nextCursor: "A" };
+    }, calls);
+
+    const result = await runFollowingScan(handle.db, job, src);
+
+    // Third fetch hands back "A", already consumed: no unseen page remains, so
+    // the scan stops rather than cycling.
+    expect(result).toBe("succeeded-partial");
+    expect(calls.count).toBe(3);
+    expect((await followingSnapshotRows(targetId))[0]?.completeness).toBe("PARTIAL");
+    expect(await memberUsernames(targetId)).toEqual(["cycle_a", "cycle_b", "cycle_c"]);
+  });
+
+  it("a resumed scan stops after one fetch when the provider echoes its own cursor", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    await saveCheckpoint(handle.db, {
+      targetId,
+      kind: "FOLLOWING_SCAN",
+      jobId: job.id,
+      cursor: "page-2",
+      page: 1,
+      progress: { cursor: "page-2", page: 1 },
+    });
+    const calls = { count: 0 };
+    const src = scriptedFollowingSource(
+      (_n, cursor) => ({
+        usernames: ["echoed"],
+        complete: false,
+        ...(cursor !== undefined ? { nextCursor: cursor } : { nextCursor: "page-2" }),
+      }),
+      calls,
+    );
+
+    const result = await runFollowingScan(handle.db, job, src);
+
+    // The resumed cursor is already in the consumed set, so the first page
+    // proves there was no progress and the scan must not fetch again.
+    expect(result).toBe("succeeded-partial");
+    expect(calls.count).toBe(1);
+    expect((await followingSnapshotRows(targetId))[0]?.completeness).toBe("PARTIAL");
+    expect(await memberUsernames(targetId)).toEqual(["echoed"]);
+  });
+
+  it("a fresh cursor on every page is stopped by the page cap, never looped", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const calls = { count: 0 };
+    const src = scriptedFollowingSource(
+      (n) => ({ usernames: [`bound_${n}`], complete: false, nextCursor: `cursor-${n}` }),
+      calls,
+    );
+
+    process.env.IGTRACK_FOLLOW_MAX_PAGES = "4";
+    let result: string;
+    try {
+      result = await runFollowingScan(handle.db, job, src);
+    } finally {
+      delete process.env.IGTRACK_FOLLOW_MAX_PAGES;
+    }
+
+    expect(result).toBe("succeeded-partial");
+    expect(calls.count).toBe(4);
+
+    const rows = await followingSnapshotRows(targetId);
+    expect(rows[0]?.completeness).toBe("PARTIAL");
+    const evidence = await handle.db
+      .select({ metadata: evidenceTable.metadata })
+      .from(evidenceTable)
+      .where(sql`${evidenceTable.id} = ${rows[0]?.evidenceId}`);
+    // The evidence names the cap, so PARTIAL states why it stopped.
+    expect(evidence[0]?.metadata).toMatchObject({ completion: "PARTIAL", pageCap: 4 });
+    // Every page actually read is kept; the unread tail is never claimed.
+    expect(await memberUsernames(targetId)).toEqual([
+      "bound_1",
+      "bound_2",
+      "bound_3",
+      "bound_4",
+    ]);
+  });
+
+  it("duplicate members across advancing pages collapse into one member row", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const src = paginatedFollowingSource([
+      { usernames: ["dupe", "one"], complete: false, nextCursor: "page-2" },
+      { usernames: ["DUPE", "two"], complete: true },
+    ]);
+
+    const result = await runFollowingScan(handle.db, job, src);
+
+    expect(result).toBe("succeeded");
+    expect((await followingSnapshotRows(targetId))[0]?.completeness).toBe("COMPLETE");
+    expect(await memberUsernames(targetId)).toEqual(["dupe", "one", "two"]);
+  });
+
+  it("carries the roster-freshness note onto the snapshot's evidence", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const freshness =
+      "Complete roster read from the operator's own Instagram export. These roster files " +
+      "record no generation timestamp, so the observation time is when igtrack read them, " +
+      "not when Instagram captured the export.";
+    const src = paginatedFollowingSource([
+      { usernames: ["fresh_one", "fresh_two"], complete: true, note: freshness },
+    ]);
+
+    await runFollowingScan(handle.db, job, src);
+
+    const rows = await followingSnapshotRows(targetId);
+    expect(rows[0]?.completeness).toBe("COMPLETE");
+    const ev = await handle.db
+      .select({ metadata: evidenceTable.metadata })
+      .from(evidenceTable)
+      .where(sql`${evidenceTable.id} = ${rows[0]?.evidenceId}`);
+    // The stored roster timestamp carries no export date anywhere, so the note
+    // that says so must survive into evidence rather than be dropped with the
+    // capability result on the floor.
+    expect((ev[0]?.metadata as { providerNote?: string })?.providerNote).toBe(freshness);
   });
 });

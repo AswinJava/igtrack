@@ -2,9 +2,10 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import { sql } from "drizzle-orm";
 import { createDb, runMigrations, seed, users } from "@igtrack/database";
+import { assessReadiness, isBlocking } from "@igtrack/ingestion";
 import { loadProjectEnv, repoRoot, redactEnvValue } from "../env.js";
 import { CliError, emit, isJson, type OutputMeta, type ParsedArgs, table } from "../output.js";
-import { opCapabilities, opDoctor, opStatus } from "../tools.js";
+import { opCapabilities, opDoctor, opStatus, type DoctorReport } from "../tools.js";
 import { createContext } from "../context.js";
 
 // ---------------------------------------------------------------------------
@@ -232,13 +233,16 @@ export const CONFIG_HELP = `igtrack config [--json]
 
 Show the effective configuration: which .env files were loaded, the resolved
 values of the core variables with credentials redacted, and whether secret
-values are set (they are never printed). .env.example documents every variable
-IGTrack reads.`;
+values are set (they are never printed). The state column is a LOCAL check
+(MISSING / PLACEHOLDER / INVALID_CONFIGURATION / NOT_VERIFIED) over the
+variables igtrack reads — it makes no API request and never prints a value,
+so "NOT_VERIFIED" is the best any credential can show here. .env.example
+documents every variable IGTrack reads.`;
 
 export const CONFIG_KEYS: Array<{ key: string; meaning: string }> = [
   { key: "DATABASE_URL", meaning: "Postgres connection (required)" },
   { key: "IGTRACK_DATABASE_URL", meaning: "Overrides DATABASE_URL" },
-  { key: "IGTRACK_PROVIDER", meaning: "fixture | graph" },
+  { key: "IGTRACK_PROVIDER", meaning: "fixture | graph | import" },
   { key: "IGTRACK_FIXTURE_VERSION", meaning: "Fixture dataset version" },
   { key: "IGTRACK_FIXTURES_DIR", meaning: "Override fixture directory" },
   { key: "IGTRACK_IMPORT_DIR", meaning: "Export directory (import provider)" },
@@ -265,9 +269,15 @@ export const CONFIG_KEYS: Array<{ key: string; meaning: string }> = [
 export async function runConfig(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
   const loaded = loadProjectEnv();
+  // Same assessment `doctor` uses, so the two commands can never disagree
+  // about whether a value is a placeholder. Names and states only — the value
+  // column stays redacted exactly as before.
+  const readiness = assessReadiness(process.env);
+  const states = new Map(readiness.variables.map((v) => [v.name, v.state]));
   const rows = CONFIG_KEYS.map(({ key, meaning }) => [
     key,
     redactEnvValue(key, process.env[key]),
+    states.get(key) ?? "not assessed",
     meaning,
   ]);
 
@@ -280,14 +290,23 @@ export async function runConfig(args: ParsedArgs): Promise<number> {
     variables: Object.fromEntries(
       CONFIG_KEYS.map(({ key }) => [key, redactEnvValue(key, process.env[key])]),
     ),
+    readiness,
   };
 
   const human = [
     `repo root   ${data.repoRoot}`,
     `cwd         ${data.cwd}`,
     `env files   ${loaded.files.length === 0 ? "(none found — using process env only)" : loaded.files.join(", ")}`,
+    `readiness   ${readiness.status}${
+      readiness.problems.length === 0
+        ? " — no problems found"
+        : ` — ${readiness.problems.length} variable(s) need attention (below)`
+    } · no API request was made (networkCallMade=${String(readiness.networkCallMade)})`,
     "",
-    table(["variable", "value", "meaning"], rows),
+    table(["variable", "value", "state", "meaning"], rows),
+    ...(readiness.problems.length === 0
+      ? []
+      : ["", "Problems (each names a variable and a fix; no values are shown):", ...readiness.problems.map((p) => `  · ${p}`)]),
   ].join("\n");
 
   emit({ json, meta: metaFor(), data, human });
@@ -299,40 +318,94 @@ export async function runConfig(args: ParsedArgs): Promise<number> {
 // the single "operate this deployment" module.
 // ---------------------------------------------------------------------------
 
+/**
+ * Doctor's exit code, computed from the report alone so the JSON envelope and
+ * the human screen cannot disagree about it.
+ *
+ * Advisory findings (a degraded source row, an unreachable database) stay
+ * non-fatal — scripts call `doctor` and a warning must not break them. A
+ * configuration that cannot run is different: an unusable provider, or a
+ * required variable that is MISSING, is the literal `PASTE_..._HERE` the
+ * example file ships with, or is structurally impossible, exits 3 — so
+ * "doctor says fine" can never describe a deployment whose credentials are
+ * still the example text.
+ */
+export function doctorExitCode(report: DoctorReport): number {
+  return isBlocking(report.env.config.status) || report.provider.error !== null ? 3 : 0;
+}
+
+/**
+ * The human screen, derived from the same `report` object the JSON envelope
+ * carries. It renders `report.env.config.variables` directly — one list, two
+ * renderings — so the two outputs cannot drift apart.
+ */
+export function renderDoctorHuman(report: DoctorReport): string {
+  const cfg = report.env.config;
+  const graphVars = cfg.variables.filter((v) => v.name.startsWith("IGTRACK_GRAPH_"));
+  const requiredGraph = graphVars.filter((v) => v.required);
+  const usableGraph = requiredGraph.filter((v) => v.state === "NOT_VERIFIED");
+  return [
+    table(
+      ["item", "value"],
+      [
+        ["provider", `${report.provider.name} (${report.provider.sourceId ?? "unusable"})`],
+        [
+          "synthetic",
+          report.provider.error !== null
+            ? "n/a — the provider is unusable, so no evidence is being described"
+            : report.provider.synthetic
+              ? "YES — synthetic fixture data, not live Instagram evidence"
+              : "no — live Graph API or the operator's own export",
+        ],
+        ["database", report.database.reachable ? "reachable" : "unreachable"],
+        ["migrations", report.database.migrationsApplied ? "applied" : "NOT applied"],
+        [
+          "config",
+          cfg.status === "NOT_APPLICABLE"
+            ? "no required variables (IGTRACK_PROVIDER unset → fixture default)"
+            : isBlocking(cfg.status)
+              ? `BLOCKED (${cfg.status}) — fix the variable(s) under "configuration readiness"`
+              : `locally valid (${cfg.status}) — no API request was made${
+                  cfg.problems.length === 0
+                    ? ""
+                    : ` · ${cfg.problems.length} optional-variable problem(s) reported below`
+                }`,
+        ],
+        [
+          "graph credentials",
+          !cfg.graphCredentialsRequired
+            ? `not consumed (IGTRACK_PROVIDER=${cfg.provider}); reported only because they are set`
+            : requiredGraph.length === 0
+              ? "none set"
+              : `${usableGraph.length}/${requiredGraph.length} required variables usable`,
+        ],
+        ["api connectivity", "NOT_VERIFIED — doctor makes no network request"],
+        ["scheduler", report.scheduler.enabled ? "enabled" : "disabled"],
+        ["source health rows", String(report.sourceHealth.length)],
+      ],
+    ),
+    "",
+    "Configuration readiness (local checks only — variable names and fixes, never values):",
+    table(
+      ["variable", "required", "state", "action"],
+      cfg.variables.map((v) => [v.name, v.required ? "required" : "optional", v.state, v.action]),
+    ),
+    "",
+    "Findings:",
+    ...(report.findings.length === 0 ? ["  (none)"] : report.findings.map((f) => `  - ${f}`)),
+    "",
+    `Capability summary: ${opCapabilities().summary.available}/${opCapabilities().summary.total} obtainable from a lawful source.`,
+    "Full registry: `igtrack capabilities`.",
+  ].join("\n");
+}
+
 export async function runDoctor(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
   const ctx = await createContext();
   try {
     const report = await opDoctor(ctx);
-    const human = [
-      table(
-        ["item", "value"],
-        [
-          ["provider", `${report.provider.name} (${report.provider.sourceId ?? "unusable"})`],
-          ["synthetic", report.provider.synthetic ? "YES — not a real observation" : "no"],
-          ["database", report.database.reachable ? "reachable" : "unreachable"],
-          ["migrations", report.database.migrationsApplied ? "applied" : "NOT applied"],
-          [
-            "graph credentials",
-            report.env.graphCredentials === "all-set"
-              ? "all three set (presence only — validity is proven by a call, not by this check)"
-              : `${report.env.graphCredentials} (needs all three to use the graph provider)`,
-          ],
-          ["scheduler", report.scheduler.enabled ? "enabled" : "disabled"],
-          ["source health rows", String(report.sourceHealth.length)],
-        ],
-      ),
-      "",
-      "Findings:",
-      ...(report.findings.length === 0 ? ["  (none)"] : report.findings.map((f) => `  - ${f}`)),
-      "",
-      `Capability summary: ${opCapabilities().summary.available}/${opCapabilities().summary.total} obtainable from a lawful source.`,
-      "Full registry: `igtrack capabilities`.",
-    ].join("\n");
-    emit({ json, meta: ctx.meta, data: report, human });
-    // Doctor is informational: findings never change the exit code — a
-    // deployment with advisory findings must not break the scripts calling it.
-    return 0;
+    emit({ json, meta: ctx.meta, data: report, human: renderDoctorHuman(report) });
+    return doctorExitCode(report);
   } finally {
     await ctx.close();
   }

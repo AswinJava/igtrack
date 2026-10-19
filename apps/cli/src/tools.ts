@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import {
   AppError,
   AppErrorCode,
   CAPABILITY_REGISTRY,
   CLAIM_PREDICATES,
+  CLAIM_REVIEW_HORIZON_DAYS,
   CapabilityErrorKind,
   CapabilityName,
   CapabilityStatus,
@@ -32,9 +34,13 @@ import {
 import {
   ACTIVITY_TYPES,
   addClaim,
+  addResearchDocument,
+  createResearchRun,
   createTarget,
   deleteOwnedTarget,
   enqueueJob,
+  findFreshFetchedDocument,
+  finishResearchRun,
   getDashboardOverview,
   getEvidenceChain,
   getOperationsSnapshot,
@@ -52,6 +58,7 @@ import {
   listJobsForTarget,
   listProviderMetrics,
   listQueueJobs,
+  listResearchRuns,
   listScopedEvidence,
   listStoredPostTexts,
   listTaggedMedia,
@@ -82,6 +89,27 @@ import {
   type ExecutionSource,
   type RunOutcome,
 } from "@igtrack/monitoring";
+import {
+  ConfigState,
+  assessReadiness,
+  isBlocking,
+  extractCandidates,
+  handleSearchQueries,
+  researchSearchProviderFromEnv,
+  ResearchFetcher,
+  type Readiness,
+  type ResearchSearchProvider,
+  type SearchResult,
+} from "@igtrack/ingestion";
+import {
+  RESEARCH_DOCUMENT_FRESH_HOURS,
+  RESEARCH_MAX_SOURCES,
+  researchFocusForQuestion,
+  researchHostPolicy,
+  type ResearchCandidate,
+  type ResearchDocumentResult,
+  type ResearchSourceType,
+} from "@igtrack/core";
 import type { TargetStatus } from "@igtrack/core";
 import type { CliContext } from "./context.js";
 import { capabilityLines, CliError, UsageError } from "./output.js";
@@ -760,6 +788,9 @@ const CAPABILITY_SURFACES: Partial<
   // FOUNDING §18: the claims ledger is written by the operator/agent, not by a
   // provider, so its surface is the claims table itself.
   ACCOUNT_RESEARCH: ["claims"],
+  // The research engine writes its run records; the claims it stores are
+  // counted under ACCOUNT_RESEARCH's own surface.
+  WEB_RESEARCH: ["researchRuns"],
 };
 
 export interface DossierCoverageRow {
@@ -882,11 +913,16 @@ export async function opDossier(
     (e) => e.id === RegistryCapabilityId.OTHER_ACCOUNT_PUBLIC,
   );
   const isObserved = (entry: (typeof CAPABILITY_REGISTRY)[number]): boolean =>
-    entry.operatorSupplied === true
-      ? true // supplied by the operator in every mode (FOUNDING §18)
-      : mode === "DISCOVERY"
-        ? entry.providerMethods.includes(CapabilityName.DISCOVER_ACCOUNT)
-        : entry.providerMethods.some((m) => m !== CapabilityName.DISCOVER_ACCOUNT);
+    // The research engine is refused for a DISCOVERY target at enqueue and at
+    // execute (D47): its availability is mode-dependent in a way no provider
+    // method expresses.
+    entry.engineSupplied === true
+      ? mode === "OWNED"
+      : entry.operatorSupplied === true
+        ? true // supplied by the operator in every mode (FOUNDING §18)
+        : mode === "DISCOVERY"
+          ? entry.providerMethods.includes(CapabilityName.DISCOVER_ACCOUNT)
+          : entry.providerMethods.some((m) => m !== CapabilityName.DISCOVER_ACCOUNT);
 
   const boundedStatement =
     dossier.media !== null && dossier.media.previewBounded === true
@@ -930,11 +966,13 @@ export async function opDossier(
     } else if (!isObserved(entry)) {
       state = "UNAVAILABLE";
       reason =
-        mode === "DISCOVERY"
-          ? `A DISCOVERY target is read through the documented route only, and that route covers: ${
-              discoveryEntry?.label ?? "another account's public profile and recent media"
-            }. This capability belongs to the owned-account edges.`
-          : "No owned-account route for this capability in the configured provider.";
+        entry.engineSupplied === true
+          ? "An autonomous research run is refused for a DISCOVERY target (D47): a run is an owned-account operation. The lawful other-account route is the documented Business Discovery edge (`lookup`, or `targets add --observed`)."
+          : mode === "DISCOVERY"
+            ? `A DISCOVERY target is read through the documented route only, and that route covers: ${
+                discoveryEntry?.label ?? "another account's public profile and recent media"
+              }. This capability belongs to the owned-account edges.`
+            : "No owned-account route for this capability in the configured provider.";
     } else if (!hasWriter) {
       state = "UNAVAILABLE";
       reason =
@@ -942,11 +980,13 @@ export async function opDossier(
     } else {
       state = "NOT_OBSERVED";
       reason =
-        entry.operatorSupplied === true
-          ? "No claims recorded yet: a claim exists only when a source states it and the operator or their agent submits it (`igtrack claims add`). IGTrack never generates claims, so an empty ledger is the honest state, not a gap."
-          : mode === "DISCOVERY"
-            ? "Not observed yet: no scan through the documented route has stored rows for this capability."
-            : "Not observed yet: no scan has stored rows for this capability. A scan can still run.";
+        entry.engineSupplied === true
+          ? "No research run recorded yet: a run happens only when the operator asks (`igtrack research <target> --run --question \"...\"`), bounded to 10 sources at depth 1. IGTrack never researches on its own, so an empty run list is the honest state, not a gap."
+          : entry.operatorSupplied === true
+            ? "No claims recorded yet: a claim exists only when a source states it and the operator or their agent submits it (`igtrack claims add`). IGTrack never generates claims, so an empty ledger is the honest state, not a gap."
+            : mode === "DISCOVERY"
+              ? "Not observed yet: no scan through the documented route has stored rows for this capability."
+              : "Not observed yet: no scan has stored rows for this capability. A scan can still run.";
     }
 
     return {
@@ -1299,11 +1339,16 @@ export interface DoctorReport {
   };
   env: {
     databaseUrl: "set" | "unset";
-    // Presence only. Presence is NOT validity: a wrong or expired token still
-    // reads as "all-set" here, and shows up as a DEGRADED source-health row on
-    // the provider's next call. No heuristic ever guesses whether a credential
-    // is real.
-    graphCredentials: "all-set" | "partial" | "none";
+    /**
+     * Local configuration readiness for every variable this deployment
+     * depends on. Replaces the old presence-only `graphCredentials` triple,
+     * which reported three literal `PASTE_..._HERE` markers as "all-set".
+     *
+     * It is a statement about the ENVIRONMENT and nothing else:
+     * `networkCallMade` is always false, and a clean assessment reads
+     * NOT_VERIFIED — never "valid", never "connected".
+     */
+    config: Readiness;
     nodeEnv: string;
     production: boolean;
     fixtureInProduction: boolean;
@@ -1329,13 +1374,10 @@ export interface DoctorReport {
 
 export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
   const production = process.env.NODE_ENV === "production";
-  const graphVars = [
-    process.env.IGTRACK_GRAPH_ACCESS_TOKEN,
-    process.env.IGTRACK_GRAPH_IG_USER_ID,
-    process.env.IGTRACK_GRAPH_USERNAME,
-  ].filter((v) => v !== undefined && v !== "");
-  const graphCredentials =
-    graphVars.length === 0 ? "none" : graphVars.length === 3 ? "all-set" : "partial";
+  // Local, value-free, network-free. This is what "are the credentials set?"
+  // should always have meant: presence, placeholder shape and basic structure,
+  // with the answer recorded as NOT_VERIFIED until an API call proves more.
+  const config = assessReadiness(process.env);
 
   let sourceHealth: DoctorReport["sourceHealth"] = [];
   let metrics: DoctorReport["metrics"] = [];
@@ -1368,6 +1410,21 @@ export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
   const findings: string[] = [];
   if (ctx.provider.error !== null) {
     findings.push(`Provider is not usable: ${ctx.provider.error}`);
+  } else if (config.problems.length > 0) {
+    // The provider started (or a different provider is selected), so the
+    // individual problems are the report. Each line names a variable and the
+    // corrective action; none of them contains a value.
+    findings.push(...config.problems.map((p) => `Configuration: ${p}`));
+  }
+  if (config.graphCredentialsRequired && config.status === ConfigState.NOT_VERIFIED) {
+    findings.push(
+      "Graph credentials pass every local check. Connectivity is NOT_VERIFIED: `igtrack doctor` makes no API request, so nothing on this screen proves the token is accepted — run `igtrack lookup <username>` for that.",
+    );
+  }
+  if (ctx.provider.error === null && ctx.provider.synthetic) {
+    findings.push(
+      "SYNTHETIC EVIDENCE: the fixture provider is active. Every account, count, story, media row and delta this deployment holds is generated fixture data — not live Instagram evidence. No real account was ever contacted, and a fixture-backed report never describes a real account.",
+    );
   }
   if (!database.reachable) {
     findings.push("Database is unreachable. Start Postgres and re-run `igtrack setup`.");
@@ -1377,13 +1434,6 @@ export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
   if (production && ctx.provider.synthetic) {
     findings.push(
       "This deployment is running NODE_ENV=production on synthetic fixture data. Every payload is marked _meta.synthetic=true.",
-    );
-  }
-  // Credential findings only matter for the provider that consumes them.
-  if (ctx.provider.name === "graph" && graphCredentials !== "all-set") {
-    findings.push(
-      "The graph provider is selected but its credentials are " +
-        `${graphCredentials}. It needs IGTRACK_GRAPH_ACCESS_TOKEN, IGTRACK_GRAPH_IG_USER_ID and IGTRACK_GRAPH_USERNAME together.`,
     );
   }
   for (const h of sourceHealth.filter((row) => row.status !== "HEALTHY")) {
@@ -1416,7 +1466,7 @@ export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
         process.env.IGTRACK_DATABASE_URL !== undefined || process.env.DATABASE_URL !== undefined
           ? "set"
           : "unset",
-      graphCredentials,
+      config,
       nodeEnv: process.env.NODE_ENV ?? "development",
       production,
       fixtureInProduction: production && ctx.provider.synthetic,
@@ -1438,7 +1488,23 @@ export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
 
 export interface LookupResult {
   username: string;
+  /** The provider that answered: fixture | graph | import. */
+  provider: string;
   sourceId: string;
+  /**
+   * Where that provider reads from. "local" means a file on disk (fixture set
+   * or an operator-supplied export) and the answer is synthetic or imported,
+   * never an Instagram response; "remote-api" means the Instagram Graph API
+   * path. This is the single row that tells a reader whether an
+   * ACCOUNT_NOT_FOUND means "not in my data" or "Instagram said no".
+   */
+  sourceKind: "local" | "remote-api";
+  /**
+   * Whether the Business Discovery opt-in is on for the graph provider — the
+   * one switch that decides whether a cross-account request can be issued at
+   * all. Null when another provider is active, where it does not apply.
+   */
+  businessDiscovery: "on" | "off" | null;
   /**
    * Which route answered. "resolve" = the account this deployment observes;
    * "discovery" = the documented Business Discovery probe of another account
@@ -1452,17 +1518,86 @@ export interface LookupResult {
   account: unknown;
   note: string | null;
   error: { kind: string; message: string; retryable: boolean } | null;
+  /**
+   * One value-free sentence: what this answer means, what was asked for, and
+   * what was not attempted. Always consistent with `status` + `error.kind`.
+   */
+  why: string;
+}
+
+function sourceKindOf(sourceId: string): "local" | "remote-api" {
+  return sourceId.startsWith("fixture") || sourceId.startsWith("import")
+    ? "local"
+    : "remote-api";
+}
+
+/**
+ * Translate status + error kind into the sentence an operator actually needs.
+ * Uses the existing capability-status and CapabilityErrorKind conventions —
+ * no new taxonomy — and never quotes a credential or an upstream payload.
+ */
+function explainLookup(
+  kind: "local" | "remote-api",
+  sourceId: string,
+  via: LookupResult["via"],
+  status: string,
+  error: { kind: string; message: string } | null,
+  note: string | null,
+): string {
+  if (status === CapabilityStatus.AVAILABLE) {
+    return via === "discovery"
+      ? "Observed through the documented Business Discovery edge: profile fields plus a bounded recent-media preview — not the account's full history, and not its rosters, likers or highlights."
+      : kind === "local"
+        ? "Answered from the local data set — synthetic fixture rows or an operator-supplied export, not an Instagram response."
+        : "Observed from the Instagram Graph API.";
+  }
+  if (status === CapabilityStatus.PARTIAL) {
+    return `Partial answer: ${note ?? "some fields came back, others did not"}. Partial data is stored as partial and is never diffed against a complete snapshot.`;
+  }
+  if (status === CapabilityStatus.UNAVAILABLE) {
+    return `No source exposes this: ${note ?? "the source has no route to the requested data"}. It is reported as absent rather than as an empty or zero answer.`;
+  }
+  const kindOfError = error?.kind ?? CapabilityErrorKind.UNKNOWN;
+  switch (kindOfError) {
+    case CapabilityErrorKind.ACCOUNT_NOT_FOUND:
+      return kind === "local"
+        ? `Not present in the local data set (${sourceId}). That source never contacts Instagram, so this is not evidence that the account does not exist — it is evidence that this deployment has no rows for it.`
+        : "The provider could not resolve this account through its documented route.";
+    case CapabilityErrorKind.AUTH_REQUIRED:
+    case CapabilityErrorKind.FORBIDDEN:
+      return `The remote provider refused the request (${kindOfError}). No data was returned, and retrying will not change the answer until the credential or its permissions do.`;
+    case CapabilityErrorKind.ACCOUNT_PRIVATE:
+      return "The account is not reachable through the documented route (private or otherwise not surfaced), reported with the platform's reason instead of an empty profile.";
+    case CapabilityErrorKind.RATE_LIMITED:
+      return "Rate limited by the provider. Retryable — no partial result was recorded.";
+    case CapabilityErrorKind.NETWORK:
+    case CapabilityErrorKind.TIMEOUT:
+    case CapabilityErrorKind.PROVIDER_ERROR:
+      return `Transport failure (${kindOfError}) before any data was read. Retryable; nothing was persisted.`;
+    default:
+      return `The provider returned an error (${kindOfError}) instead of data. Nothing was persisted.`;
+  }
 }
 
 function asLookupResult(
   username: string,
+  providerName: string,
   sourceId: string,
+  businessDiscovery: "on" | "off" | null,
   via: LookupResult["via"],
   result: CapabilityResult<unknown>,
 ): LookupResult {
+  const error =
+    result.error === undefined
+      ? null
+      : { kind: result.error.kind, message: result.error.message, retryable: result.error.retryable };
+  const sourceKind = sourceKindOf(sourceId);
   return {
     username,
+    provider: providerName,
     sourceId,
+    sourceKind,
+    businessDiscovery,
     via,
     status: result.status,
     confidence:
@@ -1473,14 +1608,8 @@ function asLookupResult(
         ? result.data
         : null,
     note: result.note ?? null,
-    error:
-      result.error === undefined
-        ? null
-        : {
-            kind: result.error.kind,
-            message: result.error.message,
-            retryable: result.error.retryable,
-          },
+    error,
+    why: explainLookup(sourceKind, sourceId, via, result.status, error, result.note ?? null),
   };
 }
 
@@ -1492,12 +1621,24 @@ export async function opLookup(
   if (username === "") throw new UsageError("lookup requires a username.");
   const provider = input.provider ?? ctx.provider.provider;
   if (provider === null) {
+    // Configuration failed before any request could be built. The message
+    // already names the offending variables and their corrective actions (see
+    // graphConfigBlocker) — it never contains a credential value.
     throw new CliError(
       "PROVIDER_UNAVAILABLE",
-      `Provider "${ctx.provider.name}" is not usable: ${ctx.provider.error ?? "unknown reason"}`,
+      `Lookup made no request: provider "${ctx.provider.name}" is not usable. ${ctx.provider.error ?? "unknown reason"} Nothing was asked of any source.`,
       3,
     );
   }
+  // Read the opt-in from the same environment the provider was built from, so
+  // this row cannot claim a discovery request that the provider is refusing to
+  // issue. Absent for local sources, where the switch does not exist.
+  const businessDiscovery: "on" | "off" | null =
+    ctx.provider.name === "graph"
+      ? (process.env.IGTRACK_GRAPH_BUSINESS_DISCOVERY ?? "") === "1"
+        ? "on"
+        : "off"
+      : null;
   const resolved: CapabilityResult<unknown> = await provider.resolveAccount(username);
   const notOwned =
     resolved.status === CapabilityStatus.ERROR &&
@@ -1508,9 +1649,9 @@ export async function opLookup(
     // strictly better answer than "this provider does not observe @you". When
     // the route is switched off, the probe's refusal names the unlock.
     const probe = await provider.discoverAccount(username);
-    return asLookupResult(username, provider.sourceId, "discovery", probe);
+    return asLookupResult(username, ctx.provider.name, provider.sourceId, businessDiscovery, "discovery", probe);
   }
-  return asLookupResult(username, provider.sourceId, "resolve", resolved);
+  return asLookupResult(username, ctx.provider.name, provider.sourceId, businessDiscovery, "resolve", resolved);
 }
 
 // ---------------------------------------------------------------------------
@@ -2015,6 +2156,30 @@ export interface ResearchResult {
   };
   coverage: DossierCoverageRow[];
   routeUnavailability: DossierResult["routeUnavailability"];
+  /** Recent autonomous research runs over public web sources (D69). */
+  researchRuns: {
+    state: "OBSERVED" | "UNAVAILABLE";
+    reason: string | null;
+    note: string;
+    runs: Array<{
+      id: string;
+      question: string;
+      focusIntent: string;
+      status: string;
+      startedAt: string;
+      finishedAt: string;
+      maxSources: number;
+      documentsPlanned: number;
+      documentsFetched: number;
+      documentsFailed: number;
+      candidatesFound: number;
+      claimsStored: number;
+      claimsDuplicate: number;
+      claimsRefused: number;
+      searchProvider: string | null;
+      searchUnavailableReason: string | null;
+    }>;
+  };
   notes: string[];
 }
 
@@ -2290,6 +2455,49 @@ export async function opResearch(
     "Claims and platform observations are reported in separate sections and are never blended; a claim is a sourced finding, not an observation.",
   );
 
+  // --- Autonomous research runs (D69): what the ENGINE attempted over
+  // public web sources, including refusals and failures. Reported beside
+  // the claims it produced, never merged into them.
+  const runRows = await listResearchRuns(ctx.db, {
+    userId: ctx.userId,
+    targetId: dossier.target.id,
+    limit: 10,
+  });
+  const researchRuns =
+    runRows.length === 0
+      ? {
+          state: "UNAVAILABLE" as const,
+          reason: "No autonomous research run has been recorded for this account yet.",
+          note: "Run one with `igtrack research <target> --run --question \"...\"`, or keep submitting claims directly (igtrack claims add).",
+          runs: [],
+        }
+      : {
+          state: "OBSERVED" as const,
+          reason: null,
+          note:
+            "Each run records the question, the enforced bounds (≤10 sources, depth 1) and every per-document outcome — " +
+            "including fetch refusals and failures, which are findings. Claims extracted by a run live in the CLAIMS " +
+            "section above, still validated by the same predicate registry.",
+          runs: runRows.map((row) => ({
+            id: row.id,
+            question: row.question,
+            focusIntent: row.focusIntent,
+            status: row.status,
+            startedAt: row.startedAt.toISOString(),
+            finishedAt: row.finishedAt.toISOString(),
+            maxSources: row.maxSources,
+            documentsPlanned: row.documentsPlanned,
+            documentsFetched: row.documentsFetched,
+            documentsFailed: row.documentsFailed,
+            candidatesFound: row.candidatesFound,
+            claimsStored: row.claimsStored,
+            claimsDuplicate: row.claimsDuplicate,
+            claimsRefused: row.claimsRefused,
+            searchProvider: row.searchProvider,
+            searchUnavailableReason: row.searchUnavailableReason,
+          })),
+        };
+
   return {
     computedAt: computedAt.toISOString(),
     target: dossier.target,
@@ -2319,6 +2527,7 @@ export async function opResearch(
     connections,
     coverage: dossier.coverage,
     routeUnavailability: dossier.routeUnavailability,
+    researchRuns,
     notes,
   };
 }
@@ -2653,3 +2862,2111 @@ function parseSinceDate(raw: string | undefined, now: Date = new Date()): Date |
 }
 
 export { SCAN_KINDS };
+
+// ---------------------------------------------------------------------------
+// opResearchRun — the acquisition engine (FOUNDING §19, D69).
+//
+// This is the one place the product reaches outside itself, and it reaches
+// only where the operator has already reached: a public URL they named, or a
+// page a configured search provider returned as a CANDIDATE. Everything about
+// the path is deliberately constraining.
+//
+//   bounds are enforced, not documented    ≤RESEARCH_MAX_SOURCES documents,
+//                                          depth 1 (links on a fetched page
+//                                          are counted, never followed);
+//   the network is hostile by default      every URL goes through the SSRF
+//                                          gate (policy host list, DNS check
+//                                          against private/loopback/link-
+//                                          local/metadata, robots.txt, per-
+//                                          document byte/timeout caps, and
+//                                          re-validation of EVERY redirect
+//                                          hop) in ResearchFetcher;
+//   extraction cannot become inference    the extractor reads four fixed
+//                                          field families (JSON-LD, meta,
+//                                          mailto, profile links) and never
+//                                          parses prose — so text on a page
+//                                          is structurally inert against
+//                                          prompt injection;
+//   storage cannot bypass the ledger      every candidate is re-validated
+//                                          through classifyClaimPredicate,
+//                                          validateClaimValue and
+//                                          validateClaimExcerpt, and stored
+//                                          by addClaim — the same functions
+//                                          `igtrack claims add` uses, so a
+//                                          refused predicate stays refused
+//                                          however the value arrived;
+//   failure is reported, never hidden     every document's outcome, every
+//                                          duplicate and every refusal is
+//                                          counted onto the run record and
+//                                          shown in the report.
+//
+// The engine is synchronous and bounded: ≤10 documents × 10s timeout. A
+// research run is a foreground operation the operator asked for, not a
+// background job — the job queue stays what it was (platform scans), and the
+// CLI never blocks on a queue it did not create.
+// ---------------------------------------------------------------------------
+
+export interface ResearchRunInput {
+  target: string;
+  question: string;
+  /** Public URLs the operator names explicitly. Highest trust tier. */
+  urls?: readonly string[];
+  /** Cap on documents fetched this run (1..RESEARCH_MAX_SOURCES). */
+  maxSources?: number;
+  /** Ignore the freshness window and refetch everything. */
+  refresh?: boolean;
+}
+
+export interface ResearchRunResult {
+  runId: string;
+  target: DossierResult["target"];
+  question: string;
+  focus: { intent: string; priorities: string[]; rationale: string };
+  bounds: {
+    maxSources: number;
+    maxDepth: number;
+    enforced: string;
+    documentsTruncated: number;
+  };
+  search: {
+    provider: string | null;
+    queries: string[];
+    unavailableReason: string | null;
+    candidateUrls: number;
+  };
+  documents: ResearchDocumentResult[];
+  totals: {
+    planned: number;
+    fetched: number;
+    reused: number;
+    failed: number;
+    candidates: number;
+    claimsStored: number;
+    claimsDuplicate: number;
+    claimsRefused: number;
+  };
+  claims: ClaimView[];
+  status: "COMPLETED" | "COMPLETED_PARTIAL" | "FAILED";
+  notes: string[];
+}
+
+/** Strip the fragment: two URLs differing only in #fragment are one page. */
+function normalizeResearchUrl(raw: string): string | null {
+  const validated = validateClaimSourceUrl(raw);
+  if (!validated.ok) return null;
+  try {
+    const url = new URL(validated.url);
+    url.hash = "";
+    // Canonical form so the same page reached through a tracking link and
+    // through its clean URL counts ONCE: query parameters that only identify
+    // a campaign are dropped, the host is lowercased, and a trailing slash
+    // (a different path in the strict sense, the same page in practice) is
+    // removed. Every other parameter is kept — a parameter that carries data
+    // (an article id, a locale) would change which page is fetched.
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(utm_.+|fbclid|gclid|igsh|igshid|ref|mc_cid|mc_eid|mkt_tok|yclid)$/i.test(key)) {
+        url.searchParams.delete(key);
+      }
+    }
+    if (url.searchParams.toString() === "") url.search = "";
+    url.hostname = url.hostname.toLowerCase();
+    if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
+      url.pathname = url.pathname.slice(0, -1);
+    }
+    return url.toString();
+  } catch {
+    return validated.url;
+  }
+}
+
+export async function opResearchRun(
+  ctx: CliContext,
+  input: ResearchRunInput,
+  // Structural subset, not the concrete class: the engine only ever calls
+  // fetchPage(), and a scripted double with that one method is how the test
+  // matrix exercises the full path without sockets.
+  deps: { fetcher?: Pick<ResearchFetcher, "fetchPage"> } = {},
+): Promise<ResearchRunResult> {
+  const question = input.question.trim();
+  if (question === "") {
+    throw new UsageError(
+      "A research run needs a --question: what are we trying to find out about this account?",
+    );
+  }
+  const dossier = await opDossier(ctx, { target: input.target });
+  if (dossier.target.observationMode === "DISCOVERY") {
+    // Discovery targets are observed through the Business Discovery probe.
+    // Running an autonomous web run against a name the operator has not
+    // owned would blur the ownership line D47 draws; the operator can still
+    // submit claims for a discovery target, just not commission a run.
+    throw new CliError(
+      "RESEARCH_RUN_NOT_APPLICABLE",
+      "Autonomous research runs apply to OWNED targets. A DISCOVERY target is another public account observed " +
+        "through the Business Discovery probe; record what you learn as claims (igtrack claims add) instead.",
+      2,
+    );
+  }
+
+  const maxSources = Math.min(
+    Math.max(input.maxSources ?? RESEARCH_MAX_SOURCES, 1),
+    RESEARCH_MAX_SOURCES,
+  );
+  const focus = researchFocusForQuestion(question);
+  const fetcher = deps.fetcher ?? new ResearchFetcher();
+  const startedAt = new Date();
+
+  // --- Source plan: operator URLs first, then search candidates, then
+  // previously-cited claim sources (re-checking our own citations is the
+  // cheapest honest source there is).
+  const operatorUrls: string[] = [];
+  const rejectedOperatorUrls: Array<{ url: string; reason: string }> = [];
+  for (const raw of input.urls ?? []) {
+    const normalized = normalizeResearchUrl(raw);
+    if (normalized === null) {
+      rejectedOperatorUrls.push({
+        url: raw,
+        reason: `"${raw}" is not an absolute http(s) URL; it was not planned.`,
+      });
+    } else {
+      operatorUrls.push(normalized);
+    }
+  }
+
+  let searchProviderName: string | null = null;
+  let searchQueries: string[] = [];
+  let searchUnavailableReason: string | null = null;
+  const searchCandidateUrls: string[] = [];
+  {
+    const { researchSearchProviderFromEnv } = await import("@igtrack/ingestion");
+    const provider = researchSearchProviderFromEnv();
+    searchProviderName = provider.name === "none" ? null : provider.name;
+    // Queries come from the focus, not from the raw question: one per
+    // priority predicate, plus the account name. Deterministic and small.
+    const account = dossier.target.username;
+    searchQueries = [
+      `"${account}" organization`,
+      `"${account}" about contact`,
+    ].slice(0, 2);
+    for (const query of searchQueries) {
+      const outcome = await provider.search(query, 5);
+      if (outcome.unavailableReason !== null && searchUnavailableReason === null) {
+        searchUnavailableReason = outcome.unavailableReason;
+      }
+      for (const result of outcome.results) {
+        const normalized = normalizeResearchUrl(result.url);
+        if (normalized !== null) searchCandidateUrls.push(normalized);
+      }
+    }
+  }
+
+  // Previously-cited claim sources for this target: re-reading our own
+  // citations costs nothing new and keeps runs honest about drift.
+  const priorClaimUrls = (
+    await listClaims(ctx.db, { userId: ctx.userId, targetId: dossier.target.id })
+  )
+    .map((row) => (row.sourceUrl === null ? null : normalizeResearchUrl(row.sourceUrl)))
+    .filter((url): url is string => url !== null);
+
+  const deduped: Array<{ url: string; sourceType: ResearchDocumentResult["sourceType"] }> = [];
+  const seenUrls = new Set<string>();
+  const pushUrl = (url: string, sourceType: ResearchDocumentResult["sourceType"]): void => {
+    if (seenUrls.has(url)) return;
+    seenUrls.add(url);
+    deduped.push({ url, sourceType });
+  };
+  for (const url of operatorUrls) pushUrl(url, "OPERATOR_SUPPLIED_URL");
+  for (const url of searchCandidateUrls) pushUrl(url, "SEARCH_RESULT");
+  for (const url of priorClaimUrls) pushUrl(url, "OPERATOR_SUPPLIED_URL");
+
+  const planned = deduped.slice(0, maxSources);
+  const documentsTruncated = Math.max(deduped.length - planned.length, 0);
+
+  // --- The run record exists BEFORE the first fetch: a run that dies
+  // mid-flight still leaves evidence of what it attempted.
+  const run = await createResearchRun(ctx.db, {
+    userId: ctx.userId,
+    targetId: dossier.target.id,
+    question,
+    focusIntent: focus.intent,
+    focusPriorities: focus.priorities,
+    focusRationale: focus.rationale,
+    maxSources,
+    maxDepth: 1,
+    searchProvider: searchProviderName,
+    searchQueries,
+    searchUnavailableReason,
+    operatorUrlCount: operatorUrls.length,
+    boundsTruncated: documentsTruncated,
+    startedAt,
+  });
+
+  const notes: string[] = [];
+  if (rejectedOperatorUrls.length > 0) {
+    for (const rejected of rejectedOperatorUrls) {
+      notes.push(`Not planned: ${rejected.reason}`);
+    }
+  }
+  if (documentsTruncated > 0) {
+    notes.push(
+      `${documentsTruncated} candidate URL(s) were NOT fetched: this run is capped at ${maxSources} documents ` +
+        "(FOUNDING §19 bounds). Re-run with --max-sources or narrower question to cover them.",
+    );
+  }
+  if (searchUnavailableReason !== null) {
+    notes.push(searchUnavailableReason);
+  }
+
+  const documents: ResearchDocumentResult[] = [];
+  const freshSince = new Date(Date.now() - RESEARCH_DOCUMENT_FRESH_HOURS * 3600 * 1000);
+  const claimViews: ClaimView[] = [];
+  let fetched = 0;
+  let reused = 0;
+  let failed = 0;
+  let candidatesTotal = 0;
+  let claimsStored = 0;
+  let claimsDuplicate = 0;
+  let claimsRefused = 0;
+  const now = new Date();
+
+  for (const plannedDoc of planned) {
+    // Freshness reuse: a FETCHED document for this URL inside the window is
+    // read back, not refetched. Reuse is reported as REUSED — the operator
+    // sees which evidence is old, never a silent substitution.
+    const fresh =
+      input.refresh === true
+        ? null
+        : await findFreshFetchedDocument(ctx.db, {
+            userId: ctx.userId,
+            url: plannedDoc.url,
+            since: freshSince,
+          });
+
+    if (fresh !== null && fresh.title !== null && fresh.byteSize !== null) {
+      reused += 1;
+      const result: ResearchDocumentResult = {
+        url: plannedDoc.url,
+        outcome: "REUSED",
+        outcomeReason: `Fetched ${fresh.retrievedAt?.toISOString() ?? "previously"} (inside the ${RESEARCH_DOCUMENT_FRESH_HOURS}h freshness window); pass --refresh to refetch.`,
+        httpStatus: fresh.httpStatus,
+        title: fresh.title,
+        contentType: fresh.contentType,
+        byteSize: fresh.byteSize,
+        contentSha256: fresh.contentSha256,
+        retrievedAt: fresh.retrievedAt?.toISOString() ?? null,
+        sourceType: plannedDoc.sourceType,
+        candidatesFound: fresh.candidatesFound,
+        linksNotFollowed: 0,
+      };
+      documents.push(result);
+      await addResearchDocument(ctx.db, {
+        runId: run.id,
+        userId: ctx.userId,
+        url: plannedDoc.url,
+        sourceType: plannedDoc.sourceType,
+        outcome: "REUSED",
+        outcomeReason: result.outcomeReason,
+        httpStatus: fresh.httpStatus,
+        title: fresh.title,
+        contentType: fresh.contentType,
+        byteSize: fresh.byteSize,
+        contentSha256: fresh.contentSha256,
+        retrievedAt: fresh.retrievedAt,
+        candidatesFound: fresh.candidatesFound,
+        linksNotFollowed: 0,
+      });
+      continue;
+    }
+
+    const response = await fetcher.fetchPage(plannedDoc.url);
+    if (!response.ok) {
+      failed += 1;
+      const outcome = RESEARCH_FETCH_OUTCOMES[response.kind] ?? "FAILED";
+      const result: ResearchDocumentResult = {
+        url: plannedDoc.url,
+        outcome,
+        outcomeReason: response.reason,
+        httpStatus: response.httpStatus,
+        title: null,
+        contentType: null,
+        byteSize: null,
+        contentSha256: null,
+        retrievedAt: null,
+        sourceType: plannedDoc.sourceType,
+        candidatesFound: 0,
+        linksNotFollowed: 0,
+      };
+      documents.push(result);
+      await addResearchDocument(ctx.db, {
+        runId: run.id,
+        userId: ctx.userId,
+        url: plannedDoc.url,
+        sourceType: plannedDoc.sourceType,
+        outcome,
+        outcomeReason: response.reason,
+        httpStatus: response.httpStatus,
+        title: null,
+        contentType: null,
+        byteSize: null,
+        contentSha256: null,
+        retrievedAt: null,
+        candidatesFound: 0,
+        linksNotFollowed: 0,
+      });
+      continue;
+    }
+
+    fetched += 1;
+    const extracted = extractCandidates(response.body);
+    // Depth-1 bound: count the links we deliberately did not follow, so the
+    // run says out loud what it chose not to do.
+    const linksNotFollowed = (response.body.match(/<a\s[^>]*href/gi) ?? []).length;
+    candidatesTotal += extracted.candidates.length;
+
+    const contentSha256 = createHash("sha256")
+      .update(response.body, "utf8")
+      .digest("hex");
+
+    // --- Validation gate: the SAME path `igtrack claims add` uses. The
+    // extractor proposes; the ledger disposes.
+    let stored = 0;
+    let duplicates = 0;
+    let refused = 0;
+    for (const candidate of extracted.candidates as ResearchCandidate[]) {
+      const classified = classifyClaimPredicate(candidate.predicate);
+      if (classified.kind !== "ALLOWED") {
+        refused += 1;
+        continue;
+      }
+      const value = validateClaimValue(candidate.value);
+      if (!value.ok) {
+        refused += 1;
+        continue;
+      }
+      const excerpt = validateClaimExcerpt(candidate.excerpt);
+      if (!excerpt.ok) {
+        refused += 1;
+        continue;
+      }
+      try {
+        const record = await addClaim(ctx.db, {
+          userId: ctx.userId,
+          targetId: dossier.target.id,
+          predicate: classified.predicate,
+          value: normalizeClaimValue(value.value),
+          sourceKind: "WEB",
+          sourceUrl: response.finalUrl,
+          sourceTitle: extracted.title,
+          excerpt: excerpt.excerpt,
+          statedAt: null,
+          retrievedAt: response.fetchedAt,
+          researchRunId: run.id,
+        });
+        stored += 1;
+        claimViews.push(toClaimView(record, null, now));
+      } catch (err) {
+        if (err instanceof AppError && err.code === AppErrorCode.CONFLICT) {
+          duplicates += 1;
+          continue;
+        }
+        throw err;
+      }
+    }
+    claimsStored += stored;
+    claimsDuplicate += duplicates;
+    claimsRefused += refused;
+
+    const result: ResearchDocumentResult = {
+      url: response.finalUrl,
+      outcome: "FETCHED",
+      outcomeReason:
+        linksNotFollowed > 0
+          ? `${linksNotFollowed} link(s) on this page were NOT followed (depth-1 bound).`
+          : null,
+      httpStatus: response.httpStatus,
+      title: extracted.title,
+      contentType: response.contentType,
+      byteSize: response.byteSize,
+      contentSha256,
+      retrievedAt: response.fetchedAt.toISOString(),
+      sourceType: plannedDoc.sourceType,
+      candidatesFound: extracted.candidates.length,
+      linksNotFollowed,
+    };
+    documents.push(result);
+    await addResearchDocument(ctx.db, {
+      runId: run.id,
+      userId: ctx.userId,
+      url: response.finalUrl,
+      sourceType: plannedDoc.sourceType,
+      outcome: "FETCHED",
+      outcomeReason: result.outcomeReason,
+      httpStatus: response.httpStatus,
+      title: extracted.title,
+      contentType: response.contentType,
+      byteSize: response.byteSize,
+      contentSha256,
+      retrievedAt: response.fetchedAt,
+      candidatesFound: extracted.candidates.length,
+      linksNotFollowed,
+    });
+  }
+
+  const status: ResearchRunResult["status"] =
+    failed === 0 && documentsTruncated === 0
+      ? "COMPLETED"
+      : fetched > 0 || reused > 0
+        ? "COMPLETED_PARTIAL"
+        : planned.length === 0
+          ? "COMPLETED"
+          : "FAILED";
+
+  await finishResearchRun(ctx.db, {
+    runId: run.id,
+    userId: ctx.userId,
+    status,
+    documentsPlanned: planned.length,
+    documentsFetched: fetched + reused,
+    documentsFailed: failed,
+    candidatesFound: candidatesTotal,
+    claimsStored,
+    claimsDuplicate,
+    claimsRefused,
+    finishedAt: new Date(),
+  });
+
+  if (claimsDuplicate > 0) {
+    notes.push(
+      `${claimsDuplicate} candidate(s) were already recorded and were not re-stored: re-submitting the same finding ` +
+        "is not corroboration.",
+    );
+  }
+  if (claimsRefused > 0) {
+    notes.push(
+      `${claimsRefused} candidate(s) were refused by the claim predicate registry before storage — a refusal is a ` +
+        "boundary, not a bug (FOUNDING §14/§18).",
+    );
+  }
+  if (planned.length === 0 && searchUnavailableReason !== null) {
+    notes.push(
+      "No sources were available to this run. Configure a search provider or pass --url to name public pages " +
+        "directly; the engine will not invent sources.",
+    );
+  }
+  notes.push(
+    "Extracted claims are stored with their source URL, page title, excerpt and SHA-256; they appear in the claims " +
+      "section of `igtrack research` and are never presented as platform observations.",
+  );
+
+  return {
+    runId: run.id,
+    target: dossier.target,
+    question,
+    focus: { intent: focus.intent, priorities: focus.priorities, rationale: focus.rationale },
+    bounds: {
+      maxSources,
+      maxDepth: 1,
+      enforced: `${planned.length} document(s) planned of ${deduped.length} candidate(s); depth 1 — links on fetched pages are counted, never followed.`,
+      documentsTruncated,
+    },
+    search: {
+      provider: searchProviderName,
+      queries: searchQueries,
+      unavailableReason: searchUnavailableReason,
+      candidateUrls: searchCandidateUrls.length,
+    },
+    documents,
+    totals: {
+      planned: planned.length,
+      fetched,
+      reused,
+      failed,
+      candidates: candidatesTotal,
+      claimsStored,
+      claimsDuplicate,
+      claimsRefused,
+    },
+    claims: claimViews,
+    status,
+    notes,
+  };
+}
+
+/**
+ * One vocabulary for "the fetch did not produce a document", shared by the
+ * acquisition run (D69) and the audit's public-web probe (D70): two surfaces
+ * must not describe the same refusal with two different words.
+ */
+const RESEARCH_FETCH_OUTCOMES: Record<string, ResearchDocumentResult["outcome"]> = {
+  UNSAFE_URL: "UNSAFE_URL",
+  BLOCKED_BY_POLICY: "BLOCKED_BY_POLICY",
+  BLOCKED_BY_ROBOTS: "BLOCKED_BY_ROBOTS",
+  BLOCKED_CONTENT_TYPE: "BLOCKED_CONTENT_TYPE",
+  TOO_LARGE: "TOO_LARGE",
+  TIMEOUT: "TIMEOUT",
+  NOT_FOUND: "NOT_FOUND",
+  RATE_LIMITED: "RATE_LIMITED",
+  NETWORK_ERROR: "FAILED",
+};
+
+// ---------------------------------------------------------------------------
+/**
+ * Does `text` contain `handle` (case-insensitively) as a DELIMITED token —
+ * not as an inner fragment?
+ *
+ * Phase-3 measurement (SOURCE-AUDIT §11): substring matching let the
+ * near-miss handle `nasaa` match inside `nasaa_research`, and it is how
+ * `nasa` would match "nasal" or a three-letter handle match "said". Letters,
+ * digits and underscore are handle characters (IG handles are [a-z0-9._]), so
+ * a match touching either side of them belongs to a LONGER handle-like token
+ * and is a different string. Hyphen and period are delimiters: `nasa.gov`
+ * and `natgeo-breaks` still name the handle. Deliberate residual: a longer
+ * dot-joined handle (`other.name` containing `name`) still matches — periods
+ * must stay delimiters or every domain form stops matching, which would be a
+ * genuine false rejection.
+ */
+export function handleMentioned(text: string, handle: string): boolean {
+  const needle = handle.toLowerCase();
+  if (needle === "") return false;
+  const haystack = text.toLowerCase();
+  const isHandleChar = (ch: string): boolean => /[a-z0-9_]/.test(ch);
+  let at = haystack.indexOf(needle);
+  while (at !== -1) {
+    const before = at > 0 ? haystack[at - 1] : undefined;
+    const after = at + needle.length < haystack.length ? haystack[at + needle.length] : undefined;
+    if (
+      (before === undefined || !isHandleChar(before)) &&
+      (after === undefined || !isHandleChar(after))
+    ) {
+      return true;
+    }
+    at = haystack.indexOf(needle, at + 1);
+  }
+  return false;
+}
+
+// opAuditWebProbe — the public-web phase of the audit (FOUNDING §19, D70).
+//
+// The founder's question is about an ARBITRARY username, so the workflow may
+// not require a tracked (let alone owned) target before it may read public
+// pages that name the handle. This probe is:
+//
+//   read-only by construction — it takes no database handle, so it cannot
+//     store, register, queue or mutate anything;
+//   bounded — the same compile-time bounds as an acquisition run, at the
+//     audit's smaller default document ceiling;
+//   gated — the same URL gate, robots check, content-type allowlist, byte cap
+//     and timeout, so an instagram.com URL is refused here exactly as an
+//     acquisition run refuses it: platform data has one lawful route;
+//   evidence-honouring — every fact carries its source URL, page title, field,
+//     extraction method and retrieval time, and is labelled a THIRD-PARTY
+//     STATEMENT about the handle, never a platform observation about an
+//     account;
+//   inference-free — the extractor reads fixed structured fields only, the
+//     closed predicate registry disposes, and `inferences` is a statement of
+//     that absence rather than a confidence number the product cannot earn.
+// ---------------------------------------------------------------------------
+
+/** Default document ceiling for one audit's web phase (a probe, not a run). */
+export const AUDIT_WEB_MAX_SOURCES = 5;
+
+export interface AuditWebDocument {
+  url: string;
+  outcome: ResearchDocumentResult["outcome"];
+  outcomeReason: string | null;
+  httpStatus: number | null;
+  title: string | null;
+  contentType: string | null;
+  byteSize: number | null;
+  contentSha256: string | null;
+  retrievedAt: string | null;
+  sourceType: ResearchSourceType;
+  /**
+   * Whether the RETRIEVED page (final URL, title or body) names the exact
+   * handle. null = not observed (the fetch failed), never false: absence of a
+   * read is not a reading that said no.
+   */
+  mentionsHandle: boolean | null;
+  /** Structured-field facts this document contributed. */
+  facts: number;
+  /** Candidates this document proposed that the predicate registry refused. */
+  refused: number;
+  /** Structured values discarded because the page never named the handle. */
+  discarded: number;
+  /**
+   * Structured values this page DID name the handle for, but which were not
+   * attributed: on a machine-found page the statement itself did not involve
+   * the handle (its value and the page's host both name the source, not the
+   * account). Counted, never silently dropped.
+   */
+  unattributed: number;
+  linksNotFollowed: number;
+}
+
+/** A fact a public page STATES in a structured field — a third-party statement. */
+export interface AuditWebFact {
+  predicate: string;
+  value: string;
+  excerpt: string;
+  /** The exact structured field the value came from, e.g. `ld+json Organization.name`. */
+  field: string;
+  method: string;
+  /** Provenance class. Always the strongest the engine has: a documented field. */
+  provenance: "PUBLIC_WEB_DOCUMENTED";
+  sourceUrl: string;
+  sourceTitle: string | null;
+  sourceDomain: string | null;
+  retrievedAt: string | null;
+  /** A link-based fact asserts association, never account ownership. */
+  uncertainty: string | null;
+}
+
+export interface AuditWebRelation {
+  predicate: string;
+  /** Derived from the facts below; a conflict shows BOTH values and picks no winner. */
+  label: string;
+  values: string[];
+  sourceDomains: string[];
+  facts: number;
+}
+
+/**
+ * Did a SEARCH actually happen, and what did it answer? The four states are
+ * the difference between "we never asked", "we asked and found nothing" and
+ * "we asked and the source could not answer" — a zero-search run may never be
+ * presented as an investigation (FOUNDING §19, D73).
+ */
+export type AuditSearchState =
+  /** No provider configured (unset / none / a selected provider with no key). */
+  | "SEARCH_NOT_CONFIGURED"
+  /** The provider answered and returned at least one candidate URL. */
+  | "SEARCH_SUCCEEDED"
+  /** The provider answered and genuinely returned no results. */
+  | "SEARCH_NO_RESULTS"
+  /** The provider could not answer: transport error, quota, bad credential, upstream failure. */
+  | "SEARCH_FAILED";
+
+/**
+ * Retrieval outcome, in the repository's own run-status vocabulary
+ * (COMPLETED / COMPLETED_PARTIAL / FAILED): a partial pass is PARTIAL, never
+ * "nothing found", and a pass where every document failed is FAILED.
+ */
+export type AuditRetrievalState =
+  | "NOT_ATTEMPTED"
+  | "COMPLETED"
+  | "COMPLETED_PARTIAL"
+  | "FAILED";
+
+/**
+ * WHERE the public-web phase stopped, as one label (Phase 2). The six
+ * sparse-result situations an operator must be able to tell apart: no source
+ * was configured, the source could not answer, the source answered with zero
+ * candidates, candidates existed but none could be read, pages were read but
+ * none name the handle, relevant pages named it but nothing extractable
+ * survived the predicate registry, or evidence was actually extracted. A
+ * "zero facts" headline is never one of these by itself — it always arrives
+ * with the one below.
+ */
+export type AuditWebOutcomeClass =
+  /** No search provider configured and no --url given: nothing could be asked. */
+  | "SEARCH_UNAVAILABLE"
+  /** A provider was selected but could not answer (transport, quota, credential). */
+  | "SEARCH_FAILED"
+  /** Search ran and genuinely returned no candidates. */
+  | "SEARCH_NO_CANDIDATES"
+  /** Candidates existed, but no page could be read (all failed or were skipped). */
+  | "CANDIDATES_INACCESSIBLE"
+  /** Pages were fetched, but none names the exact handle — poor coverage, not a verdict. */
+  | "PAGES_IRRELEVANT"
+  /** Pages naming the handle were fetched, but no candidate survived extraction/validation. */
+  | "RELEVANT_NO_FACTS"
+  /** At least one third-party statement about the handle was extracted with its citation. */
+  | "EVIDENCE_EXTRACTED";
+
+/** One search candidate's fate: why it ranked and whether it was ever read. */
+export interface AuditWebCandidate {
+  url: string;
+  disposition: "PLANNED" | "SKIPPED_BY_POLICY" | "NOT_FETCHED";
+  reason: string;
+}
+
+export interface AuditWebReport {
+  attempted: boolean;
+  /** Whether any source — operator URL or search provider — existed to plan. */
+  sourcesAvailable: boolean;
+  search: {
+    provider: string | null;
+    /** What the SEARCH step did — never conflated with what retrieval found. */
+    state: AuditSearchState;
+    queries: string[];
+    /** Per-query result count and error: exactly what each question returned. */
+    perQuery: Array<{ query: string; results: number; error: string | null }>;
+    candidateUrls: number;
+    /** Candidates whose own result summary (url/title/snippet) names the handle. */
+    relevantCandidates: number;
+    unavailableReason: string | null;
+    /** Provider-side caveat about coverage (e.g. a degraded fallback index). */
+    note: string | null;
+  };
+  /** What RETRIEVAL did with the plan, in run-status vocabulary. */
+  retrievalState: AuditRetrievalState;
+  /** Where the phase stopped, as one deterministic label — see the type's doc. */
+  outcomeClass: AuditWebOutcomeClass;
+  bounds: {
+    maxSources: number;
+    maxDepth: number;
+    enforced: string;
+    documentsTruncated: number;
+  };
+  /** Every search candidate with its ranking reason and fate (bounded by the query budget). */
+  candidates: AuditWebCandidate[];
+  documents: AuditWebDocument[];
+  facts: AuditWebFact[];
+  relations: AuditWebRelation[];
+  /** URLs the operator named that could not even be planned, with the reason. */
+  rejectedUrls: Array<{ url: string; reason: string }>;
+  totals: {
+    planned: number;
+    fetched: number;
+    /** Real failures: a request that was made and did not deliver a page. */
+    failed: number;
+    /** Structural refusals (policy) — never attempted, never counted as failed. */
+    skipped: number;
+    /** Fetched pages that name the exact handle in URL, title or body. */
+    pagesNamingHandle: number;
+    facts: number;
+    refused: number;
+    /** Values from machine-found pages that did not involve the handle (self-identification). */
+    unattributed: number;
+  };
+  /**
+   * Deliberately a statement, not a list: this product derives no inference
+   * from public-web text and stores no model output as evidence. Anything
+   * beyond what the sources state is the operator's judgement, labelled as
+   * theirs.
+   */
+  inferences: string;
+  /** One value-free sentence: what ran, what did not, and why. */
+  why: string;
+  notes: string[];
+}
+
+/**
+ * One read-only pass over the public web for one handle. No `ctx`: without a
+ * database handle this function cannot write, which is what makes the audit's
+ * "wrote no row" promise structural rather than a convention.
+ */
+export async function opAuditWebProbe(
+  input: { username: string; urls?: readonly string[]; maxSources?: number },
+  deps: {
+    fetcher?: Pick<ResearchFetcher, "fetchPage">;
+    search?: ResearchSearchProvider;
+  } = {},
+): Promise<AuditWebReport> {
+  const username = input.username;
+  const maxSources = Math.min(
+    Math.max(input.maxSources ?? AUDIT_WEB_MAX_SOURCES, 1),
+    RESEARCH_MAX_SOURCES,
+  );
+
+  // --- Source plan: operator-named pages first, then search candidates.
+  const operatorUrls: string[] = [];
+  const rejectedUrls: Array<{ url: string; reason: string }> = [];
+  for (const raw of input.urls ?? []) {
+    const normalized = normalizeResearchUrl(raw);
+    if (normalized === null) {
+      rejectedUrls.push({
+        url: raw,
+        reason: `"${raw}" is not an absolute http(s) URL with a citable host; it was not planned.`,
+      });
+    } else {
+      operatorUrls.push(normalized);
+    }
+  }
+
+  const search = deps.search ?? researchSearchProviderFromEnv();
+  // Deterministic queries, derived from the handle — never from page text
+  // (D74). `handleSearchQueries` owns the variants and the budget, so the
+  // questions a probe asks are one testable value, not inline string building.
+  const queries = handleSearchQueries(username);
+  // Relevance is decided on one token: the exact handle, case-insensitively.
+  // It is used twice — to ORDER candidates (mention-first, so the document
+  // budget goes to pages that name the handle) and to GATE claims below (a
+  // retrieved page that never names the handle contributes no fact about it).
+  const handle = username.toLowerCase();
+  // Delimiter-aware (handleMentioned): relevance must be a token match — an
+  // inner fragment of a longer word or handle names something else entirely.
+  const namesHandle = (haystack: string): boolean => handleMentioned(haystack, handle);
+
+  const candidates = new Map<string, SearchResult>();
+  const perQuery: Array<{ query: string; results: number; error: string | null }> = [];
+  let searchUnavailableReason: string | null = null;
+  let searchNote: string | null = null;
+  for (const query of queries) {
+    const outcome = await search.search(query, 5);
+    perQuery.push({ query, results: outcome.results.length, error: outcome.error });
+    if (outcome.unavailableReason !== null && searchUnavailableReason === null) {
+      searchUnavailableReason = outcome.unavailableReason;
+    }
+    if (outcome.error !== null && searchUnavailableReason === null) {
+      searchUnavailableReason = `Search failed: ${outcome.error}`;
+    }
+    if (outcome.note !== undefined && searchNote === null) searchNote = outcome.note;
+    for (const result of outcome.results) {
+      const normalized = normalizeResearchUrl(result.url);
+      if (normalized !== null && !candidates.has(normalized)) candidates.set(normalized, result);
+    }
+  }
+  const searchCandidateUrls = [...candidates.keys()];
+  const summaryOf = ([url, result]: [string, SearchResult]): string =>
+    `${url} ${result.title ?? ""} ${result.snippet ?? ""}`;
+  // A candidate the fetch gate would refuse by policy (an Instagram-family
+  // host) can never contribute a fact, so it must not consume the document
+  // budget ahead of a page that could actually be read.
+  const policyAllows = (url: string): boolean => {
+    try {
+      return researchHostPolicy(new URL(url).hostname).allowed;
+    } catch {
+      return false;
+    }
+  };
+  const policyRefusedCandidates = searchCandidateUrls.filter((url) => !policyAllows(url));
+  // Explainable relevance signal, strongest first: the exact handle appearing
+  // in the result URL, then its title, then its snippet. A snippet can be
+  // truncated or stale, so it ranks below title and URL but still above a
+  // result that matches nothing — nothing readable is dropped before it is
+  // read, while a policy-refused host (rank -1) never wins a slot from any
+  // readable page. The sort is stable, so equal signals keep provider order.
+  const signalOf = (entry: [string, SearchResult]): number => {
+    if (!policyAllows(entry[0])) return -1;
+    if (namesHandle(entry[0])) return 3;
+    if (entry[1].title !== null && namesHandle(entry[1].title)) return 2;
+    if (entry[1].snippet !== null && namesHandle(entry[1].snippet)) return 1;
+    return 0;
+  };
+  const orderedCandidates = [...candidates.entries()].sort((a, b) => signalOf(b) - signalOf(a));
+  const relevantCandidates = orderedCandidates.filter((entry) => namesHandle(summaryOf(entry))).length;
+
+  const searchState: AuditSearchState =
+    search.name === "none"
+      ? "SEARCH_NOT_CONFIGURED"
+      : candidates.size > 0
+        ? "SEARCH_SUCCEEDED"
+        : searchUnavailableReason !== null
+          ? "SEARCH_FAILED"
+          : "SEARCH_NO_RESULTS";
+
+  const planned: Array<{ url: string; sourceType: ResearchSourceType }> = [];
+  const seenUrls = new Set<string>();
+  const pushUrl = (url: string, sourceType: ResearchSourceType): void => {
+    if (seenUrls.has(url)) return;
+    seenUrls.add(url);
+    planned.push({ url, sourceType });
+  };
+  for (const url of operatorUrls) pushUrl(url, "OPERATOR_SUPPLIED_URL");
+  for (const [url] of orderedCandidates) pushUrl(url, "SEARCH_RESULT");
+  const documentsTruncated = Math.max(planned.length - maxSources, 0);
+  const boundedPlan = planned.slice(0, maxSources);
+  // One explainable row per search candidate: WHY it ranked where it did and
+  // WHAT happened to it. This is the sparse-result report's evidence that
+  // candidate selection was deliberate — bounded by the query budget (≤4
+  // queries × 5 results), so the list can never grow into an irrelevant-URL
+  // dump standing in for intelligence.
+  const boundedUrls = new Set(boundedPlan.map((entry) => entry.url));
+  const signalWhy = (entry: [string, SearchResult]): string => {
+    if (namesHandle(entry[0])) return "its result URL names the exact handle";
+    if (entry[1].title !== null && namesHandle(entry[1].title))
+      return "its result title names the exact handle";
+    if (entry[1].snippet !== null && namesHandle(entry[1].snippet))
+      return "its result snippet names the exact handle (a snippet can be stale — the fetched page still has to name it)";
+    return "no exact-handle match in its url/title/snippet; kept only because the document budget had room";
+  };
+  const candidateRows: AuditWebCandidate[] = orderedCandidates.map((entry) => {
+    const [url] = entry;
+    if (!policyAllows(url)) {
+      return {
+        url,
+        disposition: "SKIPPED_BY_POLICY",
+        reason:
+          "Instagram-family host — the fetch gate refuses it by policy (FOUNDING §14), so it is recorded as " +
+          "skipped, never attempted, and can never take a slot from a readable page.",
+      };
+    }
+    if (boundedUrls.has(url)) {
+      return { url, disposition: "PLANNED", reason: signalWhy(entry) };
+    }
+    return {
+      url,
+      disposition: "NOT_FETCHED",
+      reason: `outside the document budget (cap ${maxSources}); it stays a candidate, not a read page.`,
+    };
+  });
+
+  const fetcher = deps.fetcher ?? new ResearchFetcher();
+  const documents: AuditWebDocument[] = [];
+  const facts: AuditWebFact[] = [];
+  const notes: string[] = [...rejectedUrls.map((r) => `Not planned: ${r.reason}`)];
+  let refusedTotal = 0;
+  let unattributedTotal = 0;
+  let candidatesTotal = 0;
+  let fetched = 0;
+  let failed = 0;
+  let skipped = 0;
+  let gatedDocuments = 0;
+  let discardedTotal = 0;
+
+  for (const plannedDoc of boundedPlan) {
+    const response = await fetcher.fetchPage(plannedDoc.url);
+    if (!response.ok) {
+      const outcomeKind = RESEARCH_FETCH_OUTCOMES[response.kind] ?? "FAILED";
+      // A policy refusal is a STRUCTURAL fact (the host can never be read
+      // here), not a failed attempt: it is counted as skipped, so one
+      // Instagram URL in the plan can never turn a clean pass into retrieval
+      // FAILED. Anything else that did not come back is a real failure.
+      if (outcomeKind === "BLOCKED_BY_POLICY") skipped += 1;
+      else failed += 1;
+      documents.push({
+        url: plannedDoc.url,
+        outcome: outcomeKind,
+        outcomeReason: response.reason,
+        httpStatus: response.httpStatus,
+        title: null,
+        contentType: null,
+        byteSize: null,
+        contentSha256: null,
+        retrievedAt: null,
+        sourceType: plannedDoc.sourceType,
+        // Never observed — the page was not read, so "does not mention the
+        // handle" would be a claim about a document we never saw.
+        mentionsHandle: null,
+        facts: 0,
+        refused: 0,
+        discarded: 0,
+        unattributed: 0,
+        linksNotFollowed: 0,
+      });
+      continue;
+    }
+
+    fetched += 1;
+    const extracted = extractCandidates(response.body);
+    const linksNotFollowed = (response.body.match(/<a\s[^>]*href/gi) ?? []).length;
+    const pageMentionsHandle = namesHandle(
+      `${response.finalUrl}\n${extracted.title ?? ""}\n${response.body}`,
+    );
+    // Relevance gate: a SEARCH candidate becomes a statement about the handle
+    // only if the retrieved page itself names the handle. A search hit is a
+    // machine suggestion (and its snippet may be truncated or stale), so a page
+    // that never names the account cannot have been "found" for it — reporting
+    // its fields as third-party statements about @handle is exactly the
+    // inference this product refuses. An OPERATOR-NAMED page bypasses the gate:
+    // the operator asserted its relevance by naming it.
+    const gated = plannedDoc.sourceType === "SEARCH_RESULT" && !pageMentionsHandle;
+    if (gated) {
+      gatedDocuments += 1;
+      discardedTotal += extracted.candidates.length;
+      documents.push({
+        url: response.finalUrl,
+        outcome: "FETCHED",
+        outcomeReason: [
+          `Relevance gate: this page does not name @${username} in its URL, title or body, so its ${
+            extracted.candidates.length
+          } structured value(s) were discarded — a search hit is a candidate, never a statement about the handle.`,
+          linksNotFollowed > 0
+            ? `${linksNotFollowed} link(s) on this page were NOT followed (depth-1 bound).`
+            : null,
+        ]
+          .filter((part): part is string => part !== null)
+          .join(" "),
+        httpStatus: response.httpStatus,
+        title: extracted.title,
+        contentType: response.contentType,
+        byteSize: response.byteSize,
+        contentSha256: createHash("sha256").update(response.body, "utf8").digest("hex"),
+        retrievedAt: response.fetchedAt.toISOString(),
+        sourceType: plannedDoc.sourceType,
+        mentionsHandle: false,
+        facts: 0,
+        refused: 0,
+        discarded: extracted.candidates.length,
+        unattributed: 0,
+        linksNotFollowed,
+      });
+      continue;
+    }
+
+    let refused = 0;
+    let unattributed = 0;
+    // Self-identification: on a MACHINE-FOUND page, a stored statement must
+    // literally involve the handle — its value names the handle as a token,
+    // or the page's own host does. A third-party article ABOUT the account
+    // also describes its SOURCE (og:site_name "WeRSM", the publisher's own
+    // social links, the publisher's contact address): those are facts about
+    // the source, and attributing them to @handle is the identity inference
+    // this product refuses — measured on the natgeo case (SOURCE-AUDIT §11),
+    // where 6 of 24 stored facts named the wrong entity. The asymmetry with
+    // the mention gate above is deliberate: operator-named pages bypass BOTH
+    // checks, because the operator asserted relevance by naming the page.
+    let pageHost = "";
+    try {
+      pageHost = new URL(response.finalUrl).hostname;
+    } catch {
+      pageHost = response.finalUrl;
+    }
+    for (const candidate of extracted.candidates as ResearchCandidate[]) {
+      // The SAME gate an acquisition run and `claims add` use: the extractor
+      // proposes, the closed predicate registry disposes.
+      const classified = classifyClaimPredicate(candidate.predicate);
+      if (classified.kind !== "ALLOWED") {
+        refused += 1;
+        continue;
+      }
+      const value = validateClaimValue(candidate.value);
+      if (!value.ok) {
+        refused += 1;
+        continue;
+      }
+      const excerpt = validateClaimExcerpt(candidate.excerpt);
+      if (!excerpt.ok) {
+        refused += 1;
+        continue;
+      }
+      if (
+        plannedDoc.sourceType === "SEARCH_RESULT" &&
+        !namesHandle(value.value) &&
+        !namesHandle(pageHost)
+      ) {
+        unattributed += 1;
+        continue;
+      }
+      facts.push({
+        predicate: classified.predicate,
+        value: value.value,
+        excerpt: excerpt.excerpt,
+        field: candidate.field,
+        method: candidate.method,
+        provenance: "PUBLIC_WEB_DOCUMENTED",
+        sourceUrl: response.finalUrl,
+        sourceTitle: extracted.title,
+        sourceDomain: claimSourceDomain(response.finalUrl),
+        retrievedAt: response.fetchedAt.toISOString(),
+        uncertainty: candidate.uncertainty ?? null,
+      });
+    }
+    refusedTotal += refused;
+    unattributedTotal += unattributed;
+    candidatesTotal += extracted.candidates.length;
+    documents.push({
+      url: response.finalUrl,
+      outcome: "FETCHED",
+      outcomeReason:
+        [
+          linksNotFollowed > 0
+            ? `${linksNotFollowed} link(s) on this page were NOT followed (depth-1 bound).`
+            : null,
+          unattributed > 0
+            ? `${unattributed} structured value(s) on this page do NOT involve @${username} ` +
+              "(they name the source page, not the account) and were not attributed."
+            : null,
+        ]
+          .filter((part): part is string => part !== null)
+          .join(" ") || null,
+      httpStatus: response.httpStatus,
+      title: extracted.title,
+      contentType: response.contentType,
+      byteSize: response.byteSize,
+      contentSha256: createHash("sha256").update(response.body, "utf8").digest("hex"),
+      retrievedAt: response.fetchedAt.toISOString(),
+      sourceType: plannedDoc.sourceType,
+      mentionsHandle: pageMentionsHandle,
+      facts: extracted.candidates.length - refused - unattributed,
+      refused,
+      discarded: 0,
+      unattributed,
+      linksNotFollowed,
+    });
+  }
+
+  // --- Corroboration and contradiction, derived from the facts themselves.
+  // Same derivation as the claims ledger: one value from ≥2 distinct domains
+  // is CORROBORATED; differing normalized values are CONFLICTED and show BOTH
+  // sides — no winner is chosen and no numeric confidence is invented.
+  const byPredicate = new Map<string, AuditWebFact[]>();
+  for (const fact of facts) {
+    const bucket = byPredicate.get(fact.predicate);
+    if (bucket === undefined) byPredicate.set(fact.predicate, [fact]);
+    else bucket.push(fact);
+  }
+  const relations: AuditWebRelation[] = [...byPredicate.entries()]
+    .map(([predicate, group]) => {
+      const relation: ClaimRelation = deriveClaimRelation(
+        group.map((fact) => ({
+          value: fact.value,
+          sourceKind: "WEB" as const,
+          sourceUrl: fact.sourceUrl,
+        })),
+      );
+      const domains = new Set(
+        group.map((fact) => fact.sourceDomain ?? fact.sourceUrl).filter(Boolean),
+      );
+      // A CONFLICT means INDEPENDENT SOURCES disagree. One page asserting three
+      // different social URLs is three separate statements from one source, not
+      // a contradiction — a live probe of a real site labelled its own LinkedIn,
+      // X and YouTube links "CONFLICTED" before this correction, which would
+      // have told an operator that sources contradict each other when none do.
+      // The differing values still show below; the label just stops lying.
+      const label =
+        relation.label === "CONFLICTED" && domains.size < 2 ? "SINGLE_SOURCE" : relation.label;
+      return {
+        predicate,
+        label: label as string,
+        values: [...new Set(group.map((fact) => normalizeClaimValue(fact.value)))].sort(),
+        sourceDomains: relation.sourceDomains,
+        facts: group.length,
+      };
+    })
+    .sort((a, b) => a.predicate.localeCompare(b.predicate));
+
+  const sourcesAvailable = boundedPlan.length > 0;
+  const attempted = sourcesAvailable;
+  if (documentsTruncated > 0) {
+    notes.push(
+      `${documentsTruncated} candidate URL(s) were NOT fetched: this probe is capped at ${maxSources} document(s) ` +
+        "(FOUNDING §19 bounds). A wider pass is `igtrack research --run`, which stores what it reads.",
+    );
+  }
+  if (gatedDocuments > 0) {
+    notes.push(
+      `${gatedDocuments} retrieved page(s) never named @${username} in their URL, title or body, so their ` +
+        `${discardedTotal} structured value(s) were discarded: a search hit is a candidate, never a statement ` +
+        "about the handle.",
+    );
+  }
+  if (unattributedTotal > 0) {
+    notes.push(
+      `${unattributedTotal} structured value(s) from machine-found pages were NOT attributed: the page named ` +
+        `@${username}, but the value itself and the page's own host both describe the SOURCE page, not the ` +
+        "account. Operator-named pages (--url) bypass this check, because the operator asserted their relevance.",
+    );
+  }
+  if (searchCandidateUrls.length > 0 && relevantCandidates === 0) {
+    notes.push(
+      `0 of ${searchCandidateUrls.length} search candidate(s) named ${username} in its result summary ` +
+        "(url/title/snippet), so mention-first ordering had nothing to prioritize; any page that is fetched " +
+        "still has to name the handle itself to contribute a fact.",
+    );
+  }
+  if (policyRefusedCandidates.length > 0) {
+    notes.push(
+      `${policyRefusedCandidates.length} of ${searchCandidateUrls.length} search candidate(s) point at ` +
+        "Instagram-family hosts the fetch gate refuses by policy, so they were ordered last, recorded SKIPPED and " +
+        "never requested: platform data has one lawful route (FOUNDING §14).",
+    );
+  }
+  if (skipped > 0) {
+    notes.push(
+      `${skipped} planned document(s) were refused by policy before any request was made (BLOCKED_BY_POLICY): a ` +
+        "structural limitation of this route, not a network failure — it is counted as skipped, never as a failed fetch.",
+    );
+  }
+  if (searchNote !== null) notes.push(`Search provider note: ${searchNote}`);
+  if (searchUnavailableReason !== null && searchState === "SEARCH_SUCCEEDED") {
+    // Partial search: some queries answered, another did not.
+    notes.push(`Search was only partly usable: ${searchUnavailableReason}`);
+  }
+  if (search.name !== "none") {
+    // Sparse results must say WHICH classes of source were never consulted, so
+    // an operator can tell "poor coverage of one index" apart from "no public
+    // evidence exists" — without this, a zero reads like a verdict.
+    notes.push(
+      `Source classes not searched here: platform-private data (likers, other accounts' rosters, highlights, ` +
+        `stories) is refused by decision (FOUNDING §14); Instagram-hosted pages cannot be fetched by policy; and ` +
+        `exactly ONE web index was queried (${search.name}) — a different index may hold pages this one does not.`,
+    );
+  }
+
+  const retrievalState: AuditRetrievalState =
+    boundedPlan.length === 0
+      ? "NOT_ATTEMPTED"
+      : failed > 0 && fetched === 0
+        ? "FAILED"
+        : failed > 0 || skipped > 0 || documentsTruncated > 0
+          ? "COMPLETED_PARTIAL"
+          : "COMPLETED";
+
+  // One label for WHERE the run stopped, so a sparse report answers "did we
+  // even ask, did pages come back, were they about this handle, or did the
+  // extractor simply find nothing allowed?" without the operator counting
+  // fields. Deterministic from the counts above — never from interpretation.
+  const pagesNamingHandle = documents.filter((doc) => doc.mentionsHandle === true).length;
+  const outcomeClass: AuditWebOutcomeClass = !attempted
+    ? searchState === "SEARCH_NOT_CONFIGURED"
+      ? "SEARCH_UNAVAILABLE"
+      : searchState === "SEARCH_FAILED"
+        ? "SEARCH_FAILED"
+        : "SEARCH_NO_CANDIDATES"
+    : facts.length > 0
+      ? "EVIDENCE_EXTRACTED"
+      : fetched === 0
+        ? "CANDIDATES_INACCESSIBLE"
+        : gatedDocuments > 0 && gatedDocuments >= fetched
+          ? "PAGES_IRRELEVANT"
+          : "RELEVANT_NO_FACTS";
+
+  const searchWhy =
+    searchState === "SEARCH_NOT_CONFIGURED"
+      ? (searchUnavailableReason ?? "no search provider is configured")
+      : searchState === "SEARCH_NO_RESULTS"
+        ? `the configured search provider (${search.name}) answered all ${queries.length} query(ies) with zero results`
+        : searchState === "SEARCH_FAILED"
+          ? (searchUnavailableReason ?? `the configured search provider (${search.name}) could not answer`)
+          : `${searchCandidateUrls.length} candidate URL(s) came back from ${search.name}`;
+
+  const why = attempted
+    ? `Planned ${boundedPlan.length} public document(s) from ${
+        operatorUrls.length
+      } operator-named URL(s) and ${searchCandidateUrls.length} search candidate(s) (search: ${searchState}, ` +
+      `retrieval: ${retrievalState}), depth 1, capped at ${maxSources}. Nothing was stored: every fact below is a ` +
+      "third-party statement retrieved at the time shown, not a platform observation about the account."
+    : `No public-web source was available to plan: ${
+        (input.urls ?? []).length === 0
+          ? "no --url was given"
+          : "no --url survived normalization"
+      }, and ${searchWhy}. The probe fetches pages a source named; it never invents candidate sources.`;
+
+  return {
+    attempted,
+    sourcesAvailable,
+    search: {
+      provider: search.name === "none" ? null : search.name,
+      state: searchState,
+      queries,
+      perQuery,
+      candidateUrls: searchCandidateUrls.length,
+      relevantCandidates,
+      unavailableReason: searchUnavailableReason,
+      note: searchNote,
+    },
+    retrievalState,
+    outcomeClass,
+    bounds: {
+      maxSources,
+      maxDepth: 1,
+      enforced: `${boundedPlan.length} document(s) planned of ${planned.length} candidate(s); depth 1 — links on fetched pages are counted, never followed; Instagram-family hosts are refused by policy.`,
+      documentsTruncated,
+    },
+    candidates: candidateRows,
+    documents,
+    facts,
+    relations,
+    rejectedUrls,
+    totals: {
+      planned: boundedPlan.length,
+      fetched,
+      failed,
+      skipped,
+      pagesNamingHandle,
+      facts: facts.length,
+      refused: refusedTotal,
+      unattributed: unattributedTotal,
+    },
+    inferences:
+      "None. This product derives no inference from public-web text and stores no model output as evidence: what a source states is recorded with its citation, and what it does not state stays unknown. A handle appearing on a page is that page's statement, never proof that a particular person or organization operates the account.",
+    why,
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// audit — one read-only command that unifies the observation workflow.
+//
+// `igtrack audit <username>` answers, in one report and in this order:
+//   1. can this deployment observe the account at all? (local configuration,
+//      decided without spending a request);
+//   2. what does the source say right now? (ONE lookup probe — the same
+//      stateless probe `igtrack lookup` runs);
+//   3. what has already been recorded about it? (the stored read-back behind
+//      `dossier`/`research`, plus the scan/job state behind `plan`);
+//   4. what can never be observed, and why (the capability registry's
+//      refusals — platform-absent, not unimplemented);
+//   5. what to do next.
+//
+// It is read-only by construction and the workflow it unifies is REUSED, not
+// re-implemented: `opLookup`, `opResearch`, `opPlan`. It queues no scan, writes
+// no row, and never registers a target — so a failed or inconclusive probe
+// cannot leave this deployment claiming to observe something it never saw.
+//
+// Two rules the report exists to protect:
+//   * a probe that answers ACCOUNT_NOT_FOUND (or fails) is NOT evidence that
+//     the account does not exist — it is a statement about one source, and the
+//     sentence that says so travels in the payload;
+//   * configuration is checked before anything is observed, and a blocked
+//     configuration is reported as CONFIGURATION_ERROR (exit 3), never as an
+//     empty result.
+// ---------------------------------------------------------------------------
+
+export type AuditConfigState =
+  /** The selected provider cannot run: unknown name, missing or placeholder credentials. */
+  | "CONFIGURATION_ERROR"
+  /** Credentials pass every local check; only an accepted API call can prove more. */
+  | "NOT_VERIFIED"
+  /** No credential this deployment consumes (fixture default, or the import export path). */
+  | "NOT_APPLICABLE";
+
+export type AuditProbeState =
+  /** The source returned data for this account (a probe, not a stored claim). */
+  | "OBSERVED"
+  | "PARTIAL"
+  /** The source holds nothing for the account. Local sources: a data-set gap, not a platform verdict. */
+  | "NOT_OBSERVED"
+  /** No route exposes it to this deployment (private, consumer account, capability absent). */
+  | "UNSUPPORTED"
+  /** The route refused it: missing permission, or an account we are not authorized to read. */
+  | "NOT_AUTHORIZED"
+  /** Transport/provider failure before any data was read. Retryable unless stated otherwise. */
+  | "PROVIDER_ERROR"
+  /** Not attempted: the configuration blocked the probe before any request could be built. */
+  | "NOT_ATTEMPTED";
+
+export type AuditRecordState =
+  /** The account is tracked AND stored rows exist for it. */
+  | "OBSERVED"
+  /** Nothing is stored: either untracked, or tracked with no scan rows yet. */
+  | "NOT_OBSERVED";
+
+export interface AuditReport {
+  generatedAt: string;
+  /** Exactly what was passed in, before normalization. */
+  requested: string;
+  /** The normalized username every section below is about. */
+  username: string;
+  /** Which accepted form the reference took: USERNAME, HANDLE or PROFILE_URL. */
+  referenceForm: string;
+  config: {
+    state: AuditConfigState;
+    provider: string;
+    sourceId: string | null;
+    /** "local" = a file on disk (synthetic or imported); "remote-api" = the Graph API path. */
+    sourceKind: "local" | "remote-api" | null;
+    usable: boolean;
+    error: string | null;
+    synthetic: boolean;
+    /** One sentence naming what kind of evidence this source produces. */
+    evidence: string;
+    /**
+     * The local configuration assessment this decision was made from: variable
+     * NAMES, states and corrective actions — never a value. `networkCallMade`
+     * is always false, and a clean assessment reads NOT_VERIFIED.
+     */
+    readiness: Readiness;
+  };
+  probe: {
+    attempted: boolean;
+    state: AuditProbeState;
+    /** Which route answered: the observed account, or the discovery probe of another. */
+    via: "resolve" | "discovery" | null;
+    /** The provider's own capability status, verbatim (null when nothing was attempted). */
+    status: string | null;
+    sourceKind: "local" | "remote-api" | null;
+    /** Whether the Business Discovery opt-in is on (graph only; null elsewhere). */
+    businessDiscovery: "on" | "off" | null;
+    observedAt: string | null;
+    /** The probe payload when the source answered (for discovery: a bounded preview). */
+    account: unknown;
+    error: { kind: string; message: string; retryable: boolean } | null;
+    /** One value-free sentence: what this answer means and what was not attempted. */
+    why: string;
+  };
+  record: {
+    tracked: boolean;
+    state: AuditRecordState;
+    /** Why nothing / something is stored. Never "the account does not exist". */
+    reason: string | null;
+    target: { id: string; observationMode: "OWNED" | "DISCOVERY"; status: string } | null;
+    identity: DossierResult["account"] | null;
+    route: DossierResult["route"] | null;
+    /** When this deployment first / last recorded anything about the account. */
+    firstRecordedAt: string | null;
+    lastRecordedAt: string | null;
+    profile: DossierResult["profile"] | null;
+    /** Row counts and the bounded-preview ceiling, never the media rows themselves. */
+    media: {
+      storedCount: number;
+      bounded: boolean | null;
+      previewLimit: number | null;
+      oldestPublishedAt: string | null;
+      newestPublishedAt: string | null;
+      firstObservedAt: string | null;
+      lastObservedAt: string | null;
+    } | null;
+    counts: Record<string, { count: number; latestAt: string | null }>;
+    claims: {
+      active: number;
+      retracted: number;
+      predicates: number;
+      /**
+       * Active claims past the 180-day review horizon (`DUE_FOR_REVIEW`):
+       * stale citations the report names instead of letting them read as
+       * current. Staleness is reported, never auto-retracted or downgraded.
+       */
+      dueForReview: number;
+      statement: string;
+    } | null;
+    /** Per-capability coverage computed from stored rows, with a reason for every gap. */
+    coverage: DossierCoverageRow[] | null;
+    notes: string[];
+  };
+  /**
+   * The public-web phase (D70): third-party statements about the handle from
+   * pages a source named — never platform observations, never stored, never
+   * an inference. Always present; `attempted: false` carries the reason.
+   */
+  web: AuditWebReport;
+  /**
+   * The concise summary: one headline and one row per evidence class, each
+   * derived from the section that holds it. Platform observation, stored
+   * record, public-web statement, stored third-party claim, operator evidence
+   * and inference are kept apart here so no reading can blend them.
+   */
+  summary: {
+    headline: string;
+    classes: Array<{ evidence: string; state: string; detail: string }>;
+  };
+  /** Capabilities this product refuses by decision, with the reason. Independent of the provider. */
+  unsupported: Array<{ id: string; label: string; why: string | null; liveState: string }>;
+  errors: Array<{ step: string; code: string; message: string; retryable: boolean }>;
+  limitations: string[];
+  nextSteps: Array<{ action: string; because: string }>;
+}
+
+/**
+ * Translate one lookup answer into the audit's probe state.
+ *
+ * Reuses the existing status/error-kind conventions rather than inventing a
+ * second taxonomy. ACCOUNT_PRIVATE maps to NOT_AUTHORIZED: the documented
+ * route refuses to expose a private account to this credential, which is an
+ * authorization fact — the platform's own reason travels verbatim in
+ * `probe.error.kind` and `probe.why`, so no information is collapsed away.
+ */
+function auditProbeState(lookup: LookupResult): AuditProbeState {
+  if (lookup.status === CapabilityStatus.AVAILABLE) return "OBSERVED";
+  if (lookup.status === CapabilityStatus.PARTIAL) return "PARTIAL";
+  if (lookup.status === CapabilityStatus.UNAVAILABLE) return "UNSUPPORTED";
+  switch (lookup.error?.kind) {
+    case CapabilityErrorKind.ACCOUNT_NOT_FOUND:
+      return "NOT_OBSERVED";
+    case CapabilityErrorKind.AUTH_REQUIRED:
+    case CapabilityErrorKind.FORBIDDEN:
+    case CapabilityErrorKind.ACCOUNT_PRIVATE:
+      return "NOT_AUTHORIZED";
+    case CapabilityErrorKind.NETWORK:
+    case CapabilityErrorKind.TIMEOUT:
+    case CapabilityErrorKind.RATE_LIMITED:
+    case CapabilityErrorKind.PROVIDER_ERROR:
+      return "PROVIDER_ERROR";
+    default:
+      return "PROVIDER_ERROR";
+  }
+}
+
+/** What kind of evidence the active source produces, in one sentence. */
+function auditEvidenceLabel(ctx: CliContext): string {
+  if (ctx.provider.error !== null) {
+    return "UNAVAILABLE — the selected provider could not be constructed, so no evidence is being described here.";
+  }
+  if (ctx.provider.synthetic) {
+    return "SYNTHETIC — generated fixture data. Not a live account observation: no real account was contacted, and no figure here describes a real account.";
+  }
+  if (ctx.provider.name === "import") {
+    return "IMPORTED — the operator's own Instagram data export. Real data, but a record of an export, never a live observation.";
+  }
+  return "LIVE — the official Instagram Graph API, scoped to the authorized account.";
+}
+
+export async function opAudit(
+  ctx: CliContext,
+  input: { username: string; urls?: readonly string[]; maxSources?: number },
+  // Structural subsets, exactly as `research --run` takes them: the audit's
+  // web phase is exercised against a scripted transport in tests, and never
+  // opens a socket the operator did not ask for.
+  deps: {
+    fetcher?: Pick<ResearchFetcher, "fetchPage">;
+    search?: ResearchSearchProvider;
+  } = {},
+): Promise<AuditReport> {
+  const requested = input.username;
+  const parsed = parseAccountReference(requested);
+  if (!parsed.ok) {
+    // A reference that names no account is a usage error, before any phase
+    // runs: "invalid reference" and "valid but unobservable" must stay
+    // different answers.
+    throw new UsageError(
+      `${parsed.message} \`igtrack audit\` accepts a username, an @handle, or an instagram.com profile URL.`,
+    );
+  }
+  const username = parsed.reference.username;
+  const errors: AuditReport["errors"] = [];
+
+  // --- Phase 1: configuration, decided locally, before anything is observed.
+  const readiness = assessReadiness(process.env);
+  const usable = ctx.provider.error === null;
+  const blocking = !usable || isBlocking(readiness.status);
+  const configState: AuditConfigState = blocking
+    ? "CONFIGURATION_ERROR"
+    : readiness.graphCredentialsRequired && readiness.status === ConfigState.NOT_VERIFIED
+      ? "NOT_VERIFIED"
+      : "NOT_APPLICABLE";
+  if (blocking) {
+    errors.push({
+      step: "configuration",
+      code: "CONFIGURATION_ERROR",
+      message:
+        ctx.provider.error ??
+        (readiness.problems.length > 0
+          ? readiness.problems.join("; ")
+          : "the selected provider's configuration is blocked (see config.readiness)"),
+      retryable: false,
+    });
+  }
+
+  // --- Phase 2: ONE stateless probe through the configured source.
+  // `blocking` gates it, not just `usable`: a graph provider can construct
+  // fine while readiness is INVALID_CONFIGURATION (a token with whitespace,
+  // say — graphConfigBlocker only refuses MISSING/PLACEHOLDER). Probing then
+  // would send a request the local check already ruled out, so the probe waits
+  // for a configuration that deserves to be observed.
+  let probe: AuditReport["probe"];
+  if (!usable || blocking) {
+    const reason = !usable
+      ? `No request was made: provider "${ctx.provider.name}" is not usable. ${ctx.provider.error ?? "unknown reason"}`
+      : `No request was made: the local configuration check failed (${readiness.status}) before anything was observed${
+          readiness.problems.length > 0 ? ` — ${readiness.problems.join("; ")}` : ""
+        }.`;
+    probe = {
+      attempted: false,
+      state: "NOT_ATTEMPTED",
+      via: null,
+      status: null,
+      sourceKind: null,
+      businessDiscovery: null,
+      observedAt: null,
+      account: null,
+      error: null,
+      why: `${reason} Configuration is checked before anything is observed, so a configuration failure can never be reported as an absence of data.`,
+    };
+  } else {
+    const lookup = await opLookup(ctx, { username });
+    const state = auditProbeState(lookup);
+    if (lookup.error !== null) {
+      errors.push({
+        step: "probe",
+        code: lookup.error.kind,
+        message: lookup.error.message,
+        retryable: lookup.error.retryable,
+      });
+    }
+    probe = {
+      attempted: true,
+      state,
+      via: lookup.via,
+      status: lookup.status,
+      sourceKind: lookup.sourceKind,
+      businessDiscovery: lookup.businessDiscovery,
+      observedAt: lookup.observedAt,
+      account: lookup.account,
+      error: lookup.error,
+      why:
+        state === "NOT_ATTEMPTED"
+          ? lookup.why
+          : `${lookup.why} The probe persists nothing: it is a statement about one source at one moment, never a stored claim.`,
+    };
+  }
+
+  // --- Phase 3: what this deployment has already recorded.
+  // A tracked target reads back through the same research report `igtrack
+  // research` prints, and the same stateless planner `igtrack plan` derives.
+  let record: AuditReport["record"];
+  let nextSteps: AuditReport["nextSteps"] = [];
+  const emptyCounts: Record<string, { count: number; latestAt: string | null }> = {};
+  let trackedTarget: { id: string; observationMode: "OWNED" | "DISCOVERY"; status: string } | null =
+    null;
+  try {
+    const resolved = await resolveTarget(ctx.db, ctx.userId, username);
+    trackedTarget = {
+      id: resolved.id,
+      observationMode: "OWNED",
+      status: resolved.status,
+    };
+  } catch (err) {
+    if (!(err instanceof CliError) || err.code !== "TARGET_NOT_FOUND") throw err;
+  }
+
+  if (trackedTarget === null) {
+    record = {
+      tracked: false,
+      state: "NOT_OBSERVED",
+      reason: `This deployment has no target and no stored observations for @${username}. Nothing was recorded, so there is no dossier, coverage or history to read back — and the probe above is not evidence that the account does not exist.`,
+      target: null,
+      identity: null,
+      route: null,
+      firstRecordedAt: null,
+      lastRecordedAt: null,
+      profile: null,
+      media: null,
+      counts: emptyCounts,
+      claims: null,
+      coverage: null,
+      notes: [],
+    };
+  } else {
+    const research = await opResearch(ctx, { target: trackedTarget.id, connectionLimit: 5 });
+    const plan = await opPlan(ctx, { target: trackedTarget.id });
+    trackedTarget = {
+      id: research.target.id,
+      observationMode: research.target.observationMode,
+      status: research.target.status,
+    };
+    const storedRows = Object.values(research.platform.counts).reduce(
+      (total, entry) => total + entry.count,
+      0,
+    );
+    record = {
+      tracked: true,
+      state: storedRows > 0 ? "OBSERVED" : "NOT_OBSERVED",
+      reason:
+        storedRows > 0
+          ? null
+          : "This account is tracked, but no scan has stored rows for it yet: a tracked account is not an observed one.",
+      target: trackedTarget,
+      identity: research.identity.account,
+      route: research.identity.route,
+      firstRecordedAt: research.identity.account.firstSeenAt,
+      lastRecordedAt: research.identity.account.lastSeenAt,
+      profile: research.platform.profile,
+      media:
+        research.platform.media === null
+          ? null
+          : {
+              storedCount: research.platform.media.storedCount,
+              bounded: research.platform.media.bounded,
+              previewLimit: research.platform.media.previewLimit,
+              oldestPublishedAt: research.platform.media.oldestPublishedAt,
+              newestPublishedAt: research.platform.media.newestPublishedAt,
+              firstObservedAt: research.platform.media.firstObservedAt,
+              lastObservedAt: research.platform.media.lastObservedAt,
+            },
+      counts: research.platform.counts,
+      claims: {
+        active: research.claims.totals.active,
+        retracted: research.claims.totals.retracted,
+        predicates: research.claims.totals.predicates,
+        dueForReview: research.claims.groups.flatMap((group) => group.claims).filter(
+          (claim) => claim.dueForReview,
+        ).length,
+        statement: research.claims.statement,
+      },
+      coverage: research.coverage,
+      notes: [...research.notes],
+    };
+    // Next steps for a tracked account come from the planner, so this report
+    // can never recommend something the plan would refuse.
+    const seen = new Set<string>();
+    const push = (action: string, because: string): void => {
+      if (seen.has(action)) return;
+      seen.add(action);
+      nextSteps.push({ action, because });
+    };
+    if (plan.nextAction !== null) {
+      push(
+        `${plan.nextAction.tool} ${JSON.stringify(plan.nextAction.params)}`,
+        plan.nextAction.because,
+      );
+    }
+    for (const step of plan.steps) {
+      if (step.status !== "READY" && step.status !== "PENDING" && step.status !== "STALE") continue;
+      push(
+        `${step.tool} ${JSON.stringify(step.params)}`,
+        // STALE is stale EVIDENCE — the stored observation behind this step is
+        // older than its cadence — so the word travels with the recommendation
+        // instead of the step reading as an ordinary, current suggestion.
+        step.status === "STALE"
+          ? `STALE — ${
+              step.reason ?? `step "${step.id}" has not completed within its cadence`
+            }`
+          : (step.reason ?? `step "${step.id}" is ${step.status}`),
+      );
+    }
+    for (const step of plan.steps.filter((s) => s.status === "BLOCKED")) {
+      push(`${step.tool} ${JSON.stringify(step.params)}`, step.reason ?? "blocked");
+    }
+    push(
+      `igtrack research ${username}`,
+      "the full read-back this audit summarizes: identity, observations, claims and coverage in separate sections",
+    );
+  }
+
+  // --- Phase 4: the public-web probe (D70). Read-only, bounded, and it takes
+  // no database handle, so "this audit wrote nothing" stays structurally true.
+  // A broken search-provider configuration is reported as a CONFIGURATION
+  // error — never as "no web sources exist" (invariant 7).
+  let web: AuditWebReport;
+  try {
+    web = await opAuditWebProbe(
+      {
+        username,
+        ...(input.urls !== undefined ? { urls: input.urls } : {}),
+        ...(input.maxSources !== undefined ? { maxSources: input.maxSources } : {}),
+      },
+      deps,
+    );
+  } catch (err) {
+    if (!(err instanceof AppError)) throw err;
+    errors.push({
+      step: "web",
+      code: "CONFIGURATION_ERROR",
+      message: err.message,
+      retryable: false,
+    });
+    web = {
+      attempted: false,
+      sourcesAvailable: false,
+      search: {
+        provider: null,
+        state: "SEARCH_NOT_CONFIGURED",
+        queries: [],
+        perQuery: [],
+        candidateUrls: 0,
+        relevantCandidates: 0,
+        unavailableReason: err.message,
+        note: null,
+      },
+      retrievalState: "NOT_ATTEMPTED",
+      outcomeClass: "SEARCH_UNAVAILABLE",
+      bounds: {
+        maxSources: input.maxSources ?? AUDIT_WEB_MAX_SOURCES,
+        maxDepth: 1,
+        enforced: "no document was planned: the web phase could not start",
+        documentsTruncated: 0,
+      },
+      candidates: [],
+      documents: [],
+      facts: [],
+      relations: [],
+      rejectedUrls: [],
+      totals: { planned: 0, fetched: 0, failed: 0, skipped: 0, pagesNamingHandle: 0, facts: 0, refused: 0, unattributed: 0 },
+      inferences: "None. No page was read, so nothing is asserted and nothing is inferred.",
+      why: `No request was made: ${err.message}`,
+      notes: [],
+    };
+  }
+
+  // --- Phase 5: what can never be observed, what to do, and what this is not.
+  const unsupported = capabilityLines()
+    .filter((line) => !line.available)
+    .map((line) => ({
+      id: line.id,
+      label: line.label,
+      why: line.why,
+      liveState: line.liveState as string,
+    }));
+
+  const limitations: string[] = [
+    `This audit is read-only: it queued no scan, wrote no row and registered no target. It asked one stateless probe of the configured source (${ctx.provider.sourceId ?? "no source"}).`,
+  ];
+  if (configState === "NOT_APPLICABLE") {
+    limitations.push(
+      "Configuration was checked locally against the environment (variable names, states and fixes only — never a value). No API request was made by that check.",
+    );
+  }
+  if (configState === "NOT_VERIFIED") {
+    limitations.push(
+      "The credentials this deployment consumes pass every LOCAL check. That is NOT_VERIFIED, not \"valid\": only an accepted API call can prove a credential works.",
+    );
+  }
+  if (probe.via === "discovery") {
+    limitations.push(
+      "The probe answered through the documented Business Discovery route: public profile fields plus a BOUNDED, non-pageable media preview — never the account's posts, rosters, likers or highlights.",
+    );
+  }
+  if (record.tracked && record.media?.bounded === true) {
+    limitations.push(
+      `The stored media rows are a bounded preview (ceiling ${record.media.previewLimit ?? "unrecorded"} rows): "newly discovered" is not "newly created", and publishedAt (the platform's time) is a different fact from firstObservedAt (ours).`,
+    );
+  }
+  if (record.state === "NOT_OBSERVED") {
+    limitations.push(
+      "Nothing is stored for this account here. Absence of a record is not evidence about the account itself — it says what this deployment has and has not observed.",
+    );
+  }
+  if (record.claims !== null && record.claims.dueForReview > 0) {
+    // Stale evidence is named, not expired: a citation older than the review
+    // horizon still says what it said when it was retrieved, and silently
+    // dropping or downgrading it would rewrite the record (invariant 5).
+    limitations.push(
+      `Stale evidence: ${record.claims.dueForReview} of ${record.claims.active} active claim(s) were retrieved more than ${CLAIM_REVIEW_HORIZON_DAYS} days ago and are flagged DUE_FOR_REVIEW. They are kept exactly as recorded — never expired, never downgraded — but they describe an earlier moment and should be re-checked before they are relied on.`,
+    );
+  }
+  if (configState === "NOT_APPLICABLE" && ctx.provider.synthetic && probe.state === "NOT_OBSERVED") {
+    limitations.push(
+      "The configured source is SYNTHETIC fixture data, so an ACCOUNT_NOT_FOUND answer here is a property of that data set — it says nothing about Instagram or about this account.",
+    );
+  }
+  if (web.attempted) {
+    limitations.push(
+      "The public-web facts above are THIRD-PARTY STATEMENTS retrieved from pages a source named, at the times shown. They are not platform observations, they are not stored by this read-only command, and a handle appearing on a page is that page's claim — never proof of who operates the account.",
+    );
+    if (web.relations.some((relation) => relation.label === "CONFLICTED")) {
+      limitations.push(
+        "Where two public sources disagree, both values are shown and no winner is chosen: this product does not rank sources against each other or invent a confidence score.",
+      );
+    }
+    if (web.totals.failed > 0 || web.totals.skipped > 0 || web.bounds.documentsTruncated > 0) {
+      limitations.push(
+        `The public-web phase is PARTIAL by construction: ${web.totals.failed} document(s) failed, ${web.totals.skipped} refused by policy without a request, and ${web.bounds.documentsTruncated} candidate(s) were not fetched. Incomplete coverage is reported as incomplete, never as "nothing found".`,
+      );
+    }
+  } else if (configState !== "CONFIGURATION_ERROR") {
+    limitations.push(
+      web.search.state === "SEARCH_NOT_CONFIGURED"
+        ? "The public-web phase did not run, so nothing here reflects the open web: see web.why for the exact reason. No public page was read, invented or assumed."
+        : `A search step RAN (${web.search.state}${web.search.provider === null ? "" : ` via ${web.search.provider}`}, ` +
+          `${web.search.queries.length} query(ies)) and retrieval ended ${web.retrievalState}: ${web.why} ` +
+          "A search that returned nothing is reported as what the source answered, never as proof that nothing exists.",
+    );
+  }
+  if (unsupported.length > 0) {
+    limitations.push(
+      `${unsupported.length} capability(ies) are refused by decision (likers, other accounts' rosters, highlights, private data): they are platform-absent, not unimplemented. FOUNDING §14.`,
+    );
+  }
+
+  if (configState === "CONFIGURATION_ERROR") {
+    nextSteps = [
+      {
+        action: "igtrack doctor",
+        because: `the selected provider cannot run: ${
+          ctx.provider.error ?? readiness.problems.join("; ")
+        }`,
+      },
+      ...nextSteps,
+    ];
+  } else {
+    if (
+      (probe.state === "OBSERVED" || probe.state === "PARTIAL") &&
+      record.tracked === false
+    ) {
+      nextSteps = [
+        {
+          action: `igtrack targets add ${username}${probe.via === "discovery" ? " --observed" : ""}`,
+          because:
+            "the source can observe this account but nothing is recorded yet; --observed tracks another public account through the documented Business Discovery route, and the route is probed before the target is created",
+        },
+        ...nextSteps,
+      ];
+    }
+    if (probe.state === "NOT_OBSERVED" && record.tracked === false) {
+      nextSteps = [
+        {
+          action: "igtrack capabilities",
+          because:
+            "this source holds no rows for the account, which is a data-set gap and not a statement about the account; the registry names what could be observed and from which lawful source",
+        },
+        ...nextSteps,
+      ];
+    }
+    if (probe.state === "NOT_AUTHORIZED" || probe.state === "UNSUPPORTED") {
+      nextSteps = [
+        {
+          action: "igtrack capabilities",
+          because: `the configured route does not expose this account (${probe.error?.kind ?? probe.status ?? "no route"}); the registry and the probe's reason state exactly what is obtainable from this source`,
+        },
+        ...nextSteps,
+      ];
+    }
+    if (probe.state === "PROVIDER_ERROR") {
+      // A retryable failure is its own remedy; a source that could not be read
+      // at all (missing fixture set, unreadable export) sends the operator to
+      // doctor, which names provider usability without making an API request.
+      // Either way this report never ends in "no next step".
+      if (probe.error?.retryable === true) {
+        nextSteps = [
+          {
+            action: `igtrack audit ${username}`,
+            because: `the probe failed with a retryable ${probe.error.kind} before any data was read; nothing was recorded, so a plain retry is the whole remedy`,
+          },
+          ...nextSteps,
+        ];
+      } else {
+        nextSteps = [
+          {
+            action: "igtrack doctor",
+            because: `the configured source could not be read at all (${probe.error?.kind ?? probe.status ?? "unknown failure"}): ${probe.error?.message ?? "the provider returned an error instead of data"}`,
+          },
+          ...nextSteps,
+        ];
+      }
+    }
+  }
+
+  // Web-phase next steps come last and never contradict the phases above:
+  // they only ever point at the two lawful ways to go further — a wider
+  // stored acquisition, or filing the citations in the ledger.
+  if (web.attempted && web.totals.facts > 0 && record.tracked === false) {
+    nextSteps.push({
+      action: `igtrack targets add ${username} --observed`,
+      because:
+        "the web facts above are cited third-party statements about this handle; an observed target records what the platform's Business Discovery route returns so web statements and platform observations can finally be read side by side",
+    });
+    nextSteps.push({
+      action: `igtrack claims add --target ${username} --predicate ORGANIZATION_NAME --value "…" --source-url "…" --excerpt "…"`,
+      because:
+        "a fact you judge worth keeping is filed by you, with its citation — this audit stores nothing, and the ledger refuses any predicate the registry does not allow",
+    });
+  }
+  if (!web.attempted && configState !== "CONFIGURATION_ERROR") {
+    nextSteps.push({
+      action: `igtrack audit ${username} --url "https://example.org/about"`,
+      because:
+        web.search.state === "SEARCH_NO_RESULTS"
+          ? `a genuine zero, not a missing source: the configured search provider (${web.search.provider ?? "none"}) ` +
+            `ran ${web.search.queries.length} query(ies) and returned no results, so no candidate existed to plan. ` +
+            "Name a public page with --url to widen the pass — the engine will not invent sources."
+          : "no public-web source was available to plan: --url names a public page directly, and a search provider " +
+            "supplies candidates (IGTRACK_RESEARCH_SEARCH_PROVIDER=auto uses IGTRACK_RESEARCH_SEARCH_API_KEY with " +
+            "Brave when a key is present, otherwise the keyless FreeSerp index; =brave plus " +
+            "IGTRACK_RESEARCH_SEARCH_API_KEY is the official API). The engine will not invent sources.",
+    });
+  }
+  if (web.attempted && web.totals.facts === 0 && configState !== "CONFIGURATION_ERROR") {
+    // Zero facts after a run that DID search and read pages: the report must
+    // say which of the two worlds this is — thin coverage of one index (fix:
+    // widen the sources), pages read with nothing extractable (fix: name a
+    // better page), or candidates that could not be read at all (fix: retry /
+    // widen) — and never imply that no public evidence exists anywhere.
+    nextSteps.push({
+      action: `igtrack audit ${username} --url "https://example.org/page-that-names-${username}"`,
+      because:
+        web.outcomeClass === "PAGES_IRRELEVANT"
+          ? `every retrieved page failed the exact-handle gate (${web.totals.pagesNamingHandle} of ${web.totals.fetched} ` +
+            "fetched page(s) named the handle): this is WEAK COVERAGE from one index, not proof that no public " +
+            "evidence exists. --url names a page you know discusses the handle, or set " +
+            "IGTRACK_RESEARCH_SEARCH_API_KEY with IGTRACK_RESEARCH_SEARCH_PROVIDER=auto to search Brave's index too."
+          : web.outcomeClass === "CANDIDATES_INACCESSIBLE"
+            ? `no candidate page could be read at all (${web.totals.skipped} policy-skipped, ${web.totals.failed} ` +
+              `failed, ${web.bounds.documentsTruncated} outside the budget), so nothing here describes the handle: ` +
+              "retry the failures later, or name a readable page with --url."
+            : `the pages were readable but nothing extractable about ${username} survived the predicate registry ` +
+              `(${web.outcomeClass}): --url names a page you know states facts about this handle, which the extractor ` +
+              "can then quote with its citation.",
+    });
+  }
+
+  // The concise summary: one headline plus one row per evidence class, each
+  // derived from the section that holds it. This is what makes "observed",
+  // "stated by a source" and "inferred" separable at a glance — the classes
+  // are never blended, and the inference row is an absence by design.
+  const summary = {
+    headline:
+      `@${username}: ${
+        probe.state === "OBSERVED"
+          ? "the configured source answered for this account"
+          : `the configured source returned ${probe.state}`
+      }; ${
+        record.tracked
+          ? `this deployment holds ${record.state === "OBSERVED" ? "stored observations" : "a target with no observations"}`
+          : "this deployment holds nothing"
+      }; ${
+        web.attempted
+          ? `${web.totals.facts} public-web statement(s) across ${web.totals.fetched} page(s)`
+          : "no public-web source was read"
+      }.`,
+    classes: [
+      {
+        evidence: "Platform observation",
+        state: probe.state,
+        detail: `${
+          ctx.provider.synthetic
+            ? "SYNTHETIC (fixture)"
+            : ctx.provider.name === "import"
+              ? "IMPORTED (operator export)"
+              : "live"
+        } via ${probe.via ?? "no route"} — ${probe.why}`,
+      },
+      {
+        evidence: "Stored record",
+        state: record.state,
+        detail: record.tracked
+          ? `${record.target?.observationMode ?? "?"} target; ${Object.values(record.counts).reduce(
+              (t, c) => t + c.count,
+              0,
+            )} stored row(s); ${
+              record.claims === null ? "no claims" : `${record.claims.active} active claim(s)`
+            }`
+          : "nothing recorded for this account here",
+      },
+      {
+        evidence: "Public-web statement",
+        state: web.attempted ? (web.totals.facts > 0 ? "OBSERVED" : "NOT_OBSERVED") : "NOT_ATTEMPTED",
+        // The two steps are reported apart so "the search never ran" and "the
+        // search ran and found nothing" can never read as the same finding.
+        detail: `search ${web.search.state} · retrieval ${web.retrievalState} · outcome ${web.outcomeClass} · ${
+          web.attempted
+            ? `${web.totals.facts} fact(s) from ${web.totals.fetched} page(s), ${web.totals.pagesNamingHandle} page(s) naming the handle, each fact with its source URL, field and retrieval time; ${
+                web.relations.filter((r) => r.label === "CORROBORATED").length
+              } corroborated, ${web.relations.filter((r) => r.label === "CONFLICTED").length} contradicted`
+            : web.why
+        }`,
+      },
+      {
+        evidence: "Third-party claim (stored)",
+        state: record.claims === null || record.claims.active === 0 ? "NONE" : "OBSERVED",
+        detail:
+          record.claims === null
+            ? "no ledger for this account"
+            : `${
+                record.claims.dueForReview > 0
+                  ? `${record.claims.dueForReview} of ${record.claims.active} claim(s) flagged DUE_FOR_REVIEW (stale, past the ${CLAIM_REVIEW_HORIZON_DAYS}-day horizon) — `
+                  : ""
+              }${record.claims.statement}`,
+      },
+      {
+        evidence: "Operator evidence",
+        state: ctx.provider.name === "import" ? "SUPPLIED" : "NONE",
+        detail:
+          ctx.provider.name === "import"
+            ? "the operator's own Instagram export is the configured source"
+            : "no operator-supplied evidence was read by this audit (igtrack import and igtrack claims add are the two ways to add some)",
+      },
+      {
+        evidence: "Inference",
+        state: "NONE",
+        detail: web.inferences,
+      },
+    ],
+  };
+
+  return {
+    generatedAt: new Date().toISOString(),
+    requested,
+    username,
+    referenceForm: parsed.reference.form,
+    config: {
+      state: configState,
+      provider: ctx.provider.name,
+      sourceId: ctx.provider.sourceId,
+      sourceKind: ctx.provider.sourceId === null ? null : sourceKindOf(ctx.provider.sourceId),
+      usable,
+      error: ctx.provider.error,
+      synthetic: ctx.provider.synthetic,
+      evidence: auditEvidenceLabel(ctx),
+      readiness,
+    },
+    probe,
+    record,
+    web,
+    summary,
+    unsupported,
+    errors,
+    limitations,
+    nextSteps,
+  };
+}

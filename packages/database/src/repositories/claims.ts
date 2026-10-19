@@ -30,6 +30,8 @@ export interface AddClaimInput {
   excerpt?: string | null;
   statedAt?: Date | null;
   retrievedAt?: Date | null;
+  /** The research run that extracted this claim (provenance only; no FK). */
+  researchRunId?: string | null;
 }
 
 export interface ListClaimsInput {
@@ -109,6 +111,9 @@ export async function addClaim(db: Database, input: AddClaimInput): Promise<Clai
           : {}),
         ...(input.retrievedAt !== undefined && input.retrievedAt !== null
           ? { retrievedAt: input.retrievedAt }
+          : {}),
+        ...(input.researchRunId !== undefined && input.researchRunId !== null
+          ? { researchRunId: input.researchRunId }
           : {}),
       })
       .returning();

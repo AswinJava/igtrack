@@ -19,6 +19,8 @@ import {
 import {
   claimSourceKindEnum,
   claimStatusEnum,
+  researchDocumentOutcomeEnum,
+  researchRunStatusEnum,
   confidenceLevelEnum,
   followChangeEnum,
   followDirectionEnum,
@@ -165,6 +167,10 @@ export const claims = pgTable(
     statedAt: timestamptz("stated_at"),
     retrievedAt: timestamptz("retrieved_at"),
     recordedAt: timestamptz("recorded_at").notNull().defaultNow(),
+    // The research run that extracted this claim (null = operator-submitted).
+    // Provenance only: a run-sourced claim is still a claim, still validated,
+    // never an observation.
+    researchRunId: text("research_run_id"),
     status: claimStatusEnum("status").notNull().default("ACTIVE"),
     retractedAt: timestamptz("retracted_at"),
     retractionReason: text("retraction_reason"),
@@ -182,6 +188,93 @@ export const claims = pgTable(
     ),
     index("claims_target_status_idx").on(table.targetId, table.status),
     index("claims_user_idx").on(table.userId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Autonomous public-web research (FOUNDING §19, D69).
+//
+// A research run is the record of what the ENGINE did: which question, which
+// focus, which bounds, which documents it attempted, and what each attempt
+// yielded — including every refusal and failure, which are findings. Claims
+// recorded by the run still live in the claims ledger (one ledger, one
+// validation gate); the run carries provenance and the per-document
+// coverage the report needs.
+//
+// run_id links each stored claim back to the run that found it without
+// changing what a claim IS: the ledger stays the single source of truth.
+// ---------------------------------------------------------------------------
+
+export const researchRuns = pgTable(
+  "research_runs",
+  {
+    id: uuid(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => targets.id, { onDelete: "cascade" }),
+    question: text("question").notNull(),
+    focusIntent: text("focus_intent").notNull(),
+    focusPriorities: jsonb("focus_priorities").notNull().default([]),
+    focusRationale: text("focus_rationale").notNull(),
+    // Bounds the run actually enforced — the §4.7 contract, machine-held.
+    maxSources: integer("max_sources").notNull(),
+    maxDepth: integer("max_depth").notNull(),
+    searchProvider: text("search_provider"),
+    searchQueries: jsonb("search_queries").notNull().default([]),
+    searchUnavailableReason: text("search_unavailable_reason"),
+    operatorUrlCount: integer("operator_url_count").notNull().default(0),
+    boundsTruncated: integer("bounds_truncated").notNull().default(0),
+    status: researchRunStatusEnum("status").notNull(),
+    documentsPlanned: integer("documents_planned").notNull().default(0),
+    documentsFetched: integer("documents_fetched").notNull().default(0),
+    documentsFailed: integer("documents_failed").notNull().default(0),
+    candidatesFound: integer("candidates_found").notNull().default(0),
+    claimsStored: integer("claims_stored").notNull().default(0),
+    claimsDuplicate: integer("claims_duplicate").notNull().default(0),
+    claimsRefused: integer("claims_refused").notNull().default(0),
+    startedAt: timestamptz("started_at").notNull(),
+    finishedAt: timestamptz("finished_at").notNull(),
+  },
+  (table) => [
+    index("research_runs_user_idx").on(table.userId),
+    index("research_runs_target_idx").on(table.targetId, table.startedAt),
+  ],
+);
+
+export const researchDocuments = pgTable(
+  "research_documents",
+  {
+    id: uuid(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => researchRuns.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    // Normalized URL (fragment stripped); unique per run so one fetch per URL.
+    url: text("url").notNull(),
+    sourceType: text("source_type").notNull(),
+    outcome: researchDocumentOutcomeEnum("outcome").notNull(),
+    outcomeReason: text("outcome_reason"),
+    httpStatus: integer("http_status"),
+    title: text("title"),
+    contentType: text("content_type"),
+    byteSize: integer("byte_size"),
+    contentSha256: text("content_sha256"),
+    retrievedAt: timestamptz("retrieved_at"),
+    candidatesFound: integer("candidates_found").notNull().default(0),
+    linksNotFollowed: integer("links_not_followed").notNull().default(0),
+    recordedAt: timestamptz("recorded_at").notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("research_documents_url_idx").on(table.runId, table.url),
+    index("research_documents_user_idx").on(table.userId),
+    // Freshness lookup: reuse a FETCHED document for the same target within
+    // the fresh window instead of refetching.
+    index("research_documents_fresh_idx").on(table.userId, table.url, table.outcome),
   ],
 );
 

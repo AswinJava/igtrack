@@ -233,7 +233,17 @@ export async function runLookup(args: ParsedArgs): Promise<number> {
     const result = await opLookup(ctx, { username });
     const rows: Array<[string, string]> = [
       ["username", `@${result.username}`],
+      ["provider", result.provider],
       ["source", result.sourceId],
+      [
+        "source kind",
+        result.sourceKind === "local"
+          ? "local file — no request reaches Instagram"
+          : "Instagram Graph API — a live provider",
+      ],
+      ...(result.businessDiscovery === null
+        ? []
+        : ([["business discovery", result.businessDiscovery === "on" ? "on (opted in)" : "off — cross-account requests cannot be issued"]] as Array<[string, string]>)),
       ["route", display(result.via)],
       ["capability status", result.status],
       ["confidence", display(result.confidence)],
@@ -281,8 +291,8 @@ export async function runLookup(args: ParsedArgs): Promise<number> {
     }
     const footer =
       result.status === "UNAVAILABLE"
-        ? "The requested route does not expose this. Nothing was written."
-        : "Nothing was persisted: `lookup` is a read-only probe.";
+        ? `The requested route does not expose this. Nothing was written.\n\n${result.why}`
+        : `Nothing was persisted: \`lookup\` is a read-only probe.\n\n${result.why}`;
     const human = [...sections, "", footer].join("\n");
     emit({ json, meta: ctx.meta, data: result, human });
     return 0;
@@ -403,6 +413,15 @@ export async function runDossier(args: ParsedArgs): Promise<number> {
       `Seen      first ${result.account.firstSeenAt} · last ${result.account.lastSeenAt}`,
       `Route     ${result.route.providerMethod} — ${result.route.scope}`,
       `Sources   ${result.route.observingSources.length === 0 ? "none recorded yet" : result.route.observingSources.join(", ")}`,
+      `Evidence  ${
+        ctx.meta.provider === "fixture"
+          ? "SYNTHETIC — generated fixture data. Not live Instagram evidence; no real account was contacted."
+          : ctx.meta.provider === "import"
+            ? "IMPORTED — rows read from the operator's own Instagram data export. Real, but a record of an export, not a live observation."
+            : ctx.meta.provider === "graph"
+              ? "LIVE — the official Instagram Graph API, scoped to the authorized account."
+              : `unknown provider (${ctx.meta.provider})`
+      }`,
       "",
       "Coverage (state is computed from stored rows; reasons are the platform's or the registry's, never a guess):",
       table(

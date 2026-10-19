@@ -3,6 +3,7 @@ export * from "./capability.js";
 export * from "./capabilities.js";
 export * from "./references.js";
 export * from "./claims.js";
+export * from "./research.js";
 export * from "./synthesis.js";
 export * from "./capability-matrix.js";
 export * from "./models.js";

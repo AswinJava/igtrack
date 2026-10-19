@@ -23,19 +23,26 @@ export interface CapabilityMatrixSummary {
  * True when a lawful source actually supplies this capability today: a
  * provider method, or — for operator-supplied capabilities such as the claims
  * ledger — the operator themselves (FOUNDING §18: no provider method exists
- * and none can, but the rows are there and the pipeline is real).
+ * and none can, but the rows are there and the pipeline is real), or — for
+ * engine-supplied capabilities such as the bounded research run (D69) — the
+ * in-process engine's own fetch path.
  */
 export function isCapabilityAvailable(entry: CapabilityRegistryEntry): boolean {
   return (
     entry.whyUnavailable === null &&
-    (entry.providerMethods.length > 0 || entry.operatorSupplied === true)
+    (entry.providerMethods.length > 0 ||
+      entry.operatorSupplied === true ||
+      entry.engineSupplied === true)
   );
 }
 
-/** Human-readable "Supplied by" cell: provider methods, or operator submissions. */
+/** Human-readable "Supplied by" cell: provider methods, operator submissions, or the engine. */
 function suppliedBy(entry: CapabilityRegistryEntry): string {
   if (entry.providerMethods.length === 0 && entry.operatorSupplied === true) {
     return "operator submissions (no platform route exists)";
+  }
+  if (entry.providerMethods.length === 0 && entry.engineSupplied === true) {
+    return "bounded engine acquisition of operator-named public sources (no platform route exists)";
   }
   return list(entry.providerMethods);
 }
@@ -94,7 +101,7 @@ export function renderCapabilityMatrixDocument(): string {
   lines.push("| State | Means |");
   lines.push("|---|---|");
   lines.push(
-    "| `available` | At least one provider method supplies it — or, for the claims ledger, the operator does (the platform exposes no route and none can exist) — and its pipeline is wired end to end. |",
+    "| `available` | At least one provider method supplies it — or, for the claims ledger, the operator does (the platform exposes no route and none can exist); or, for the bounded research run, the in-process engine does (D69) — and its pipeline is wired end to end. |",
   );
   lines.push("| `UNAVAILABLE` | No provider method exists. The product reports it as unavailable **with the reason below** — never as zero, never as empty data. |");
   lines.push("| `LIVE_VERIFIED` | Observed against the real provider during a live check. |");
@@ -124,7 +131,9 @@ export function renderCapabilityMatrixDocument(): string {
     lines.push(
       entry.operatorSupplied === true
         ? `- **Supplied by:** operator/agent submissions — no provider method exists, and none can (the platform exposes no route)`
-        : `- **Provider methods:** ${list(entry.providerMethods)}`,
+        : entry.engineSupplied === true
+          ? `- **Supplied by:** the bounded research engine — operator-named or search-provider-named public pages, fetched through the SSRF gate; no platform route exists, and none can`
+          : `- **Provider methods:** ${list(entry.providerMethods)}`,
     );
     lines.push(`- **Persists to:** ${list(entry.persistence)}`);
     lines.push(`- **Surfaced in:** ${list(entry.ui)}`);

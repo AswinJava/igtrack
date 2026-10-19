@@ -242,7 +242,9 @@ export class ImportProvider implements InstagramProvider {
 
   // One page = one raw export file: genuine per-file payload hash, cursor = the
   // next file in export order, complete only on the last file. The export is a
-  // point-in-time dump, so freshness equals the export date — said, not hidden.
+  // point-in-time dump, but these roster files do not record WHEN Instagram
+  // generated it — so observedAt is the read time, and the note says exactly
+  // that instead of claiming a date the bytes do not carry.
   private async getRoster(
     direction: "followers" | "following",
     account: NormalizedAccountRef,
@@ -336,8 +338,9 @@ export class ImportProvider implements InstagramProvider {
           ...(isLast
             ? {
                 note:
-                  "Complete roster read from the operator's own Instagram export; " +
-                  "freshness equals the export date, not the live platform.",
+                  "Complete roster read from the operator's own Instagram export. " +
+                  "These roster files record no generation timestamp, so the observation " +
+                  "time is when igtrack read them, not when Instagram captured the export.",
               }
             : { note: `More export files remain (${files.length - index - 1}); continue with the returned cursor.` }),
         },

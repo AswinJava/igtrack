@@ -1,6 +1,6 @@
 # Deep Account Intelligence — opportunity, audit, design, and implementation plan
 
-**Date:** 2026-10-16 · **Status:** proposal for review. Nothing in this document is implemented; no code or migration was changed by this work. It ends with an authorization request.
+**Date:** 2026-10-16 · **Status:** Phase 1 implemented, committed as `323a254`; the read-only Phase-2/3 items (themes, cadence, audience summary, `--since`, `--format md`) shipped with it, and the mission added the investigation planner (`opPlan`) this document did not cover. See the status block at the end for the exact deltas.
 **Companion reading:** [FOUNDING.md](FOUNDING.md) §14–§17 (the refusals and discovery rules), [research/05-market-refresh-2026-10-16.md](research/05-market-refresh-2026-10-16.md) (the market/API/legal evidence base), [ARCHITECTURE.md](ARCHITECTURE.md) (the current system).
 **Labels used:** `[V]` verified this pass (code read, test read, or primary source fetched 2026-10-16) · `[C]` third-party/vendor claim, not independently verified · `[I]` inference from verified facts · `NOT_VERIFIED` anything not directly checked in this environment.
 
@@ -276,7 +276,7 @@ Non-goals for all phases: anything on the refusal list; anything requiring a new
 
 ### 7.1 Fixtures
 
-Extend the synthetic seed (`pnpm igtrack setup`) with a scripted claim set for `aurora.wilde` (2 corroborating OPERATOR/WEB claims, 1 contradiction pair, 1 refusable-predicate attempt, 1 retracted claim) and use `dune.harbor` (discovery.json) for the discovery-target states. No fixture may contain sensitive personal data, real URLs to private individuals, or credentials.
+Extend the synthetic seed (`pnpm igtrack setup`) with a scripted claim set for the seeded owned target `target_a` (2 corroborating WEB claims, 1 contradiction pair, 1 operator-asserted claim, 1 retracted claim, 1 stale claim past the review horizon; the refusable-predicate attempt is test-pinned rather than seeded) and use `dune.harbor` (discovery.json) for the discovery-target states. No fixture may contain sensitive personal data, real URLs to private individuals, or credentials.
 
 ### 7.2 Benchmark questions (fixed set; run against the seeded DB)
 
@@ -330,3 +330,307 @@ Thresholds are pinned in tests in the same PR that introduces the feature — pr
 **Risks to this recommendation:** (a) the excerpt/URL discipline is only as good as the operator's agent — mitigated by the mandatory fields and by rendering; (b) predicate registry bikeshedding — mitigated by shipping the registry closed in Phase 1 with an explicit "extend by founding entry" rule; (c) excerpt length cap may annoy — 500 chars chosen for verifiability-vs-mirroring, adjustable.
 
 **Authorization requested.** Planning is complete; implementation is not yet authorized. If you approve Phase 1, say so and I will implement it in the order above. If you want Phase 1 scope changed (e.g. drop `claims retract` from v1, or start with the report over observations only), say which — otherwise the default is exactly as listed.
+
+---
+
+## 9. Status update — implemented (2026-10-16, commit `323a254`)
+
+Authorization was granted and Phase 1 shipped in the order listed, together
+with the items below. This block is the honest delta between the plan above
+and the code.
+
+**Implemented as specified:** migration `0020_claims.sql` with the `claims`
+table and its partial unique index (dedup via `coalesce(source_url,'')`);
+the closed predicate registry and refusal list in `packages/core/src/claims.ts`
+(plus `references.ts` for `@handle`/profile-URL parsing); the claims
+repository (add/list/get/retract, ownership-scoped, `hashClaimExcerpt` for
+excerpt hashing); ops `opClaimAdd`/`opClaimList`/`opClaimRetract`/`opResearch`;
+MCP tools ×4 (+1, below); CLI `claims add|list|retract` + `research`;
+capability registry `ACCOUNT_RESEARCH` (`operatorSupplied: true`,
+`providerMethods: []`) with `docs/CAPABILITIES.md` regenerated (19 of 24
+obtainable); FOUNDING §18 (D67/D68); the seed's scripted claim set; and the
+§7.3 metric pins in `apps/cli/test/research-benchmark.test.ts`.
+
+**Shipped early (this document's Phase 2/3, read-only over stored rows):**
+themes and cadence (`packages/core/src/synthesis.ts`, pure and totally
+ordered; every figure states its corpus), the owned-account audience summary
+from insight rows, the change window, `claims list` `dueForReview` surfacing,
+`research --since` (claims section only, with the omitted-row count) and
+`research --format md`.
+
+**Beyond this document (mission scope):** the investigation planner —
+`igtrack plan <target> [--goal]` / `igtrack_plan`, statelessly recomputed from
+jobs, targets and claims on every call, with one named next action, D47
+refusals as `NOT_APPLICABLE`, unusable providers as `BLOCKED`, and unknown
+goals as `USAGE` errors. Recorded as part of D68.
+
+**Not shipped, by design:** anything on the refusal list; any fetch inside
+IGTrack; any LLM inside IGTrack; numeric confidence; background jobs; a UI.
+The §4.7 agent-workflow bounds (≤10 sources, depth 1) remain a documented
+protocol for the operator's agent, not machine-enforced state — the claims
+layer cannot verify how many pages the agent read, and pretending otherwise
+would be the fabrication this design exists to avoid.
+
+**Verification:** FOUNDING §18.3 carries the full table (typecheck; the
+suite's file/pass counts; the acceptance scenarios A01–A26; the §7.2
+twelve-question benchmark; determinism pins; the latency numbers from
+`scripts/bench-research.ts`). No live account was observed: every row in
+evidence comes from the synthetic fixture provider or operator-submitted
+claims.
+
+---
+
+## 10. Completion mission — audit and end-to-end verification (2026-10-17)
+
+A completion mission re-audited this document against the working tree and
+verified the whole feature end to end. The audit found **no missing
+component**: the predicate registry, migration 0020 and its dedup index, the
+claims repository, all five ops, all five MCP tools, the CLI commands, the
+`ACCOUNT_RESEARCH` capability entry, the seeded claim set, and the §7.2/§7.3
+benchmark pins are all present and test-pinned `[V]`. What the mission added
+was verification depth and honesty fixes, not new surface:
+
+- **Fixture-name drift fixed (§7.1):** the plan named the seed account
+  `aurora.wilde`; the actual seeded owned target is `target_a` (its claims
+  concern the fictional "Aurora Print Studio"), with `dune.harbor`
+  (discovery.json) for discovery-target states — `dune.harbor` was correct and
+  unchanged `[V: seed, fixtures/v1/discovery.json]`.
+- **README:** now documents the claims ledger, `research`, and `plan` (it had
+  no mention); the tool count (24) and capability count (19 of 24) were
+  already reconciled `[V]`.
+- **End-to-end CLI walkthrough on a scratch database** (`igtrack_smoke`,
+  synthetic only): `setup` → `research target_a` (all sections render; empty
+  themes/cadence/audience carry reasons; the 257-day-old claim flags
+  `due for review`; the retracted claim renders as retracted) → `claims add`
+  (excerpt hash stored) → duplicate add refused naming the existing claim
+  (exit 2) → refused predicate (`EMPLOYMENT_STATUS`) refused with the FOUNDING
+  pointer (exit 2) → `claims retract --reason --yes` → `claims list` →
+  `plan target_a` (D47 kind renders `NOT_APPLICABLE`) → `research --format
+  md` → the documented Node launcher (`node apps/cli/bin/igtrack.mjs research
+  --json`) `[V]`.
+- **Benchmarks (uncontended, 64-claim synthetic workload, local Postgres):**
+  `research` p50 198.73 ms / **p95 411.23 ms** against the pre-established
+  < 1500 ms pin; `claims list` p95 41.10 ms; `plan` p95 60.01 ms
+  (`pnpm bench:research`, exit 0) `[V]`.
+- **`pnpm docs:capabilities`:** regenerated — zero drift `[V]`.
+- **Suite evidence:** `pnpm typecheck` clean (5/5 workspaces); the
+  claims-focused suites 48/48; operations + research-benchmark + acceptance
+  **83/83** on an isolated test database; the hardening suites
+  (migration-safety, retention, queue-hardening, privacy, concurrency, both
+  claims suites) green in every run. Full-suite runs this evening were
+  repeatedly contaminated by a second, concurrent workstream in the same
+  working tree running its own suites against the shared `igtrack_test`
+  database (the §2.6 hazard, now with an external cause); pointing this
+  mission's runs at a separate database via `IGTRACK_TEST_DATABASE_URL`
+  removed the data races, and the residual load-induced hook timeouts
+  re-passed in isolation (4 files, 27/27) `[V]`. The exact final full-suite
+  count for the combined tree is recorded in
+  [verification/VERIFICATION.md](verification/VERIFICATION.md) §11.
+- **Concurrent-workstream note:** during this mission a separate session was
+  editing config-readiness files (`packages/ingestion/src/config/`,
+  `graph-provider.ts`, CLI doctor). Their work is uncommitted, was not touched
+  by this mission, and one of their transient test failures (a
+  `graphConfigFromEnv` crash on a fully-empty environment) was fixed on their
+  side mid-mission `[V]`.
+
+**Still `NOT_VERIFIED`, unchanged:** every live-Graph row (no credential
+exists in this environment), and the §4.7 agent-workflow bounds — which remain
+a documented protocol for the operator's agent, by design, as stated in §9.
+
+## 11. Research acquisition layer — the engine fetches (2026-10-18, D69)
+
+Phase 4 of the founder requirement: the product itself plans, fetches,
+extracts, validates and stores source-backed evidence. This supersedes one
+sentence of §10: the §4.7 bounds are no longer merely a documented protocol —
+they are compile-time constants enforced in code and pinned by tests.
+
+### 11.1 What was built
+
+- **Engine:** `opResearchRun` (`apps/cli/src/tools.ts`) behind
+  `igtrack research <target> --run --question "..."` and the
+  `igtrack_research_run` MCP tool (`readOnlyHint: false`; destructive-free but
+  DB-mutating). Question → `ResearchFocus` mapping, plan → fetch → extract →
+  validate → store → run record.
+- **Bounds in core** (`packages/core/src/research.ts`): 10 sources, depth 1,
+  10s/document, 512KB, 3 redirects, 24h freshness — constants, not env vars,
+  pinned by `packages/core/test/research.test.ts`.
+- **Network layer** (`packages/ingestion/src/research/`): SSRF-gated fetcher
+  (static gate + DNS check + robots + content-type allowlist + streamed byte
+  cap + per-hop re-validation), four-family extractor (JSON-LD, meta, mailto,
+  profile links — never prose), search providers (`none` | `fixture` for tests
+  | `brave` behind env key).
+- **Storage:** migration 0021 (`research_runs`, `research_documents`,
+  `claims.research_run_id`); per-document outcomes with reasons; owner scoping;
+  uniqueness `(run_id, url)`; freshness window per user.
+- **Registry:** `WEB_RESEARCH` capability with a new `engineSupplied` supply
+  mode (third honest answer to "who supplies this row": platform, operator, or
+  bounded engine); dossier coverage reports it `UNAVAILABLE` with the D47
+  reason on DISCOVERY targets, `OBSERVED` from stored run rows on OWNED ones.
+
+### 11.2 Verification
+
+- **Test matrix, 93 checks across 7 files**, all green on an isolated test
+  database: core bounds (12), extraction + injection inertness (14), fetcher
+  gate/robots/redirect/caps/timeout (19), search selection (12), migration +
+  lifecycle + scoping + freshness + concurrency (10), ~19 engine scenarios
+  (multi-source, sparse, injection, refusal silence, failures, dedup,
+  determinism, CLI/MCP contracts, cross-user denial last), MCP schema bounds.
+- **Typecheck:** 5/5 workspaces clean.
+- **`pnpm docs:capabilities`:** regenerated — 20 of 25 obtainable.
+- **What the tests prove about the boundary:** an Instagram-family URL and a
+  credential-embedded URL are refused by the real fetcher's static gate; a
+  private/loopback/metadata address is refused after DNS resolution; a
+  robots-disallowed path is skipped; a redirect to an unsafe host is refused
+  mid-flight; an over-budget `--url` list is capped; a prompt-injection
+  payload in a page body produces zero candidates; a sensitive predicate
+  extracted from a real-looking page is refused by the shared registry; a
+  second user's run is invisible to the first.
+
+### 11.3 Still `NOT_VERIFIED`, with the exact prerequisite
+
+- **Live search:** the keyless leg is **VERIFIED 2026-10-19** (`igtrack audit
+  sel_win_` with `IGTRACK_RESEARCH_SEARCH_PROVIDER=auto`, no key:
+  `SEARCH_SUCCEEDED` via the FreeSerp index). **Live Brave search:** set
+  `IGTRACK_RESEARCH_SEARCH_PROVIDER=brave` and
+  `IGTRACK_RESEARCH_SEARCH_API_KEY` (any Brave-compatible key), then run a
+  live `--run` against a real public page. Without a key, `auto` falls through
+  to the keyless index; `=brave` without a key answers `UNAVAILABLE` with the
+  reason — never invented sources.
+- **Live public-web fetch end-to-end:** the fetcher's transport behaviour is
+  pinned against injected doubles and one real-DNS loopback refusal; a live
+  fetch against arbitrary third-party pages is a deployment act, not a test
+  fixture, by decision.
+- **Live Graph:** unchanged (`pnpm verify:graph`, needs a real token).
+
+## 12. The arbitrary-username investigation workflow (2026-10-18, D70–D71)
+
+The founder restated the CENTRAL use case: an operator supplies an unknown
+username and wants the most comprehensive lawful, evidence-backed report the
+product can produce — without the target's credentials or cooperation. The
+audit of that requirement against the tree found **one structural gap**, and
+it was not a missing provider:
+
+> The engine could only research a target it already held. A stranger's handle
+> — the very thing the product is for — could be probed through Business
+> Discovery and read back if stored, but could not be researched at all until
+> the operator first registered it as a target. The workflow began in the
+> wrong place.
+
+### 12.1 What shipped
+
+- **`opAuditWebProbe`** (`apps/cli/src/tools.ts`): a read-only, bounded,
+  target-free public-web phase inside `igtrack audit <username>`. Operator
+  `--url` pages first, then search-provider candidates; ≤5 documents (ceiling
+  10), depth 1, the same SSRF/DNS/robots/content-type/byte/timeout gate as a
+  run, Instagram-family hosts refused by policy, the same four field-family
+  extractor, the same closed predicate registry. It takes **no database
+  handle**, so it cannot store, register or queue — the audit's "wrote no row"
+  promise is structural.
+- **Evidence separation in the report:** every fact is
+  `PUBLIC_WEB_DOCUMENTED` with source URL, page title, field, method,
+  retrieval time and the document's SHA-256; corroboration/contradiction are
+  derived with the ledger's own `deriveClaimRelation` (conflicts show both
+  values, pick no winner, carry no score); `summary` names the six evidence
+  classes — platform observation, stored record, public-web statement, stored
+  third-party claim, operator evidence, inference (`NONE`, always).
+- **Honesty fixes to the audit itself:** a synthetic `ACCOUNT_NOT_FOUND` is
+  now stated as a property of the fixture set rather than of Instagram; a
+  broken `IGTRACK_RESEARCH_SEARCH_PROVIDER` is a `CONFIGURATION_ERROR`
+  (exit 3), never an empty section; a failed document reads `FAILED`, never
+  "nothing found"; and `NOT_ATTEMPTED` carries the exact env-var remedy.
+- **Surface:** CLI `--url URL[,URL…]` / `--max-sources N`; MCP `igtrack_audit`
+  gains optional `urls` (≤10) and `maxSources` (1–10), `readOnlyHint` kept.
+  `EXPECTED_TOOLS` unchanged at 24.
+- **Source audit:** [verification/SOURCE-AUDIT.md](verification/SOURCE-AUDIT.md)
+  (dated, URL-cited) — what each lawful source can and cannot do, why oEmbed
+  is refused on contract rather than capability, why the OSINT libraries are
+  reference-only, and which search API is actually alive.
+
+Decisions D70 (the phase) and D71 (the source audit) are recorded, with the
+deliberate non-additions, in [FOUNDING.md](FOUNDING.md) §19.
+
+### 12.2 Verification
+
+`pnpm typecheck` clean; `apps/cli/test/audit.test.ts` grew a 9-scenario
+public-web matrix (21 tests in the file, all green on 2026-10-18 against the
+test database) covering: fact labelling + byte-identical ledger, cross-domain
+corroboration and contradiction, a real-gate Instagram URL refusal, failed
+document reporting, `NOT_ATTEMPTED` with the remedy, the enforced and reported
+source cap, sensitive-predicate silence, the search-provider configuration
+error, and human/JSON agreement.
+
+**Live verification (2026-10-18, real internet, real fetcher).** The phase was
+then exercised for real, and that probe is on record because it found three
+defects no fixture reproduced (FOUNDING §19, D72):
+
+- `--url "https://example.org,https://www.wikipedia.org"` → both `FETCHED`
+  (HTTP 200, 577 B / 122197 B, real SHA-256 digests and retrieval times),
+  **383 links counted and not followed** at depth 1, and an absent search
+  provider reported as `UNAVAILABLE` with its exact remedy.
+- `--url https://www.anthropic.com` → 201400 B fetched, **4 cited facts** with
+  field, method, source URL, retrieval time and per-fact uncertainty.
+- That run exposed: a `meta description` phrase-miner emitting the value
+  `that&` (deleted — prose mining is prose interpretation), undecoded HTML
+  entities inside values and quoted excerpts (`Smith &amp; Wesson` — now
+  decoded at both extraction gates), and one page's three social links
+  labelled `CONFLICTED` (a contradiction now requires two independent
+  sources; same-domain disagreement reads `SINGLE_SOURCE` with its values
+  still shown). All three are pinned by `research-extract.test.ts` (16/16)
+  and the audit matrix.
+
+### 12.3 Still `NOT_VERIFIED`, with the exact prerequisite
+
+- ~~Live search~~ — **VERIFIED 2026-10-19** on the default path: with
+  `IGTRACK_RESEARCH_SEARCH_PROVIDER=auto` and no key, `igtrack audit sel_win_`
+  ran a real keyless search (FreeSerp: `SEARCH_SUCCEEDED`) and the web phase
+  planned, fetched and relevance-gated real pages (0 facts — every retrieved
+  page that never named the handle had its structured values discarded with the
+  reason). The Phase-2 re-run (D74, same date) asked the fixed budget of **4
+  distinct query forms** — 20 results → 15 canonical candidates (25% tracking
+  duplicates removed), 4 fetched / 1 `TIMEOUT`, `outcomeClass
+  PAGES_IRRELEVANT` with the weak-coverage next step — and the identical
+  pipeline on a control handle (`nasa`) produced 4/4 pages naming the handle
+  and **41 facts** (`EVIDENCE_EXTRACTED`), proving the extractor yields
+  evidence when a page states it. Benchmark table: `docs/verification/SOURCE-AUDIT.md`
+  §10. The keyed Brave leg still needs `IGTRACK_RESEARCH_SEARCH_PROVIDER=brave`
+  + `IGTRACK_RESEARCH_SEARCH_API_KEY` and remains the one search item never
+  observed live.
+- ~~Live public-page fetch~~ — **VERIFIED 2026-10-18** (three named public pages
+  fetched with the real fetcher; digests, byte counts, retrieval times and the
+  383-links-not-followed bound on record in §12.2 and FOUNDING §19).
+- **Live Graph / Business Discovery:** unchanged (`pnpm verify:graph`, needs a
+  real long-lived token + `IGTRACK_GRAPH_BUSINESS_DISCOVERY=1`).
+- **What a real investigation of an arbitrary username looks like today:**
+  `igtrack audit <handle> --url "https://official-site/about"` → read the
+  `summary`, `probe`, `web` and `Coverage` sections → if the platform route
+  can see it, `igtrack targets add <handle> --observed` → `igtrack claims add`
+  to file the citations worth keeping → `igtrack research <handle>` for the
+  stored read-back. Every step that needs a credential says which one.
+
+## 13. Requirement mapping and staleness honesty (2026-10-19)
+
+The part-1 deliverable of this requirement — *audit the product against the
+central use case, mapping every clause to implementation, source, auth,
+ownership, legal constraint and verification* — is written as
+[verification/REQUIREMENT-AUDIT.md](verification/REQUIREMENT-AUDIT.md). It
+maps FOUNDING §14.1 A1–A10, §15, §18 and §19 to code paths, names the 25
+registry entries by `liveState` (0 `LIVE_VERIFIED`, 17 `NOT_VERIFIED`,
+8 `DOCUMENTED_ABSENT`), and lists the refusals as refusals rather than as
+backlog.
+
+Two honesty gaps the audit itself closed in the reporting surface:
+
+- **Stale evidence is now named.** A stored claim past the 180-day review
+  horizon is counted (`record.claims.dueForReview`), travels as a
+  `Stale evidence:` limitation, marks the summary's third-party-claim row
+  `DUE_FOR_REVIEW`, and prints a `STALE —` human line. A plan step whose
+  stored observation is older than its cadence is prefixed `STALE —`. Nothing
+  is expired, retracted, downgraded or dropped — staleness is a flag, never a
+  verdict (§18).
+- **The human screen shows each web fact's uncertainty**, so a per-fact
+  caveat is no longer visible only in `--json`.
+
+Verification is recorded in
+[verification/VERIFICATION.md](verification/VERIFICATION.md) §14. The external
+blockers are unchanged: a live Graph/Business Discovery credential and a
+search-provider key.

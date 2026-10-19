@@ -587,6 +587,21 @@ const FOLLOWING_SCAN_CONFIG: FollowScanConfig = {
   identityPrefix: "following",
 };
 
+// Termination bound for follow scans. The duplicate-cursor guard stops a loop,
+// but a provider that mints a NEW cursor on every page never repeats — that
+// stream is unbounded, and the per-page lease heartbeat keeps the job alive
+// while it runs, so without a cap the scan would fetch forever and never write
+// a snapshot. This is the same guard the tagged-media scan already carries
+// (TAGS_MAX_PAGES). Rosters are legitimately large (millions of followers), so
+// the default is generous and overridable; a capped scan records PARTIAL and
+// names the cap — never COMPLETE, never a claim that the rest does not exist.
+const DEFAULT_FOLLOW_MAX_PAGES = 500;
+
+function followMaxPages(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.IGTRACK_FOLLOW_MAX_PAGES);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_FOLLOW_MAX_PAGES;
+}
+
 interface FollowCheckpointProgress {
   cursor?: string;
   page?: number;
@@ -690,6 +705,18 @@ export async function runFollowScan(
   let pagesProcessed = progress?.page ?? 0;
   let lastPageComplete = false;
   let lastPageConfidence: Confidence | undefined;
+  // The final page's note travels with the snapshot's evidence. The import
+  // provider's note is what tells a later reader that observedAt is the read
+  // time rather than the export's capture time; dropping it would leave the
+  // timestamp on record with no caveat at all.
+  let lastPageNote: string | undefined;
+  // A provider that repeats a cursor has not advanced the listing. Without
+  // this guard the loop would re-fetch the same page forever; the scan stops
+  // instead and records PARTIAL, because the roster was never fully read.
+  const seenCursors = new Set<string>();
+  if (cursor !== undefined) seenCursors.add(cursor);
+  const maxPages = followMaxPages();
+  let capped = false;
 
   const persistCheckpoint = async (nextCursor: string | undefined): Promise<void> => {
     // Checkpoint is now cursor/page only (PC-T2): no O(n²) array rewrites.
@@ -751,6 +778,7 @@ export async function runFollowScan(
     const pageComplete = page.complete;
     lastPageComplete = pageComplete;
     lastPageConfidence = pageResult.confidence;
+    lastPageNote = pageResult.note;
 
     // PC-T2: stage the new members durably NOW — append-only and idempotent.
     // pagesProcessed advances only after the persistent write succeeds.
@@ -783,6 +811,22 @@ export async function runFollowScan(
     }
 
     if (pageComplete || pageCursor === undefined || pageCursor === "") {
+      break;
+    }
+    if (seenCursors.has(pageCursor)) {
+      // The provider handed back a cursor we already consumed: no further
+      // page exists that we can honestly read, so stop and let the snapshot
+      // say PARTIAL rather than loop until the lease expires.
+      lastPageComplete = false;
+      break;
+    }
+    seenCursors.add(pageCursor);
+    if (pagesProcessed >= maxPages) {
+      // Termination bound reached. A cursor that never repeats is not a loop
+      // the dedupe set can catch, so stop here, keep every page already
+      // staged, and let the snapshot say PARTIAL with the cap named.
+      lastPageComplete = false;
+      capped = true;
       break;
     }
     cursor = pageCursor;
@@ -819,7 +863,13 @@ export async function runFollowScan(
       ref: account.username,
     },
     { count: members.length, usernames: members.map((e) => e.username) },
-    { direction, completion, jobId: job.id },
+    {
+      direction,
+      completion,
+      jobId: job.id,
+      ...(capped ? { pageCap: maxPages } : {}),
+      ...(lastPageNote !== undefined ? { providerNote: lastPageNote } : {}),
+    },
   );
 
   const result = await recordFollowSnapshot(db, {

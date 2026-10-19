@@ -13,6 +13,7 @@ import { buildServer } from "../src/mcp/server.js";
 
 const EXPECTED_TOOLS = [
   "igtrack_activity",
+  "igtrack_audit",
   "igtrack_capabilities",
   "igtrack_claim_add",
   "igtrack_claim_retract",
@@ -27,6 +28,7 @@ const EXPECTED_TOOLS = [
   "igtrack_plan",
   "igtrack_relationships",
   "igtrack_research",
+  "igtrack_research_run",
   "igtrack_scans_list",
   "igtrack_scans_run",
   "igtrack_status",
@@ -173,6 +175,49 @@ describe("igtrack mcp", () => {
       });
       expect(confirmed.isError).toBe(true);
       expect(errCode(confirmed)).toBe("DB_UNAVAILABLE");
+    } finally {
+      await close();
+    }
+  });
+
+  it("enforces igtrack_research_run's bounds in the schema, before any dependency", async () => {
+    const { client, close } = await connect();
+    try {
+      const tools = await client.listTools();
+      const tool = tools.tools.find((t) => t.name === "igtrack_research_run");
+      // The one research tool that WRITES: the annotation says so, so an
+      // agent can tell acquisition from reporting at a glance.
+      expect(tool?.annotations?.readOnlyHint).toBe(false);
+      expect(tool?.title).toMatch(/acquisition/i);
+
+      // Missing question: refused by the schema itself, no envelope code —
+      // the handler (and any fetch it would perform) was never reached.
+      const noQuestion = await client.callTool({
+        name: "igtrack_research_run",
+        arguments: { target: "x" },
+      });
+      expect(noQuestion.isError).toBe(true);
+      expect(errCode(noQuestion)).toBeNull();
+
+      // The §4.7 bounds are contract, not commentary: 11 sources and an
+      // 11-element url list are rejected at the door.
+      const overBudget = await client.callTool({
+        name: "igtrack_research_run",
+        arguments: { target: "x", question: "q", maxSources: 11 },
+      });
+      expect(overBudget.isError).toBe(true);
+      expect(errCode(overBudget)).toBeNull();
+
+      const tooManyUrls = await client.callTool({
+        name: "igtrack_research_run",
+        arguments: {
+          target: "x",
+          question: "q",
+          urls: Array.from({ length: 11 }, (_, i) => `https://example.com/${i}`),
+        },
+      });
+      expect(tooManyUrls.isError).toBe(true);
+      expect(errCode(tooManyUrls)).toBeNull();
     } finally {
       await close();
     }

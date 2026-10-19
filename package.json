@@ -19,6 +19,8 @@
     "typecheck": "pnpm -r run typecheck",
     "verify:graph": "pnpm exec tsx scripts/verify-graph-provider.ts",
     "docs:capabilities": "pnpm exec tsx scripts/capability-matrix.ts",
+    "bench:research": "pnpm exec tsx scripts/bench-research.ts",
+    "bench:audit": "pnpm exec tsx scripts/bench-audit.ts",
     "igtrack": "pnpm --filter @igtrack/cli run start",
     "mcp": "pnpm --filter @igtrack/cli run start mcp",
     "worker": "pnpm --filter @igtrack/monitoring start"

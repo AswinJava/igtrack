@@ -200,7 +200,473 @@ was rewritten for what this pass actually executed and what remains blocked.
 - Scratch DB `igtrack_verify` (synthetic data only) is retained for evidence
   re-inspection; the dev DB received the normal migration upgrade (one column
   `numeric` → `real`, cast-safe on existing rows) and nothing else.
-- All changes are uncommitted at `04e2a46`; no commit/push was performed
+- All changes were uncommitted at `04e2a46`; no commit/push was performed
   (not authorized). `git status --porcelain` is the authoritative change list.
+  (Later committed as `323a254`; see §10 for the mission verification on top
+  of it.)
 - Temp probes live under `%TEMP%\opencode\` only; the repository contains no
   scratch artifacts.
+
+## 10. Deep-account-intelligence mission verification (2026-10-17)
+
+Scope: the claims ledger, the deterministic `research` report (including the
+read-only depth sections — themes, cadence, audience, changes, `--since`,
+`--format md`), the stateless `plan` planner, and the §7.2/§7.3 benchmark, all
+on top of `323a254` (FOUNDING §18, D67/D68).
+
+| Gate | Command | Result | Evidence |
+|---|---|---|---|
+| G1 Type check | `pnpm typecheck` | **PASS** — 5/5 packages clean | session log, exit 0 |
+| G2 Full suite | `pnpm test` | **PASS** — 67 files, 547 passed / 1 skipped (548), exit 0, 273 s | shared `igtrack_test` under default logging config, clean once the orphaned concurrent runner was gone (§10.1); third consecutive green run (after a 7-file batch and an earlier full suite) |
+| G3 Docs drift | `pnpm docs:capabilities` | **PASS** — regenerated `CAPABILITIES.md` byte-identical | no tree diff |
+| G4 Benchmark | `apps/cli/test/research-benchmark.test.ts` | **PASS** — Q1–Q12 answer-classes, plus §7.3 pins: citation completeness, reason coverage (≥1 `UNAVAILABLE` node actually met), determinism modulo `computedAt`, dedup (`CLAIM_DUPLICATE`), no-zero-fill, P95 < 1500 ms | suite output |
+| G5 Runtime smoke | `igtrack status` / `targets list` / `claims list target_a` / `plan target_a` / `research target_a [--format md]` on the dev DB | **PASS** — honest empty-claim state, D47-refused step renders `NOT_APPLICABLE`, single next action, every section renders | this session |
+| G6 MCP stdio | `initialize` → `tools/list` | **PASS** — 24 tools, stdout pure JSON-RPC, diagnostics on stderr (`igtrack mcp: ready on stdio`) | `%TEMP%\opencode\mcp-smoke.mjs` |
+| G7 Refusals | refused predicate (`CLAIM_PREDICATE_REFUSED`, message names FOUNDING); no liker capability available (`/liker/i` absent from available capabilities); DISCOVERY audience/changes `UNAVAILABLE` with reasons | **PASS** | `operations.test.ts`, benchmark Q6–Q8 |
+| G8 Performance | `pnpm bench:research` (isolated `igtrack_bench` DB, synthetic fixture workload, 64 claims) | **PASS** — claims list p50 6.7 ms / p95 19.8 ms, research p50 42.5 ms / p95 60.0 ms, plan p50 7.0 ms / p95 9.5 ms; all far below the pre-established 1500 ms research threshold; CLI boot p50 ≈ 3.0 s paid once per MCP session | `scripts/bench-research.ts`, two runs 2026-10-16/17 (FOUNDING §18.3) |
+
+### 10.1 A concurrency hazard found during verification, and its resolution
+
+The first post-commit full runs failed non-deterministically — `deadlock
+detected` inside `DROP SCHEMA`, `relation "…" does not exist` mid-test —
+because **two schema-droppers were running against the shared `igtrack_test`
+database at once**. Postgres forensics (server log + a `pg_stat_activity`
+sampler during a failing run) caught the interleaving directly: one backend
+`DROP SCHEMA public CASCADE` while a second backend was mid-migration in the
+same schema (its transaction then rolled back), and later a backend dropped
+`drizzle` while another was inserting into `__drizzle_migrations`.
+
+The second dropper was not another user's work: an audit of every OpenCode
+session's shell outputs on this machine found no foreign `igtrack` test run.
+It was **an orphaned vitest coordinator left behind by our own
+pipeline-killed runs** — piping vitest through `Select-Object -First N`
+terminates the wrapper while the underlying vitest process survives and
+keeps executing files (each file's `beforeAll` drops and recreates the
+schema) for minutes afterwards. The failure windows line up with that
+mechanism: errors appear only in the minutes after a killed run, a
+`vitest run workers/monitoring/test/posts-changes.test.ts` process was
+observed with no live parent run, and all failures cease once the orphan
+finished (~08:01Z); every run since — a 7-file batch and two full suites,
+all with statement logging on, showing 11 well-separated sequential
+drop-pairs and no interleaving — passed.
+
+Two operational rules follow, both now obeyed: never terminate a vitest run
+by killing its output pipeline (redirect to a file and let it finish), and
+verify no orphaned `node`/`vitest` process survives before starting the next
+DB-backed run. A per-suite advisory lock over `igtrack_test` remains a
+possible hardening (a concurrent suite would block with a clear message
+instead of corrupting state) but was not implemented in this phase.
+
+Two test-correctness bugs were fixed rather than tolerated (no threshold was
+weakened): benchmark Q9 read `followerSnapshots` (the follow-list machinery)
+where the seeded profile snapshots live under `profileSnapshots`; and three
+`synthesis.test.ts` expectations mis-counted their own fixtures (a repeated
+word, a hashtag word also tallied as a plain term, and a two-gap median).
+The fixed suite is the green G2 above.
+
+### 10.2 Working-tree state
+
+`git status --porcelain` on top of `323a254`: `docs/FOUNDING.md` (§18),
+`docs/DEEP-ACCOUNT-INTELLIGENCE.md` (§9), `docs/verification/VERIFICATION.md`
+(this section), `docs/FEATURES.md` (§17.5), `CHANGELOG.md`, `README.md`,
+`package.json` (`bench:research` script), `scripts/bench-research.ts`
+(CLI-startup probe fix),
+`apps/cli/test/research-benchmark.test.ts` and
+`packages/core/test/synthesis.test.ts` (the two fixes above). Nothing was
+pushed; no release tag was created; `docs/verification/COMPETITIVE-RESEARCH.md`
+and `docs/verification/recon/` are separate uncommitted research artifacts and
+were not touched.
+
+Live-Graph items remain `NOT_VERIFIED` exactly as in §7: no credential exists
+in this environment, and every row exercised by this mission is synthetic
+fixture data or operator-submitted claims.
+
+## 11. Deep-account-intelligence completion mission (2026-10-17 evening)
+
+The completion mission for the roadmap in
+[DEEP-ACCOUNT-INTELLIGENCE.md](../DEEP-ACCOUNT-INTELLIGENCE.md) began with a
+full audit of that document against the working tree. Verdict: the roadmap was
+already implemented and committed at `323a254` (that document's §9 is an
+accurate delta) — migration 0020 with the dedup index, the closed predicate
+registry and refusal list (`packages/core/src/claims.ts`), the claims
+repository with the 23505 → typed-`CONFLICT` mapping, all five ops, all five
+MCP tools, the CLI commands, the `ACCOUNT_RESEARCH` capability entry, the
+seeded claim set, and the §7.2/§7.3 metric pins are present and test-pinned
+`[V]`. The mission therefore verified the whole feature end to end and closed
+the remaining honesty gaps; no new surface was invented.
+
+### 11.1 Verification record (this mission)
+
+| Check | Result |
+|---|---|
+| `pnpm typecheck` | clean, 5/5 workspaces, exit 0 `[V]` |
+| Claims-focused suites (`core/claims`, `core/synthesis`, `core/references`, `database/claims`, `mcp`) | **48/48**, exit 0 `[V]` |
+| Operations + research-benchmark + acceptance (isolated DB) | **83/83**, exit 0 `[V]` |
+| **Full suite, combined tree** (both workstreams, isolated DB, watcher-gated) | **68 files, 574 passed, 1 skipped (the loud Postgres-down guard), 0 failed, exit 0, 403 s** `[V]` |
+| Contended-run diagnosis | Two earlier full runs were contaminated by a second live session running its own suites in the same tree (all suite failures were `beforeAll` 30 s hook timeouts at `createFreshTestDb`; the 4 affected files re-passed **27/27** in isolation) `[V]` |
+| `pnpm docs:capabilities` | regenerated, zero drift `[V]` |
+| `pnpm bench:research` (uncontended, 64-claim synthetic workload) | research p50 198.73 ms / **p95 411.23 ms** vs the pre-established < 1500 ms pin; claims list p95 41.10 ms; plan p95 60.01 ms; CLI boot p50 4.33 s (dev-mode tsx, paid once per session) `[V]` |
+| MCP surface | `EXPECTED_TOOLS` pinned at 24, confirm-gate (`z.literal(true)`) on retract, `readOnlyHint` on list/research/plan — `apps/cli/test/mcp.test.ts` `[V]` |
+| CLI smoke, scratch DB `igtrack_smoke`, synthetic only | `setup` → `research target_a` (all sections; empty themes/cadence/audience carry reasons; the 257-day-old claim flags `due for review`; retracted claim rendered as retracted) → `claims add` (excerpt hash stored) → duplicate refused naming the existing claim (exit 2) → `EMPLOYMENT_STATUS` refused with the FOUNDING pointer (exit 2) → `claims retract --reason --yes` → `claims list` → `plan` (D47 kind `NOT_APPLICABLE`) → `--format md` → documented launcher `node apps/cli/bin/igtrack.mjs research --json` (`ok: true` envelope) `[V]` |
+
+**Concurrency lesson, upgraded (addends §10.1):** this evening the colliding
+runner was not an orphan but a second, live coding session working in the same
+checkout. Two mitigations proved sufficient and are now the operating rule:
+(1) point DB-backed runs at a scratch database via the documented
+`IGTRACK_TEST_DATABASE_URL` (here `igtrack_test2`) so two sessions cannot
+share schema state, and (2) gate a run on the absence of foreign
+`vitest` processes. The per-suite advisory lock remains possible hardening,
+still not implemented.
+
+### 11.2 Fixes and deliberate non-changes
+
+- **Plan §7.1 fixture-name drift fixed:** the seed's owned target is
+  `target_a` (claims concern the fictional "Aurora Print Studio"), not the
+  `aurora.wilde` the plan named; `dune.harbor` (discovery.json) was already
+  correct.
+- **README:** gained an honest "Records what sources say" bullet and a
+  "Research with cited claims" section — implemented, verified functionality
+  only.
+- **Not changed:** the other workstream's uncommitted config-readiness files
+  (this mission's runs simply cover them; the combined-tree green above
+  includes them); the CHANGELOG's Deep-intelligence `**Docs:**` bullet, which
+  the concurrent session is extending for its own work — one line, one writer.
+
+### 11.3 Working-tree state
+
+Uncommitted on top of `323a254`, two intermixed workstreams, nothing pushed,
+no tag: the earlier verification mission's files (§10.2), plus this mission's
+`docs/DEEP-ACCOUNT-INTELLIGENCE.md` (§7.1 drift fix + §10 status block),
+`docs/FOUNDING.md` (§18.3 re-verification rows), `README.md` (research
+section), and this section — alongside the concurrent session's config-readiness
+work (`packages/ingestion/src/config/`, `graph-provider.ts`, CLI doctor
+surfaces, `config-readiness.test.ts`).
+
+`NOT_VERIFIED`, unchanged: every live-Graph row (no credential exists here),
+and the §4.7 agent-workflow bounds, which remain a documented protocol by
+design (DEEP-ACCOUNT-INTELLIGENCE §9).
+
+## 12. Research-acquisition mission (2026-10-18)
+
+Founder-mode mission: give the product an autonomous, bounded, lawful
+public-web research-acquisition layer (FOUNDING D69; DEEP-ACCOUNT-INTELLIGENCE
+11). This section records what was verified and how, in this environment.
+
+### 12.1 Gates run, actual results
+
+| Gate | Command | Result |
+|---|---|---|
+| Typecheck | pnpm typecheck | 5/5 workspaces clean (core, ingestion, database, monitoring, cli) |
+| Research matrix | pnpm exec vitest run packages/core/test/research.test.ts packages/ingestion/test/research-{extract,fetch,search}.test.ts packages/database/test/research.test.ts apps/cli/test/research-run.test.ts apps/cli/test/mcp.test.ts | 93 passed, 0 failed (core 12, extract 14, fetch 19, search 12, database 10, engine 19, MCP 7) |
+| Registry drift | pnpm docs:capabilities then the capability-matrix suite | regenerated 362-line docs/CAPABILITIES.md; test green; 20 of 25 obtainable |
+| Capability honesty | pps/cli/test/output.test.ts | 13/13 � includes the new WEB_RESEARCH available pin and the engineSupplied supply-mode check |
+| Dossier/coverage consumers | pps/cli/test/acceptance.test.ts, pps/cli/test/operations.test.ts | 82/82 combined on an isolated database � new coverage row adds no drift |
+
+Isolation: DB-backed suites ran against IGTRACK_TEST_DATABASE_URL =
+igtrack_test2 because a concurrent workstream's vitest process was
+contending for the shared igtrack_test schema (the �2.6 hazard with an
+external cause, recurring); one mid-run collision surfaced as 42P01
+(undefined table) during a seed, and the re-run against the isolated database
+passed 29/29 (engine 19 + database 10).
+
+### 12.2 What the tests pin (the product promise, not just the code)
+
+- Bounds are compile-time constants; a hypothetical env var cannot widen them
+  (esearch.test.ts).
+- Instagram-family hosts, credential URLs, non-http(s) schemes, non-standard
+  ports, private/loopback/link-local/metadata addresses (post-DNS), and
+  robots-disallowed paths are each refused with a typed reason; a redirect to
+  an unsafe host is refused per-hop (esearch-fetch.test.ts).
+- A page body carrying a prompt-injection payload produces zero extraction
+  candidates; extraction reads only the four field families; a sensitive
+  predicate from a page is refused by the shared registry, and the run stores
+  nothing (esearch-extract.test.ts, esearch-run.test.ts).
+- A run's per-document outcomes (fetched/reused/failed/refused) round-trip
+  through migration 0021; owner scoping is unconditional; the cross-user
+  denial scenario runs last and passes (esearch-run.test.ts,
+  packages/database/test/research.test.ts).
+- The MCP tool is schema-bounded (missing question / maxSources: 11 / 11
+  URLs rejected by the zod schema itself) and declared eadOnlyHint: false
+  (mcp.test.ts).
+
+### 12.3 Working-tree state
+
+Uncommitted on top of 323a254, intermixed with the concurrent session's
+work (config-readiness, igtrack_audit); nothing staged, committed, tagged or
+pushed. This mission touched: packages/core (research module, capability
+registry + matrix, tests), packages/ingestion (research fetcher/extractor/
+search + tests), packages/database (migration 0021, research repository,
+dossier esearchRuns count, tests), pps/cli (engine op, CLI/MCP wiring,
+engine + MCP tests), and the docs named in DEEP-ACCOUNT-INTELLIGENCE 11.1.
+Foreign files and hunks (audit command/tests/tool, config-readiness) were not
+modified.
+
+### 12.4 NOT_VERIFIED, with the exact prerequisite
+
+- **Live search — keyless leg VERIFIED 2026-10-19:** `igtrack audit sel_win_`
+  with IGTRACK_RESEARCH_SEARCH_PROVIDER=auto and no key returned real
+  SEARCH_SUCCEEDED results via the keyless FreeSerp index (2 queries, 10
+  candidates; relevance gate then applied). **Live Brave search (keyed leg):**
+  IGTRACK_RESEARCH_SEARCH_PROVIDER=brave +
+  IGTRACK_RESEARCH_SEARCH_API_KEY, then one live igtrack research --run
+  with a --url. Without a key, auto falls through to FreeSerp; =brave
+  without a key answers UNAVAILABLE with the reason (never invented
+  sources) — that honest path is itself test-pinned.
+- **Live Graph:** unchanged � pnpm verify:graph with a real token.
+- **CI:** not executable in this environment; no CI claim is made.
+
+Status: **COMPLETE** for everything locally verifiable; the two live items
+above are **BLOCKED - EXTERNAL PREREQUISITE** by credential absence, reported
+as NOT_VERIFIED in the capability registry (WEB_RESEARCH liveState) and in
+DEEP-ACCOUNT-INTELLIGENCE 11.3.
+
+## 13. Arbitrary-username investigation mission (2026-10-18/19)
+
+Scope: the founder's restated central requirement - enter an arbitrary unknown
+username, receive the most comprehensive lawful evidence-backed report, with
+every unavailability explained. The audit of the tree found one structural
+gap: the research engine could only research a target the operator already
+held, so the workflow began in the wrong place for a stranger's handle. Shipped
+- FOUNDING 19 (D70-D72), opAuditWebProbe, the audit's `web` + `summary`
+sections, CLI `--url`/`--max-sources`, MCP `igtrack_audit` urls/maxSources,
+docs/verification/SOURCE-AUDIT.md, README/CHANGELOG/DEEP 12.
+
+Verification:
+
+- **Typecheck:** `pnpm typecheck` - 5/5 workspaces clean, exit 0.
+- **Audit suite:** `apps/cli/test/audit.test.ts` - 21/21 (12 original + 9
+  public-web scenarios), hookTimeout 180s against the live test database.
+- **Extractor + transport:** `packages/ingestion/test/research-extract.test.ts`
+  16/16, research-fetch + research-search green (47 checks across the three).
+- **Full suite:** `pnpm exec vitest run` — **75/75 test files passed** on the
+  finished tree (a longer budget only to defeat host load: the first concurrent
+  run timed out one scheduler test that needs 19.2s of a 30s budget).
+- **Scheduler:** 9/9 in isolation. S11 takes 19.2s of a 30s budget on this
+  host, so the concurrent full-suite run timed it out - load-induced, not a
+  regression; isolated re-run passes.
+- **Environment note:** the Docker engine had stopped mid-session; `igtrack-db`
+  was restarted with `docker compose up -d` and every DB-backed suite above
+  was re-run afterwards against it.
+
+Live verification (real internet, real fetcher, 2026-10-18):
+
+- `igtrack audit sel_win_ --url "https://example.org,https://www.wikipedia.org"`
+  - both FETCHED, HTTP 200, 577 B / 122197 B, real SHA-256 digests and
+  retrieval timestamps; 383 links counted and NOT followed (depth 1); no rows
+  written, no target registered; absent search provider reported UNAVAILABLE
+  with the exact env-var remedy.
+- `igtrack audit sel_win_ --url https://www.anthropic.com` - 201400 B, 4 cited
+  facts (field, method, source URL, retrieval time, per-fact uncertainty).
+- That probe found three honesty defects no fixture reproduced; all fixed and
+  pinned under FOUNDING D72 (meta-description phrase mining deleted, HTML
+  entities decoded at both extraction gates, CONFLICTED downgraded to
+  SINGLE_SOURCE when only one domain disagrees with itself).
+
+Status: **COMPLETE** for everything locally and publicly verifiable. Still
+**BLOCKED - EXTERNAL PREREQUISITE**: live Brave search (needs
+IGTRACK_RESEARCH_SEARCH_PROVIDER=brave + IGTRACK_RESEARCH_SEARCH_API_KEY) and
+live Graph/Business Discovery (needs a real long-lived token +
+IGTRACK_GRAPH_BUSINESS_DISCOVERY=1). Neither is exercised anywhere in this
+repository without its credential.
+*Addendum (2026-10-19, D73): the live-search prerequisite is DISCHARGED for the
+default path — `igtrack audit sel_win_` with IGTRACK_RESEARCH_SEARCH_PROVIDER=auto
+and no key ran a real keyless search (FreeSerp index: SEARCH_SUCCEEDED, 2 queries,
+10 candidate URLs; retrieval COMPLETED_PARTIAL; relevance gate discarded every
+non-naming page → 0 facts, honestly). Only the keyed Brave leg and live Graph
+remain credential-blocked.*
+
+## 14. Requirement-mapping mission (2026-10-19)
+
+Scope: finish the founder-level requirement by (a) writing the part-1
+deliverable — the clause-by-clause mapping of the central use case to
+implementation, source, auth, ownership, legal constraint and verification —
+and (b) closing the two reporting honesty gaps that remained in `igtrack audit`.
+
+Delivered:
+
+- **`docs/verification/REQUIREMENT-AUDIT.md`** (new). Maps FOUNDING §14.1
+  A1-A10, §15, §18 and §19 to code paths (`opAudit`, `opAuditWebProbe`,
+  `opLookup`, `opTargetAdd --observed`, `opResearch`, `opDossier`,
+  `opClaimAdd`, `opResearchRun`, `opRelationships`, `opTaggedMedia`,
+  `opMentionedCommentProbe`, the scan executors), names the lawful source and
+  credential each needs, states whether the target must be owned, lists the
+  refusals as refusals, cross-references the 25 registry entries by
+  `liveState`, and gives the exact prerequisite for every `NOT_VERIFIED` row.
+  The one live probe on record (public-web fetch, 2026-10-18) is cited for the
+  web phase only; nothing else is claimed live.
+- **Stale evidence is named, not hidden.** `opAudit` gained
+  `record.claims.dueForReview` (claims whose retrieval basis is past
+  `CLAIM_REVIEW_HORIZON_DAYS = 180`), a `Stale evidence:` limitation, a
+  `DUE_FOR_REVIEW` marker in the summary's third-party-claim row, a `STALE —`
+  prefix on plan steps whose stored observation is older than its cadence, and
+  a human line naming the horizon. No existing vocabulary was invented:
+  `DUE_FOR_REVIEW` and plan-step `STALE` already existed. Nothing is expired,
+  retracted, downgraded or dropped (FOUNDING §18).
+- **The audit's human screen renders each web fact's `uncertainty`** as a
+  `caveat:` suffix, so a per-fact qualifier is no longer visible only in
+  `--json`.
+- Docs: `CHANGELOG.md` (dated subsection), `README.md` (audit section),
+  `docs/DEEP-ACCOUNT-INTELLIGENCE.md` §13.
+
+Gates run, actual results (2026-10-19):
+
+- **Typecheck:** `pnpm typecheck` — 5/5 workspaces clean, exit 0.
+- **Full suite:** `pnpm test` — **75/75 files, 686 passed, 1 skipped, 0
+  failed** (baseline before this pass: 684 passed; +2 from the staleness
+  tests).
+- **New tests:** `apps/cli/test/audit.test.ts` now 23/23 —
+  *"names stale evidence instead of letting it read as current"* (counts the
+  horizon-passing claim, limitation text, summary marker, human line; asserts
+  the count is strictly less than the active total so staleness cannot read as
+  expiry) and *"carries the STALE label when the stored evidence behind a plan
+  step is older than its cadence"* (backdates the job's `completed_at`, then
+  asserts the label travels into the audit's next steps).
+- **Debugging note:** the first attempt asserted against the wrong target —
+  the seed's claim fixtures are attached to its own target `target_a`, not to
+  the fixture account `aurora.wilde` (`packages/database/src/seed/seed.ts`,
+  mirrored by `research-benchmark.test.ts`'s `SEEDED_USERNAME`). Verified
+  against the test database with a direct query on `claims` joined to
+  `targets`/`ig_accounts` before correcting the test; no product code was
+  changed to make it pass.
+
+Status: **COMPLETE** for everything locally verifiable. External blockers
+unchanged and unfabricated: a real long-lived Graph token (+ 
+`IGTRACK_GRAPH_BUSINESS_DISCOVERY=1`) for the 17 `NOT_VERIFIED` registry
+entries, and a Brave-compatible key for search-provider candidates. CI was not
+run (not runnable here; no workflow was activated).
+
+## 15. Discovery-quality mission (2026-10-19, D74)
+
+Scope: Phase 2 of the arbitrary-username workflow — improve the public-web
+phase's **discovery quality** (query strategy, candidate ranking/dedup,
+retrieval honesty, provider benchmarking, actionable sparse-result reporting)
+without weakening any evidence standard.
+
+Root cause, found by live diagnosis rather than summary counts: the keyless
+index (FreeSerp) **ignores quoted phrases and tokenizes `sel_win_` into
+`sel`+`win`**, so Phase 1's two derived queries (`"H" instagram`, `"H"
+contact about`) requested token-overlap junk. Retrieval and the relevance gate
+were correct — coverage was the defect. Evidence:
+`site:instagram.com "sel_win_"` → 0 results; every quoted variant → "SEL
+Wins"/"sel wine" junk; `site:` itself is honored; raw response shape matches
+the adapter's `results[].url/title/snippet` mapping exactly.
+
+Delivered (FOUNDING D74):
+
+- **`handleSearchQueries`** (`packages/ingestion/src/research/queries.ts`):
+  fixed budget of 4 distinct query forms (quoted, profile-URL, `@`-mention,
+  bare), ordered, deduped, leading `@` stripped, `HANDLE_QUERY_LIMIT` named.
+- **Explainable ranking + dispositions** in `opAuditWebProbe`: stable signal
+  sort (handle-in-URL 3 > title 2 > snippet 1 > none; policy-refused last),
+  every candidate reported `PLANNED` / `SKIPPED_BY_POLICY` / `NOT_FETCHED`
+  with a reason, every query with its result count or error.
+- **Policy refusals are `skipped`, never `failed`** (`skipped > 0` →
+  `COMPLETED_PARTIAL`), separating "no request was made" from "a request
+  broke".
+- **Canonical-URL dedup** in `normalizeResearchUrl` (tracking params, fragment,
+  host case, trailing slash; content params kept).
+- **`outcomeClass`** — the seven one-label diagnoses of where the phase
+  stopped — plus zero-fact next-step branching (`PAGES_IRRELEVANT` → weak
+  coverage, never "no evidence exists"), an unsearched-source-classes note, and
+  an `outcome` row in the human render.
+- **`scripts/bench-search.ts`** — a live benchmark of the real pipeline,
+  excluded from `pnpm test`, with an honest `NOT MEASURED` row for the keyed
+  leg.
+
+Gates run, actual results (2026-10-19):
+
+- **Typecheck:** `pnpm typecheck` — 5/5 workspaces clean, exit 0.
+- **Full suite:** `pnpm test` — **76 files, 707 passed, 1 known skip, 0
+  failed** (baseline: 702 passed; +5 in `research-queries.test.ts`, +4 new
+  audit scenarios, plus extended pins).
+- **Docs:** `pnpm docs:capabilities` regenerated (WEB_RESEARCH `liveEvidence`
+  now carries the Phase-2 numbers); FOUNDING D74, SOURCE-AUDIT §10 and the
+  CHANGELOG dated bullets written; no stale "2 derived queries" wording
+  outside dated historical records.
+- **CLI smoke (live):** `igtrack audit sel_win_` (JSON and human) — 4 queries ×
+  5 = 20 results → 15 canonical candidates, 4 fetched / 1 `TIMEOUT`, gate
+  discarded 22 values from 4 non-naming pages, `outcomeClass
+  PAGES_IRRELEVANT`, per-candidate dispositions, weak-coverage next step, no
+  secret-like string in either rendering.
+- **Live benchmark:** `sel_win_` → 0 facts / `PAGES_IRRELEVANT`; control
+  handle `nasa` → 4/4 pages naming the handle, 41 facts /
+  `EVIDENCE_EXTRACTED` (table in SOURCE-AUDIT §10).
+
+Status: **COMPLETE** for everything locally verifiable. Remaining limitations,
+stated as such: Brave's keyed leg is still live-**unverified** (no key in this
+environment — `scripts/bench-search.ts <handle>` with
+IGTRACK_RESEARCH_SEARCH_API_KEY set fills its row); coverage is one index
+(`auto` without a key), so a zero result is a coverage statement, never a
+verdict; FreeSerp's shallow query language is a permanent property the design
+compensates for (four query forms + post-retrieval gate) rather than a bug to
+fix. No credential was requested or written anywhere; no CI, push, release or
+tag occurred.
+
+## 16. Audit-quality benchmark mission (2026-10-19, D75)
+
+Question: does the pipeline's evidence hold up against the real web, judged
+against ground truth that the pipeline never saw?
+
+Delivered (FOUNDING D75; tables in SOURCE-AUDIT §11):
+
+- **Seven-case evaluation set** (`apps/cli/src/bench.ts`) — one handle per
+  category the mission names, ground truth verified independently of the
+  pipeline (direct HTTP fetches + entity lookups, dated), expectations kept
+  separate from ground truth and falsifiable. The benchmark measures candidate
+  precision, retrieval, exact-handle pages, support-checked claims (every fact
+  re-verified against its retrieved body, canonicalized both ways), attribution
+  as a level (HOST/URL/TITLE/BODY), duplicates, failures and latency — raw
+  fact count is reported, never the verdict.
+- **Three layers, separate by construction:** mocked (vitest, never network),
+  saved (`--saved` replays committed recordings
+  `apps/cli/test/fixtures/bench/{nasa,natgeo,nasaa}.json` through the real
+  probe offline — reproducing the live numbers exactly), live
+  (`pnpm bench:audit`, never part of `pnpm test`). Brave rows print
+  `NOT MEASURED` when no key exists; no comparison was fabricated.
+- **Five corrections, each traced to a defect the before-run produced:** the
+  self-identification rule (6 of 24 natgeo facts named the wrong entity; 22
+  confident facts for `rgb`), delimiter-aware handle matching (`nasaa` in
+  `nasaa_research`, `rgb` in `sRGB`), profile-only related-account links
+  (3 share-button URLs + 1 `facebook.com` sameAs), checker canonicalization
+  (5 of natgeo's "unsupported" facts were escaping in the checker, not missing
+  evidence), and host-level ground-truth matching (nasa's verified domain was
+  reached via a subpage, reported as a miss).
+- **One falsified expectation, corrected on the record:** `nasaa` FORBID was
+  wrong — the string names real organizations (nasaa-arts.org HTTP 200, brand
+  596×; nasaa.org exists behind 403 to any user-agent). Case is REVIEW with
+  that evidence; the gate itself never moved.
+
+After the corrections (live, 2026-10-19): nasa 15 facts/100% support/0%
+duplicates/gt 1/1 fetched, natgeo 2 facts/100% support with 16 values counted
+and none mis-attributed, github 333 facts/100% support/0 unattributed,
+rgb 0 facts/`RELEVANT_NO_FACTS` (was 22 confident facts), nasaa 6
+string-true facts/REVIEW, sel_win_ and zqwxplm2026 honest zeros — every
+expectation MET or REVIEW, none MISSED.
+
+Gates run, actual results (2026-10-19):
+
+- **Typecheck:** `pnpm typecheck` — all workspaces clean, exit 0.
+- **Full suite:** `pnpm test` — **78 files, 736 passed, 1 known skip, 0
+  failed** (baseline §15: 76 files/707; +2 files — `bench.test.ts` 21 checks,
+  `bench-saved.test.ts` 3 replay checks — plus +3 extractor profile-only
+  checks and +2 audit self-identification/bypass scenarios, and 2 audit
+  fixtures updated to keep their gate-contrast intent under the stronger rule).
+- **Capability checks:** `pnpm docs:capabilities` regenerated; the core
+  registry pin suite passes (10 files/79 tests); `igtrack capabilities` exit
+  0 (20 of 25 obtainable). WEB_RESEARCH `liveEvidence` now carries the dated
+  Phase-3 measurement alongside the Phase-2 record.
+- **CLI smoke (live):** `igtrack audit nasa` — `SEARCH_SUCCEEDED` ·
+  `EVIDENCE_EXTRACTED` · 15 facts; totals show `not attributed (page named the
+  handle, value names the source) 19`; the note and per-document lines explain
+  the rule and its `--url` asymmetry; secret scan of the full render clean.
+  `pnpm bench:audit --cases nasa` — MET, Brave `NOT MEASURED`, exit 0.
+
+Status: **COMPLETE** for everything locally verifiable. Stated limitations:
+the Brave keyed leg remains live-unverified (no key anywhere in this
+environment); the committed saved layer covers 3 of the 7 cases (re-recording
+all seven is one command); natgeo's verified ground-truth host was not
+returned by the one live index in the measured runs (reported 0/1 honestly,
+not papered over); nasaa.org answers 403 to every user-agent, so that site's
+coverage is a dated gap, not an absence. No credential was requested or
+written anywhere; no CI, push, release or tag occurred; all work remains
+uncommitted in the working tree.
