@@ -9,6 +9,14 @@ its distinguishing feature is *epistemic honesty*: every claim carries
 provenance, and anything not observable is reported as UNAVAILABLE **with a
 reason** — never as zero, never as a guess.
 
+The product is **username-first**: one handle in, every permitted source
+investigated automatically, one provenance-backed dossier out. `igtrack
+investigate <username>` (MCP `igtrack_investigate`) is the primary workflow;
+the lower-level commands exist for when you want exactly one of them. The
+per-category truth about what each source can actually return lives in
+[docs/SOURCE-MATRIX.md](docs/SOURCE-MATRIX.md) — read it before claiming a
+field is obtainable or unobtainable.
+
 That property is the product. Most of what follows exists to stop you from
 breaking it while making something else work.
 
@@ -92,6 +100,47 @@ behaviour is more honest.
    caller-supplied user id where an authenticated one exists.
 10. **No paid dependencies in the default path.** No hosted service, no metered
     API, no telemetry. Postgres is the only required external service.
+11. **An observation belongs to the account it is about.** A source observes a
+    bounded set of accounts (a fixture set observes one, the operator's export
+    observes one, the Graph path observes the authorized owned one). A provider
+    declares that set with `observesAccount?`; the worker checks it before
+    writing anything, `igtrack scans run` and the scheduler refuse to enqueue a
+    scan it cannot answer, and the fixture provider additionally refuses every
+    account-scoped capability for a foreign account at its own boundary. Never
+    serve one account's bytes for another account's name — a synthetic roster
+    filed under a real handle turns every downstream derivation into a claim
+    about a person nobody observed. A refusal says "this source does not
+    observe that account", never "that account does not exist".
+12. **Evidence classes are never blended.** A synthetic observation is
+    evidence about a fixture, not about a person. Relationship rankings are
+    computed over one source class at a time and rendered as separate
+    sections; a follow diff only ever compares snapshots from the same
+    source; and a stored record carries its class (`SYNTHETIC` / `LIVE` /
+    `MIXED` / `NONE`) wherever its row counts are shown. "There are rows" and
+    "the account was observed" are different facts.
+
+## 3.1 The investigation pipeline
+
+`opInvestigate` ([apps/cli/src/tools.ts](apps/cli/src/tools.ts)) is the
+primary workflow: one handle in, one dossier out. It orchestrates stages —
+IDENTITY, PLATFORM, CONTENT, RELATIONSHIPS, WEB, CORRELATE, DOSSIER — and
+**composes** the existing operations rather than reimplementing them, so the
+dossier can never disagree with `igtrack research`.
+
+If you add a stage, a source, or a field:
+
+- report the stage **separately**, with its source, what it retrieved and why
+  it stopped. A stage that could not run says so with the source's own words.
+- give the stage's findings their **evidence class** (`packages/core/src/
+  investigation.ts`). The class follows the SOURCE — a fixture set that observes
+  an account produces `SYNTHETIC_FIXTURE`, never a platform observation.
+- add the gap to the dossier's `gaps`, with the reason and what would change
+  it. A dossier that lists no gaps is either complete or lying.
+- keep the exit code honest: 0 = something was retrieved, 4 = the dossier was
+  produced and nothing was, 2 = usage, 3 = a blocked configuration.
+- update [docs/SOURCE-MATRIX.md](docs/SOURCE-MATRIX.md): it is the operative
+  per-category truth, written against the code, and a new field belongs in a
+  row with its source, permission, limits, refusal behaviour and test.
 
 ## 4. Adding capability to the agent surface
 

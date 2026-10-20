@@ -40,7 +40,7 @@ const OWNED = "aurora.wilde"; // the account the fixture set observes
 const OBSERVED = "dune.harbor"; // the other public account the fixture can discover
 
 async function probe(url: string): Promise<boolean> {
-  const sql = postgres(url, { max: 1, connect_timeout: 3 });
+  const sql = postgres(url, { max: 1, connect_timeout: 10 });
   try {
     await sql`SELECT 1`;
     return true;
@@ -402,6 +402,11 @@ describe.skipIf(!databaseUp)("acceptance scenarios", () => {
   });
 
   it("A25 queueing is local and execution is what observes: queue → plan PENDING → work → plan DONE", async () => {
+    // The profile counts below come from a scan of the OWNED account itself.
+    // The seeded demo data belongs to a different (also fictional) account,
+    // and the fixture set observes exactly one account — so a scan of any
+    // other target is refused rather than answered with the wrong bytes.
+    await opScanRun(ctx, { target: OWNED, kinds: ["PROFILE_SCAN"] });
     const run = await opScanRun(ctx, { target: OWNED, kinds: ["STORY_SCAN"] });
     expect(run.enqueued).toHaveLength(1);
     const queued = await opPlan(ctx, { target: OWNED });

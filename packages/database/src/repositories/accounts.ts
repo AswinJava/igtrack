@@ -186,7 +186,11 @@ async function identityConflict(
 // Reverse lookup by platform id, used only to explain an identity conflict in
 // the error above. Not a matching route: D52 keeps the id an output of an
 // observation everywhere else.
-async function getAccountByIgId(db: DbLike, igId: string): Promise<AccountRecord | null> {
+//
+// Exported so a caller can CHECK the binding BEFORE it writes: an
+// observation carrying an id that already belongs to a different username is
+// a different account, and merging the two would merge two histories.
+export async function getAccountByIgId(db: DbLike, igId: string): Promise<AccountRecord | null> {
   const rows = await db
     .select()
     .from(igAccounts)

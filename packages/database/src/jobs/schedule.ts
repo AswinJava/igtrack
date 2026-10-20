@@ -254,6 +254,8 @@ export async function listActiveTargetIds(
 
 export interface TargetScanPrefs {
   id: string;
+  /** The account this target is about — the scheduler's identity gate needs it. */
+  username: string;
   /** Effective cadence multiplier (>= 0.25); NULL/1 = deployment default. */
   scanCadenceMult: number | null;
   /** Explicit enabled scan kinds; NULL = all schedulable kinds. */
@@ -306,21 +308,24 @@ export async function listActiveTargetPrefs(
   offset = 0,
 ): Promise<TargetScanPrefs[]> {
   const rows = await db.execute(sql`
-    SELECT id::text AS id, scan_cadence_mult, scan_kinds, observation_mode
-    FROM targets
-    WHERE status = 'ACTIVE'
-    ORDER BY created_at ASC, id ASC
+    SELECT t.id::text AS id, ia.username, t.scan_cadence_mult, t.scan_kinds, t.observation_mode
+    FROM targets t
+    JOIN ig_accounts ia ON ia.id = t.ig_account_id
+    WHERE t.status = 'ACTIVE'
+    ORDER BY t.created_at ASC, t.id ASC
     LIMIT ${limit} OFFSET ${offset}
   `);
   return Array.from(
     rows as unknown as Array<{
       id: string;
+      username: string;
       scan_cadence_mult: string | number | null;
       scan_kinds: string[] | null;
       observation_mode: string | null;
     }>,
   ).map((row) => ({
     id: row.id,
+    username: row.username,
     scanCadenceMult:
       row.scan_cadence_mult === null ? null : Number(row.scan_cadence_mult),
     scanKinds: row.scan_kinds,

@@ -9,6 +9,7 @@ import {
   SETUP_HELP,
 } from "./commands/setup.js";
 import { AUDIT_HELP, runAudit } from "./commands/audit.js";
+import { INVESTIGATE_HELP, runInvestigate } from "./commands/investigate.js";
 import { runTargets, TARGETS_HELP } from "./commands/targets.js";
 import { runScans, runWork, SCANS_HELP } from "./commands/scans.js";
 import {
@@ -64,6 +65,8 @@ Track
   scans <sub>           run | list                              (scans --help)
 
 Observe
+  investigate <username>  One username in, one dossier out: every supported
+                           stage, what was retrieved, and what is still unknown
   audit <username>      One evidence-honest report: config, probe, stored record
   work                  Run the worker now: one scheduler tick + drain the queue
   activity              What changed, newest first, with evidence ids
@@ -116,6 +119,12 @@ async function dispatch(args: ParsedArgs): Promise<number> {
         return 0;
       }
       return runAudit(args);
+    case "investigate":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${INVESTIGATE_HELP}\n`);
+        return 0;
+      }
+      return runInvestigate(args);
     case "status":
       return runStatus(args);
     case "doctor":

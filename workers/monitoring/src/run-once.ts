@@ -23,7 +23,7 @@ export async function runOnce(): Promise<void> {
     const src = providerFromEnv();
     const workerId = makeWorkerId();
     try {
-      await runSchedulerTick(handle.db);
+      await runSchedulerTick(handle.db, { provider: src.provider });
     } catch (err) {
       console.error("scheduler tick failed (continuing to poll):", err);
     }

@@ -10,6 +10,7 @@ import {
 } from "./observations.js";
 import { listStories, listMentionsForStoryWithAccount, sightingSummariesForAccount } from "./stories.js";
 import { listPosts, listCommentsForPostWithAccount, listChildrenForPost } from "./posts.js";
+import { listTaggedMedia } from "./tagged-media.js";
 import {
   latestFollowSnapshot,
   listMembersForSnapshot,
@@ -490,6 +491,8 @@ export interface TargetDetailBundle {
   // snapshot, not just the count.
   followFollowerRoster: FollowRoster | null;
   followFollowingRoster: FollowRoster | null;
+  /** Media by other accounts in which this account is tagged (the tags edge). */
+  taggedMedia: Awaited<ReturnType<typeof listTaggedMedia>>;
   deltas: DeltaWithAccount[];
   jobs: JobQueueSummary[];
 }
@@ -510,7 +513,7 @@ export async function getOwnedTargetDetail(
   const account = accountRows[0];
   if (account === undefined) return null;
 
-  const [snapshots, changes, health, storiesList, postsList, followFollowers, followFollowing, deltas, jobs, sightings] =
+  const [snapshots, changes, health, storiesList, postsList, followFollowers, followFollowing, deltas, jobs, sightings, taggedMediaRows] =
     await Promise.all([
       listProfileSnapshots(db, account.id, { limit: 20 }).catch(() => []),
       listProfileChanges(db, account.id, { limit: 20 }).catch(() => []),
@@ -522,6 +525,7 @@ export async function getOwnedTargetDetail(
       listRecentDeltas(db, owned.id, { limit: 20 }).catch(() => []),
       listJobsForTarget(db, owned.id, 8).catch(() => []),
       sightingSummariesForAccount(db, account.id).catch(() => ({})),
+      listTaggedMedia(db, account.id, 50).catch(() => []),
     ]);
 
   const storyMentions: TargetDetailBundle["storyMentions"] = [];
@@ -588,6 +592,7 @@ export async function getOwnedTargetDetail(
             usernames: followingRosterRows.map((r) => r.username),
             totalObserved: followFollowing.totalObserved,
           },
+    taggedMedia: taggedMediaRows,
     deltas,
     jobs,
   };
@@ -660,18 +665,76 @@ export const RELATIONSHIP_SIGNAL_WEIGHTS = {
 
 export const RELATIONSHIP_RECENCY_WINDOW_DAYS = 30;
 
+/**
+ * Evidence classes, split by what they are evidence OF.
+ *
+ * A live observation is evidence about a person. A synthetic one is evidence
+ * about a fixture. The two are never blended into one ranking: a synthetic
+ * interaction can never move a live score, and a live deployment never shows
+ * a demo rank as if it were a relationship.
+ *
+ * The split is by SOURCE CLASS, not by a hard-coded exclusion, so a
+ * synthetic deployment still renders its own relationships — clearly
+ * labelled — instead of going silently empty. An empty live ranking beside a
+ * populated synthetic one is a readable finding; a single blended ranking is
+ * not.
+ */
+export const RELATIONSHIP_LIVE_SOURCE_KINDS = ["GRAPH_API", "IMPORT", "USER_PROVIDED"] as const;
+export const RELATIONSHIP_SYNTHETIC_SOURCE_KINDS = ["FIXTURE"] as const;
+
+/** SQL: a row's source belongs to one of the given evidence classes. */
+function sourceKindFilter(sourceKinds: readonly string[]): SQL {
+  return sql`src.kind IN (${sql.join(
+    sourceKinds.map((kind) => sql`${kind}`),
+    sql`, `,
+  )})`;
+}
+
+/** SQL: a snapshot's source belongs to one of the given evidence classes. */
+function snapshotSourceKindFilter(sourceKinds: readonly string[]): SQL {
+  return sql`source_id IN (SELECT id FROM sources WHERE kind IN (${sql.join(
+    sourceKinds.map((kind) => sql`${kind}`),
+    sql`, `,
+  )}))`;
+}
+
 const EVIDENCE_PER_ACCOUNT = 3;
 
+export interface RelationshipRanking {
+  ranks: RelationshipRank[];
+  /** The evidence classes this ranking was computed over. Never blended. */
+  sourceKinds: readonly string[];
+}
+
+/**
+ * The relationship ranking for one target, computed over ONE evidence class
+ * at a time.
+ *
+ * `sourceKinds` is a required argument on purpose. A caller states which
+ * class of evidence the ranking is about, and the query can only ever mix
+ * rows from that class — so a synthetic interaction is structurally unable to
+ * reach a live ranking, and a live one is structurally unable to borrow a
+ * demo row. The caller renders the two classes separately (see
+ * `opRelationships`), because one blended ranking would be the lie.
+ */
 export async function getRelationshipsForUser(
   db: Database,
   userId: string,
   targetId: string,
-): Promise<RelationshipRank[]> {
+  sourceKinds: readonly string[],
+): Promise<RelationshipRanking> {
   const owned = await getOwnedTarget(db, userId, targetId);
-  if (owned === null) return [];
+  if (owned === null) {
+    return { ranks: [], sourceKinds };
+  }
+  const kindFilter = sourceKindFilter(sourceKinds);
+  const snapshotKindFilter = snapshotSourceKindFilter(sourceKinds);
 
   const [deltas, mentionRows, commentRows, deltaRows, evidenceRows] = await Promise.all([
-    listRecentDeltas(db, owned.id, { limit: 50 }).catch(
+    listRecentDeltas(db, owned.id, {
+      limit: 50,
+      sourceKinds,
+    }).catch(
       () => [] as DeltaWithAccount[],
     ),
     query<{ username: string; count: number; count_window: number; last_at: Date | string }>(
@@ -686,11 +749,12 @@ export async function getRelationshipsForUser(
         FROM story_mentions sm
         JOIN ig_accounts ia ON ia.id = sm.mentioned_account_id
         JOIN stories s ON s.id = sm.story_db_id
-        WHERE s.ig_account_id = ${owned.igAccountId}
+        JOIN sources src ON src.id = s.source_id
+        WHERE s.ig_account_id = ${owned.igAccountId} AND ${kindFilter}
         GROUP BY ia.username
         ORDER BY count DESC
       `,
-    ).catch(() => [] as Array<{ username: string; count: number; count_window: number; last_at: Date | string }>),
+    ).catch(() => [] as Array<{ username: string; count: number; count_window: number; last_at: Date | string; synthetic_count: number }>),
     // Comment authorship on the owned account's media (D43). The owner's own
     // comments are excluded — talking on your own post is not a relationship
     // signal. Readable lawfully only because these comments live on media the
@@ -707,14 +771,18 @@ export async function getRelationshipsForUser(
         FROM post_comments pc
         JOIN posts p ON p.id = pc.post_db_id
         JOIN ig_accounts ia ON ia.id = pc.author_account_id
+        JOIN sources src ON src.id = p.source_id
         WHERE p.ig_account_id = ${owned.igAccountId}
           AND pc.author_account_id <> ${owned.igAccountId}
+          AND ${kindFilter}
         GROUP BY ia.username
         ORDER BY count DESC
       `,
     ).catch(() => [] as Array<{ username: string; count: number; count_window: number; last_at: Date | string }>),
     // Delta aggregates in one pass (not the capped event list): a 30-day count
-    // and the newest change timestamp per account.
+    // and the newest change timestamp per account. The delta inherits its
+    // source from the snapshot it was derived into, so the class is read
+    // through that snapshot.
     query<{ username: string; count: number; count_window: number; last_at: Date | string }>(
       db,
       sql`
@@ -726,7 +794,9 @@ export async function getRelationshipsForUser(
                max(fd.first_seen_at) AS last_at
         FROM follow_deltas fd
         JOIN ig_accounts ia ON ia.id = fd.ig_account_id
-        WHERE fd.target_id = ${owned.id}
+        JOIN follow_snapshots fs ON fs.id = fd.to_snapshot_id
+        JOIN sources src ON src.id = fs.source_id
+        WHERE fd.target_id = ${owned.id} AND ${kindFilter}
         GROUP BY ia.username
       `,
     ).catch(() => [] as Array<{ username: string; count: number; count_window: number; last_at: Date | string }>),
@@ -748,7 +818,8 @@ export async function getRelationshipsForUser(
           FROM story_mentions sm
           JOIN ig_accounts ia ON ia.id = sm.mentioned_account_id
           JOIN stories s ON s.id = sm.story_db_id
-          WHERE s.ig_account_id = ${owned.igAccountId}
+          JOIN sources src ON src.id = s.source_id
+          WHERE s.ig_account_id = ${owned.igAccountId} AND ${kindFilter}
         ) m WHERE rn <= ${EVIDENCE_PER_ACCOUNT}
         UNION ALL
         SELECT username, kind, observed_at, evidence_id, reference FROM (
@@ -758,8 +829,10 @@ export async function getRelationshipsForUser(
           FROM post_comments pc
           JOIN posts p ON p.id = pc.post_db_id
           JOIN ig_accounts ia ON ia.id = pc.author_account_id
+          JOIN sources src ON src.id = p.source_id
           WHERE p.ig_account_id = ${owned.igAccountId}
             AND pc.author_account_id <> ${owned.igAccountId}
+            AND ${kindFilter}
         ) c WHERE rn <= ${EVIDENCE_PER_ACCOUNT}
         UNION ALL
         SELECT username, kind, observed_at, evidence_id, reference FROM (
@@ -768,7 +841,9 @@ export async function getRelationshipsForUser(
                  row_number() OVER (PARTITION BY ia.username ORDER BY fd.first_seen_at DESC) AS rn
           FROM follow_deltas fd
           JOIN ig_accounts ia ON ia.id = fd.ig_account_id
-          WHERE fd.target_id = ${owned.id}
+          JOIN follow_snapshots fs ON fs.id = fd.to_snapshot_id
+          JOIN sources src ON src.id = fs.source_id
+          WHERE fd.target_id = ${owned.id} AND ${kindFilter}
         ) d WHERE rn <= ${EVIDENCE_PER_ACCOUNT}
         ORDER BY observed_at DESC
       `,
@@ -856,11 +931,11 @@ export async function getRelationshipsForUser(
          JOIN ig_accounts ia ON ia.id = m.ig_account_id
          WHERE m.snapshot_id IN (
            SELECT id FROM follow_snapshots
-           WHERE target_id = ${owned.id} AND direction = 'FOLLOWERS'
+           WHERE target_id = ${owned.id} AND direction = 'FOLLOWERS' AND ${snapshotKindFilter}
            ORDER BY taken_at DESC LIMIT 1)
            AND m0.snapshot_id IN (
            SELECT id FROM follow_snapshots
-           WHERE target_id = ${owned.id} AND direction = 'FOLLOWERS'
+           WHERE target_id = ${owned.id} AND direction = 'FOLLOWERS' AND ${snapshotKindFilter}
            ORDER BY taken_at ASC LIMIT 1)
            AND m.snapshot_id <> m0.snapshot_id
          LIMIT ${STABLE_MEMBER_CAP})
@@ -870,11 +945,11 @@ export async function getRelationshipsForUser(
          JOIN ig_accounts ia ON ia.id = m.ig_account_id
          WHERE m.snapshot_id IN (
            SELECT id FROM follow_snapshots
-           WHERE target_id = ${owned.id} AND direction = 'FOLLOWING'
+           WHERE target_id = ${owned.id} AND direction = 'FOLLOWING' AND ${snapshotKindFilter}
            ORDER BY taken_at DESC LIMIT 1)
            AND m0.snapshot_id IN (
            SELECT id FROM follow_snapshots
-           WHERE target_id = ${owned.id} AND direction = 'FOLLOWING'
+           WHERE target_id = ${owned.id} AND direction = 'FOLLOWING' AND ${snapshotKindFilter}
            ORDER BY taken_at ASC LIMIT 1)
            AND m.snapshot_id <> m0.snapshot_id
          LIMIT ${STABLE_MEMBER_CAP})`,
@@ -917,12 +992,14 @@ export async function getRelationshipsForUser(
     );
 
   const [latestFollowers, latestFollowing, earliestTaken, firstSeenRows] = await Promise.all([
-    latestFollowSnapshot(db, owned.id, "FOLLOWERS").catch(() => null),
-    latestFollowSnapshot(db, owned.id, "FOLLOWING").catch(() => null),
+    latestFollowSnapshot(db, owned.id, "FOLLOWERS", { sourceKinds }).catch(() => null),
+    latestFollowSnapshot(db, owned.id, "FOLLOWING", { sourceKinds }).catch(() => null),
     query<{ direction: string; earliest: Date | string }>(
       db,
       sql`SELECT direction::text AS direction, min(taken_at) AS earliest
-           FROM follow_snapshots WHERE target_id = ${owned.id} GROUP BY direction`,
+           FROM follow_snapshots
+           WHERE target_id = ${owned.id} AND ${snapshotKindFilter}
+           GROUP BY direction`,
     ).catch(() => [] as Array<{ direction: string; earliest: Date | string }>),
     ranked.length === 0
       ? Promise.resolve([])
@@ -931,7 +1008,10 @@ export async function getRelationshipsForUser(
           sql`SELECT ia.username, min(fd.first_seen_at) AS first_seen
                FROM follow_deltas fd
                JOIN ig_accounts ia ON ia.id = fd.ig_account_id
+               JOIN follow_snapshots fs ON fs.id = fd.to_snapshot_id
+               JOIN sources src ON src.id = fs.source_id
                WHERE fd.target_id = ${owned.id}
+                 AND ${kindFilter}
                  AND ia.username IN (${sql.join(
                    ranked.map((r) => sql`${r.username}`),
                    sql`, `,
@@ -997,7 +1077,10 @@ export async function getRelationshipsForUser(
       lastSeenAt,
     });
   }
-  return enriched;
+  return {
+    ranks: enriched,
+    sourceKinds,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1094,6 +1177,14 @@ export interface TargetDossier {
   media: DossierMediaSummary | null;
   /** Sources that have actually written observations for this target/account. */
   observingSources: string[];
+  /** The source classes behind those rows (e.g. ["FIXTURE"]). */
+  sourceKinds: string[];
+  /**
+   * What class of evidence stands behind the stored rows. SYNTHETIC means
+   * generated data, LIVE means a real platform route or the operator's own
+   * export, MIXED means both are present, NONE means nothing is stored.
+   */
+  evidenceClass: "LIVE" | "SYNTHETIC" | "MIXED" | "NONE";
   /**
    * Capabilities the routes themselves reported as UNAVAILABLE for those
    * sources, with the reason they gave. Deployment-wide per (source,
@@ -1221,10 +1312,10 @@ export async function getTargetDossier(
           FROM posts WHERE target_id = ${owned.id}
         `,
       ).catch(() => []),
-      query<{ source_id: string }>(
+      query<{ source_id: string; source_kind: string }>(
         db,
         sql`
-          SELECT DISTINCT source_id FROM (
+          SELECT DISTINCT s.source_id, src.kind::text AS source_kind FROM (
             SELECT source_id FROM profile_snapshots WHERE ig_account_id = ${account.id}
             UNION SELECT source_id FROM stories WHERE ig_account_id = ${account.id}
             UNION SELECT source_id FROM insight_points WHERE ig_account_id = ${account.id}
@@ -1233,7 +1324,8 @@ export async function getTargetDossier(
             UNION SELECT source_id FROM interactions WHERE target_id = ${owned.id}
             UNION SELECT source_id FROM tagged_media WHERE ig_account_id = ${account.id}
           ) s
-          ORDER BY source_id
+          JOIN sources src ON src.id = s.source_id
+          ORDER BY s.source_id
         `,
       ).catch(() => []),
       getSourceHealth(db).catch(() => [] as SourceHealthRecord[]),
@@ -1247,6 +1339,24 @@ export async function getTargetDossier(
   };
 
   const observingSources = sourceRows.map((r) => r.source_id);
+  const sourceKinds = [...new Set(sourceRows.map((r) => r.source_kind))].sort();
+  /**
+   * What class of evidence stands behind this target's stored rows.
+   *
+   * "OBSERVED" without this is a lie waiting to be read: 68 insight points
+   * from a fixture set are rows, not a reading of the account. SYNTHETIC says
+   * the rows came from generated data; LIVE says a real platform route or the
+   * operator's own export produced them; MIXED says both are present, and
+   * then no single number describes the target.
+   */
+  const evidenceClass: TargetDossier["evidenceClass"] =
+    sourceKinds.length === 0
+      ? "NONE"
+      : sourceKinds.length > 1
+        ? "MIXED"
+        : sourceKinds[0] === "FIXTURE"
+          ? "SYNTHETIC"
+          : "LIVE";
   const mediaAgg = mediaAggRows[0];
 
   const media: DossierMediaSummary | null =
@@ -1308,6 +1418,8 @@ export async function getTargetDossier(
     latestProfileSnapshot: latestSnapshots[0] ?? null,
     media,
     observingSources,
+    sourceKinds,
+    evidenceClass,
     routeUnavailability: healthRows
       .filter(
         (h) => h.status === "UNAVAILABLE" && observingSources.includes(h.sourceId),

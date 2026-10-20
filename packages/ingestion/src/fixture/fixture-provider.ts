@@ -142,6 +142,11 @@ function sha256(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
+/** Username comparison key: a handle is the same name with or without "@", in any case. */
+function normalizeHandle(username: string): string {
+  return username.trim().replace(/^@+/, "").toLowerCase();
+}
+
 export class FixtureProvider implements InstagramProvider {
   readonly sourceId: string;
 
@@ -149,6 +154,7 @@ export class FixtureProvider implements InstagramProvider {
   private readonly clock: () => Date;
   private readonly declaredVersion: string;
   private manifestCache?: FixtureManifest;
+  private subjectCache?: { username: string };
   private fileCache = new Map<string, string>();
 
   constructor(options: FixtureProviderOptions) {
@@ -184,6 +190,93 @@ export class FixtureProvider implements InstagramProvider {
       // as observed structure.
       [CapabilityName.GET_POST_CHILDREN]: false,
     };
+  }
+
+  /**
+   * The account this set is about, resolved once and cached.
+   *
+   * The manifest declares the subject (`target_username`) and the profile
+   * carries the bytes' own account. They must agree: a set whose two files
+   * name different accounts would serve one account's bytes under another's
+   * name — the contamination this gate exists to stop, reached by
+   * configuration instead of by a username. They are therefore required to
+   * agree, and a set that disagrees is REFUSED (fail closed) rather than
+   * resolved in favour of either file.
+   */
+  private async subjectAccount(
+    meta: { observedAt: string; source: SourceRef },
+  ): Promise<{ username: string } | { error: CapabilityResult<never> }> {
+    if (this.subjectCache !== undefined) return this.subjectCache;
+    const manifest = await this.loadManifest();
+    const profile = await this.loadProfile();
+    if (profile instanceof ErrorResult) {
+      return { error: profile.asResult(meta) };
+    }
+    const declared = normalizeHandle(manifest.target_username);
+    const carried = normalizeHandle(profile.value.profile.username);
+    if (declared !== carried) {
+      return {
+        error: errored(meta, {
+          kind: CapabilityErrorKind.SCHEMA_MISMATCH,
+          message:
+            `Fixture set declares @${manifest.target_username} but its profile carries @${profile.value.profile.username}. ` +
+            "A set must name one account: serving one account's bytes under another's name would file synthetic " +
+            "observations under a real account's record. This set is refused until the two agree.",
+          retryable: false,
+        }),
+      };
+    }
+    this.subjectCache = { username: manifest.target_username };
+    return this.subjectCache;
+  }
+
+  /**
+   * The set observes exactly one account — the one its manifest declares.
+   *
+   * Local and side-effect free: the set is read, nothing is observed, and no
+   * capability result is produced. The worker calls this before it writes a
+   * single row under a target, so a fixture set can never end up holding a
+   * real account's record.
+   */
+  async observesAccount(username: string): Promise<boolean> {
+    const wanted = normalizeHandle(username);
+    if (wanted === "") return false;
+    const subject = await this.subjectAccount(this.meta());
+    if ("error" in subject) return false;
+    return normalizeHandle(subject.username) === wanted;
+  }
+
+  /**
+   * The identity gate every account-scoped capability crosses.
+   *
+   * `resolveAccount` already refused a foreign username, but the worker never
+   * calls it — it goes straight from a target row to a capability call. Without
+   * this guard, `getProfile({username: "real.account"})` returned the FIXTURE's
+   * profile, and the executor filed it as an observation of "real.account".
+   * That is the exact contamination this project exists to prevent: a
+   * synthetic roster or insight set presented as a real account's evidence.
+   *
+   * The refusal is a typed ACCOUNT_NOT_FOUND, not a crash, and its message
+   * says plainly that it is NOT a statement about the account's existence —
+   * a fixture set not carrying a name says nothing about that name.
+   */
+  private async refuseForeignAccount(
+    account: NormalizedAccountRef | undefined,
+    meta: { observedAt: string; source: SourceRef },
+  ): Promise<CapabilityResult<never> | null> {
+    if (account === undefined) return null;
+    const subject = await this.subjectAccount(meta);
+    if ("error" in subject) return subject.error;
+    if (normalizeHandle(account.username) === normalizeHandle(subject.username)) return null;
+    return errored(meta, {
+      kind: CapabilityErrorKind.ACCOUNT_NOT_FOUND,
+      message:
+        `Fixture set only contains @${subject.username}, requested @${account.username}. ` +
+        "Synthetic fixture data is never served for another account: doing so would file " +
+        "synthetic observations under a real account's record. This is not evidence that " +
+        `@${account.username} does not exist — it only says this fixture set does not cover it.`,
+      retryable: false,
+    });
   }
 
   async resolveAccount(
@@ -231,6 +324,8 @@ export class FixtureProvider implements InstagramProvider {
   ): Promise<CapabilityResult<NormalizedProfile>> {
     const meta = this.meta(account);
     try {
+      const refusal = await this.refuseForeignAccount(account, meta);
+      if (refusal !== null) return refusal;
       const loaded = await this.loadProfile();
       const manifest = await this.loadManifest();
       if (loaded instanceof ErrorResult) return loaded.asResult(meta);
@@ -262,6 +357,8 @@ export class FixtureProvider implements InstagramProvider {
   ): Promise<CapabilityResult<NormalizedStory[]>> {
     const meta = this.meta(account);
     try {
+      const refusal = await this.refuseForeignAccount(account, meta);
+      if (refusal !== null) return refusal;
       const manifest = await this.loadManifest();
       const rawText = await this.readFixture(manifest.files.stories);
       const json = this.parseJson(rawText);
@@ -318,6 +415,8 @@ export class FixtureProvider implements InstagramProvider {
   ): Promise<CapabilityResult<NormalizedPost[]>> {
     const meta = this.meta(account);
     try {
+      const refusal = await this.refuseForeignAccount(account, meta);
+      if (refusal !== null) return refusal;
       const manifest = await this.loadManifest();
       const files = manifest.files.posts;
       const index = cursor === undefined ? 0 : files.indexOf(cursor.value);
@@ -435,6 +534,8 @@ export class FixtureProvider implements InstagramProvider {
   ): Promise<CapabilityResult<NormalizedTagPage>> {
     const meta = this.meta(account);
     try {
+      const refusal = await this.refuseForeignAccount(account, meta);
+      if (refusal !== null) return refusal;
       if (cursor !== undefined) {
         return errored(meta, {
           kind: CapabilityErrorKind.INTERNAL,
@@ -495,6 +596,8 @@ export class FixtureProvider implements InstagramProvider {
   ): Promise<CapabilityResult<NormalizedMentionedComment>> {
     const meta = this.meta(account);
     try {
+      const refusal = await this.refuseForeignAccount(account, meta);
+      if (refusal !== null) return refusal;
       const manifest = await this.loadManifest();
       const file = manifest.files.mentioned_comments;
       if (file === undefined) {
@@ -539,6 +642,8 @@ export class FixtureProvider implements InstagramProvider {
   ): Promise<CapabilityResult<NormalizedInsightSet>> {
     const meta = this.meta(account);
     try {
+      const refusal = await this.refuseForeignAccount(account, meta);
+      if (refusal !== null) return refusal;
       const manifest = await this.loadManifest();
       const insightsFile = manifest.files.insights;
       if (insightsFile === undefined) {
@@ -727,6 +832,8 @@ export class FixtureProvider implements InstagramProvider {
     cursor?: Cursor,
   ): Promise<CapabilityResult<NormalizedFollowPage>> {
     const meta = this.meta(account);
+    const refusal = await this.refuseForeignAccount(account, meta);
+    if (refusal !== null) return refusal;
     const manifest = await this.loadManifest();
     const files = manifest.files[direction];
 

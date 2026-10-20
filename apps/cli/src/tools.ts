@@ -8,6 +8,10 @@ import {
   CapabilityErrorKind,
   CapabilityName,
   CapabilityStatus,
+  EVIDENCE_CLASS,
+  EVIDENCE_CLASS_LABELS,
+  INVESTIGATION_STAGE,
+  INVESTIGATION_STAGE_STATUS,
   RegistryCapabilityId,
   claimAgeDays,
   claimSourceDomain,
@@ -26,7 +30,11 @@ import {
   type ClaimPredicate,
   type ClaimRelation,
   type ClaimRelationLabel,
+  type EvidenceClass,
   type InstagramProvider,
+  type InvestigationGap,
+  type InvestigationSource,
+  type InvestigationStage,
   type NormalizedAccountRef,
   type NormalizedMentionedComment,
   type SynthesisTerm,
@@ -44,9 +52,13 @@ import {
   getDashboardOverview,
   getEvidenceChain,
   getOperationsSnapshot,
+  getAccountByIgId,
   getOwnedTarget,
+  getOwnedTargetDetail,
   getUserActivityFeed,
   getRelationshipsForUser,
+  RELATIONSHIP_LIVE_SOURCE_KINDS,
+  RELATIONSHIP_SYNTHETIC_SOURCE_KINDS,
   getTargetChangeSummary,
   getTargetDossier,
   insightLatest,
@@ -86,6 +98,7 @@ import {
   providerFromEnv,
   runSchedulerTick,
   schedulerEnabled,
+  sourceKindFor,
   type ExecutionSource,
   type RunOutcome,
 } from "@igtrack/monitoring";
@@ -316,6 +329,13 @@ export interface TargetAddResult {
   note: string;
   /** What the one-time probe confirmed, verbatim from the provider (a probe result, not a stored claim). */
   probe: { status: string; observedAt: string | null; note: string | null } | null;
+  /**
+   * Set when the configured source does not observe this account: every scan
+   * of it will be refused. Present so the operator learns it at add time;
+   * absent means the source covers the account (or the target is a DISCOVERY
+   * one, which has its own route).
+   */
+  unobservable?: string;
 }
 
 export async function opTargetAdd(
@@ -342,6 +362,18 @@ export async function opTargetAdd(
     ...(input.tags !== undefined && input.tags.length > 0 ? { tags: input.tags } : {}),
     ...(input.observed === true ? { observationMode: "DISCOVERY" as const } : {}),
   });
+
+  // A target the configured source cannot observe is still created — the
+  // operator may be registering it before configuring the source, and a
+  // target is not an observation. But the operator is told NOW (D49's
+  // principle: an unreachable account is a fact to learn at add time, not
+  // after a week of scans that can never produce data). The wording never
+  // says the account does not exist: it says the SOURCE does not cover it.
+  const unobservable =
+    input.observed === true
+      ? null
+      : await providerCannotObserve(ctx, username);
+
   return {
     id: target.id,
     username,
@@ -356,6 +388,7 @@ export async function opTargetAdd(
           ? "Target created ACTIVE. The scheduler enqueues the first scans on the next tick (`igtrack work` runs one now)."
           : "Target already tracked for this user; nothing changed.",
     probe,
+    ...(unobservable === null ? {} : { unobservable }),
   };
 }
 
@@ -454,6 +487,33 @@ export interface ScanRunResult {
   note: string;
 }
 
+/**
+ * Why the configured source cannot observe this account, or null when it can.
+ *
+ * A provider observes a bounded set of accounts: a fixture set observes one,
+ * the operator's export observes one, the Graph path observes the authorized
+ * owned one. Queueing a scan for an account the source cannot see would file
+ * that source's bytes under a real account's record — so the scan is refused
+ * here, at enqueue, and again in the worker at execute.
+ *
+ * The message is careful: "this source does not observe that account" is NOT
+ * "that account does not exist".
+ */
+async function providerCannotObserve(
+  ctx: CliContext,
+  username: string,
+): Promise<string | null> {
+  const provider = ctx.provider.provider;
+  const observes = provider?.observesAccount;
+  if (provider === null || provider === undefined || observes === undefined) return null;
+  if (await observes.call(provider, username)) return null;
+  return (
+    `the configured source "${provider.sourceId}" does not observe @${username}, so no scan of it can succeed. ` +
+    "This is a provider/identity mismatch, NOT evidence that the account does not exist. " +
+    "Configure a source that covers it (IGTRACK_PROVIDER=graph with the owned account, or IGTRACK_PROVIDER=import with the matching export)."
+  );
+}
+
 export async function opScanRun(
   ctx: CliContext,
   input: { target?: string | undefined; kinds?: string[] | undefined; force?: boolean | undefined },
@@ -492,6 +552,25 @@ export async function opScanRun(
     if (full.status !== "ACTIVE") {
       for (const kind of kinds) {
         skipped.push({ kind, username: target.username, reason: `target is ${full.status}` });
+      }
+      continue;
+    }
+    // Refused at enqueue, before a job exists (the D47 rule, applied to the
+    // owned side): a source observes a bounded set of accounts, and a scan
+    // the configured source cannot answer would be queued only to fail. The
+    // worker refuses it again at execute, so a job enqueued by another path
+    // cannot slip a provider's bytes under this account either.
+    //
+    // A DISCOVERY target is exempt: it is answered by the documented
+    // Business Discovery route, which observes OTHER accounts by name, and
+    // that route has its own gate (the probe at target creation).
+    const unobservable =
+      full.observationMode === "OWNED"
+        ? await providerCannotObserve(ctx, target.username)
+        : null;
+    if (unobservable !== null) {
+      for (const kind of kinds) {
+        skipped.push({ kind, username: target.username, reason: unobservable });
       }
       continue;
     }
@@ -597,7 +676,10 @@ export async function opWork(
 
   if (input.skipScheduler !== true) {
     try {
-      await runSchedulerTick(ctx.db);
+      // The provider is passed so the scheduler can skip a target the
+      // configured source does not observe — a scan it cannot answer must
+      // not be queued just to fail.
+      await runSchedulerTick(ctx.db, { provider: src.provider });
       schedulerTick = "ok";
     } catch (err) {
       // A scheduler failure must not stop already-queued work from draining.
@@ -705,10 +787,24 @@ export interface RelationshipsResult {
     recencyWindowDays: number;
     recencyNote: string;
     evidenceNote: string;
+    /**
+     * The two evidence classes, and the rule that keeps them apart. A
+     * synthetic interaction is evidence about a fixture, not about a person:
+     * it never contributes to the live ranking, and the live ranking never
+     * borrows a synthetic row.
+     */
+    sourceKinds: { live: readonly string[]; synthetic: readonly string[] };
+    sourceNote: string;
   };
   // Honest bound: ranks are capped after ranking, so say when the cap hid rows.
   truncated: boolean;
+  /** Ranks computed from live observations (platform route or the operator's export). */
   ranks: RelationshipRank[];
+  /**
+   * Ranks computed from synthetic observations. Rendered separately and
+   * labelled: they are evidence about a fixture, never about a person.
+   */
+  syntheticRanks: RelationshipRank[];
 }
 
 export async function opRelationships(
@@ -716,7 +812,13 @@ export async function opRelationships(
   input: { target: string; limit?: number | undefined },
 ): Promise<RelationshipsResult> {
   const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
-  const ranks = await getRelationshipsForUser(ctx.db, ctx.userId, resolved.id);
+  // Two rankings, never one blended ranking: a live deployment must not have
+  // demo data moving its scores, and a synthetic deployment must still be
+  // able to show (clearly labelled) what its own fixture produced.
+  const [live, synthetic] = await Promise.all([
+    getRelationshipsForUser(ctx.db, ctx.userId, resolved.id, RELATIONSHIP_LIVE_SOURCE_KINDS),
+    getRelationshipsForUser(ctx.db, ctx.userId, resolved.id, RELATIONSHIP_SYNTHETIC_SOURCE_KINDS),
+  ]);
   const limit = input.limit ?? 25;
   return {
     target: resolved,
@@ -744,9 +846,19 @@ export async function opRelationships(
         "Each rank also carries lastSignalAt and the same three counts restricted to the recency window. Recency is NOT folded into the score: this product counts stored rows, it does not invent a decay constant.",
       evidenceNote:
         "Each rank carries up to three stored rows behind its counts. An empty evidence list is a structural membership fact (present in the follow snapshots) with no signal event — not missing data.",
+      sourceKinds: {
+        live: RELATIONSHIP_LIVE_SOURCE_KINDS,
+        synthetic: RELATIONSHIP_SYNTHETIC_SOURCE_KINDS,
+      },
+      sourceNote:
+        `Two rankings, never blended. The live ranking is computed only from ${RELATIONSHIP_LIVE_SOURCE_KINDS.join(", ")} ` +
+        `observations; the synthetic ranking only from ${RELATIONSHIP_SYNTHETIC_SOURCE_KINDS.join(", ")}. ` +
+        "A synthetic interaction is evidence about a fixture, not about a person, so it can never move a live score. " +
+        "An empty live ranking beside a populated synthetic one means \"no live observation\", not \"no interaction\".",
     },
-    truncated: ranks.length > limit,
-    ranks: ranks.slice(0, limit),
+    truncated: live.ranks.length > limit,
+    ranks: live.ranks.slice(0, limit),
+    syntheticRanks: synthetic.ranks.slice(0, limit),
   };
 }
 
@@ -797,6 +909,13 @@ export interface DossierCoverageRow {
   capability: string;
   label: string;
   state: "OBSERVED" | "UNAVAILABLE" | "NOT_OBSERVED";
+  /**
+   * The class of evidence behind the rows: SYNTHETIC (generated data), LIVE
+   * (a real platform route or the operator's own export), MIXED, or null
+   * when there are no rows. Null means "nothing observed", never "observed
+   * with no class".
+   */
+  evidenceClass: "LIVE" | "SYNTHETIC" | "MIXED" | "NONE" | null;
   /** Rows stored for this capability's surfaces on this target. Null when the capability has no writer. */
   observedRows: number | null;
   latestObservedAt: string | null;
@@ -834,6 +953,13 @@ export interface DossierResult {
     providerMethod: string;
     scope: string;
     observingSources: string[];
+    /**
+     * The class of evidence behind the stored rows: SYNTHETIC (generated
+     * data), LIVE (a real platform route or the operator's own export),
+     * MIXED, or NONE. A target whose rows are synthetic has NOT been
+     * observed, and every surface that shows its row counts says so.
+     */
+    evidenceClass: "LIVE" | "SYNTHETIC" | "MIXED" | "NONE";
   };
   counts: Record<string, { count: number; latestAt: string | null }>;
   profile: {
@@ -993,6 +1119,9 @@ export async function opDossier(
       capability: entry.id,
       label: entry.label,
       state,
+      // The class travels with every row: "OBSERVED" alone would let a
+      // fixture's 68 insight points read as a reading of the account.
+      evidenceClass: hasWriter && rows > 0 ? dossier.evidenceClass : null,
       observedRows: hasWriter ? rows : null,
       latestObservedAt: latest === null ? null : latest.toISOString(),
       reason,
@@ -1048,6 +1177,7 @@ export async function opDossier(
           ? "Another account's documented public fields: profile fields plus a bounded recent-media preview."
           : "The account this deployment observes: profile, posts, stories, follow rosters (provider permitting), insights.",
       observingSources: dossier.observingSources,
+      evidenceClass: dossier.evidenceClass,
     },
     counts: Object.fromEntries(
       Object.entries(dossier.counts).map(([key, v]) => [
@@ -1665,6 +1795,12 @@ export interface MentionedCommentProbeResult {
   /** The account the mention belongs to (the read is scoped to its node). */
   account: string;
   sourceId: string;
+  /**
+   * The evidence class the read came from. A mention read from a fixture set
+   * is a synthetic fact about the fixture, and a caller that only sees the
+   * source id would have to guess whether Instagram was asked.
+   */
+  sourceKind: "local" | "remote-api" | null;
   status: string;
   confidence: string | null;
   observedAt: string | null;
@@ -1704,11 +1840,13 @@ async function resolveMentionAccount(
 function asMentionProbe(
   account: string,
   sourceId: string,
+  sourceKind: "local" | "remote-api" | null,
   result: CapabilityResult<unknown>,
 ): MentionedCommentProbeResult {
   return {
     account,
     sourceId,
+    sourceKind,
     status: result.status,
     confidence:
       result.status === CapabilityStatus.ERROR ? null : (result.confidence as string),
@@ -1752,12 +1890,13 @@ export async function opMentionedCommentProbe(
   // provider cannot observe is refused here, with the provider's own reason,
   // instead of being attributed to an account that was never checked.
   const resolved = await provider.resolveAccount(account);
+  const sourceKind = sourceKindOf(provider.sourceId);
   if (resolved.status !== CapabilityStatus.AVAILABLE || resolved.data === undefined) {
-    return asMentionProbe(account, provider.sourceId, resolved);
+    return asMentionProbe(account, provider.sourceId, sourceKind, resolved);
   }
   const result: CapabilityResult<NormalizedMentionedComment> =
     await provider.getMentionedComment(resolved.data, commentId);
-  return asMentionProbe(account, provider.sourceId, result);
+  return asMentionProbe(account, provider.sourceId, sourceKind, result);
 }
 
 // ---------------------------------------------------------------------------
@@ -2145,6 +2284,13 @@ export interface ResearchResult {
     reason: string | null;
     note: string;
     items: Array<{ username: string; signals: string[] }>;
+    /**
+     * Leads derived from SYNTHETIC observations. Kept apart from the live
+     * ones for the same reason the rankings are: a fixture's invented mention
+     * is evidence about the fixture, and a reader who saw it beside a live
+     * lead would read it as one.
+     */
+    syntheticItems: Array<{ username: string; signals: string[] }>;
   };
   connections: {
     state: "OBSERVED" | "UNAVAILABLE";
@@ -2152,7 +2298,10 @@ export interface ResearchResult {
     note: string;
     truncated: boolean;
     method: RelationshipsResult["method"] | null;
+    /** Ranks from live observations (a platform route or the operator's export). */
     ranks: RelationshipRank[];
+    /** Ranks from synthetic observations — never blended with the live ones. */
+    syntheticRanks: RelationshipRank[];
   };
   coverage: DossierCoverageRow[];
   routeUnavailability: DossierResult["routeUnavailability"];
@@ -2400,16 +2549,16 @@ export async function opResearch(
     connections = {
       state: "OBSERVED",
       reason: null,
-      note: "Evidence-ranked from stored rows only (method below); a count of stored rows, never an inferred affinity.",
+      note:
+        "Evidence-ranked from stored rows only (method below); a count of stored rows, never an inferred affinity. " +
+        "Live and synthetic observations are ranked apart: a fixture's invented interaction is evidence about the fixture, never about a person.",
       truncated: relationships.truncated,
       method: relationships.method,
       ranks: relationships.ranks,
+      syntheticRanks: relationships.syntheticRanks,
     };
-    leads = {
-      state: "OBSERVED",
-      reason: null,
-      note: "Leads, not claims: accounts that appear in stored signal rows. Nothing here has been researched or asserted.",
-      items: relationships.ranks
+    const leadItems = (ranks: RelationshipRank[]): Array<{ username: string; signals: string[] }> =>
+      ranks
         .filter((rank) => rank.signals.mentions > 0 || rank.signals.deltas > 0)
         .slice(0, 10)
         .map((rank) => ({
@@ -2419,7 +2568,13 @@ export async function opResearch(
             `comments x${rank.signals.comments}`,
             `deltas x${rank.signals.deltas}`,
           ],
-        })),
+        }));
+    leads = {
+      state: "OBSERVED",
+      reason: null,
+      note: "Leads, not claims: accounts that appear in stored signal rows. Nothing here has been researched or asserted.",
+      items: leadItems(relationships.ranks),
+      syntheticItems: leadItems(relationships.syntheticRanks),
     };
   } else {
     const reason =
@@ -2431,12 +2586,14 @@ export async function opResearch(
       truncated: false,
       method: null,
       ranks: [],
+      syntheticRanks: [],
     };
     leads = {
       state: "UNAVAILABLE",
       reason,
       note: "No leads can be derived from rows that the platform never exposes.",
       items: [],
+      syntheticItems: [],
     };
   }
 
@@ -2944,6 +3101,10 @@ export interface ResearchRunResult {
     claimsStored: number;
     claimsDuplicate: number;
     claimsRefused: number;
+    /** Pages read but discarded because they never named the handle. */
+    pagesDiscarded: number;
+    /** Candidates dropped because the statement named the source, not the account. */
+    claimsUnattributed: number;
   };
   claims: ClaimView[];
   status: "COMPLETED" | "COMPLETED_PARTIAL" | "FAILED";
@@ -3037,20 +3198,24 @@ export async function opResearchRun(
   let searchUnavailableReason: string | null = null;
   const searchCandidateUrls: string[] = [];
   {
-    const { researchSearchProviderFromEnv } = await import("@igtrack/ingestion");
+    const { researchSearchProviderFromEnv, handleSearchQueries } = await import("@igtrack/ingestion");
     const provider = researchSearchProviderFromEnv();
     searchProviderName = provider.name === "none" ? null : provider.name;
-    // Queries come from the focus, not from the raw question: one per
-    // priority predicate, plus the account name. Deterministic and small.
+    // The handle's own query budget (D74), shared with the audit probe so
+    // both surfaces ask the same four questions of the same index. The old
+    // pair here — `"H" organization` / `"H" about contact` — was a near
+    // duplicate that spent two requests on the same token-overlap results.
     const account = dossier.target.username;
-    searchQueries = [
-      `"${account}" organization`,
-      `"${account}" about contact`,
-    ].slice(0, 2);
+    searchQueries = handleSearchQueries(account);
     for (const query of searchQueries) {
       const outcome = await provider.search(query, 5);
       if (outcome.unavailableReason !== null && searchUnavailableReason === null) {
         searchUnavailableReason = outcome.unavailableReason;
+      }
+      // A transport failure is a fact about the search, not an empty result
+      // set: dropping it would render a broken index as "nothing was found".
+      if (outcome.error !== null && searchUnavailableReason === null) {
+        searchUnavailableReason = `Search failed: ${outcome.error}`;
       }
       for (const result of outcome.results) {
         const normalized = normalizeResearchUrl(result.url);
@@ -3126,6 +3291,8 @@ export async function opResearchRun(
   let claimsStored = 0;
   let claimsDuplicate = 0;
   let claimsRefused = 0;
+  let pagesDiscarded = 0;
+  let claimsUnattributed = 0;
   const now = new Date();
 
   for (const plannedDoc of planned) {
@@ -3226,11 +3393,66 @@ export async function opResearchRun(
       .update(response.body, "utf8")
       .digest("hex");
 
+    // --- Relevance gate: the SAME gate the audit probe applies. A search hit
+    // is a machine suggestion; a page that never names the handle was not
+    // "found" for it, and storing that page's structured fields as claims
+    // ABOUT the handle is the inference this product refuses. An
+    // operator-named page bypasses the gate — the operator asserted its
+    // relevance by naming it.
+    const pageMentionsHandle = handleMentioned(
+      `${response.finalUrl}\n${extracted.title ?? ""}\n${response.body}`,
+      dossier.target.username,
+    );
+    if (plannedDoc.sourceType === "SEARCH_RESULT" && !pageMentionsHandle) {
+      pagesDiscarded += 1;
+      const discardedReason = `Discarded — this page never names @${dossier.target.username}, so it cannot be a statement about that account.`;
+      const discardedResult: ResearchDocumentResult = {
+        url: response.finalUrl,
+        outcome: "FETCHED",
+        outcomeReason: discardedReason,
+        httpStatus: response.httpStatus,
+        title: extracted.title,
+        contentType: response.contentType,
+        byteSize: response.byteSize,
+        contentSha256,
+        retrievedAt: response.fetchedAt.toISOString(),
+        sourceType: plannedDoc.sourceType,
+        candidatesFound: 0,
+        linksNotFollowed,
+      };
+      documents.push(discardedResult);
+      await addResearchDocument(ctx.db, {
+        runId: run.id,
+        userId: ctx.userId,
+        url: response.finalUrl,
+        sourceType: plannedDoc.sourceType,
+        outcome: "FETCHED",
+        outcomeReason: discardedReason,
+        httpStatus: response.httpStatus,
+        title: extracted.title,
+        contentType: response.contentType,
+        byteSize: response.byteSize,
+        contentSha256,
+        retrievedAt: response.fetchedAt,
+        candidatesFound: 0,
+        linksNotFollowed,
+      });
+      continue;
+    }
+
     // --- Validation gate: the SAME path `igtrack claims add` uses. The
     // extractor proposes; the ledger disposes.
     let stored = 0;
     let duplicates = 0;
     let refused = 0;
+    let unattributed = 0;
+    const pageHost = (() => {
+      try {
+        return new URL(response.finalUrl).hostname.toLowerCase();
+      } catch {
+        return "";
+      }
+    })();
     for (const candidate of extracted.candidates as ResearchCandidate[]) {
       const classified = classifyClaimPredicate(candidate.predicate);
       if (classified.kind !== "ALLOWED") {
@@ -3245,6 +3467,21 @@ export async function opResearchRun(
       const excerpt = validateClaimExcerpt(candidate.excerpt);
       if (!excerpt.ok) {
         refused += 1;
+        continue;
+      }
+      // --- Attribution gate: on a MACHINE-FOUND page, a stored statement must
+      // itself involve the handle — its value names the handle as a token, or
+      // the page's own host does. A third-party article ABOUT the account
+      // also describes its SOURCE (the publisher's name, its own social
+      // links, its address); attributing those to the account would be a
+      // false claim about the account. Operator-named pages bypass this, for
+      // the same reason they bypass the relevance gate.
+      if (
+        plannedDoc.sourceType === "SEARCH_RESULT" &&
+        !handleMentioned(value.value, dossier.target.username) &&
+        !handleMentioned(pageHost, dossier.target.username)
+      ) {
+        unattributed += 1;
         continue;
       }
       try {
@@ -3274,6 +3511,7 @@ export async function opResearchRun(
     claimsStored += stored;
     claimsDuplicate += duplicates;
     claimsRefused += refused;
+    claimsUnattributed += unattributed;
 
     const result: ResearchDocumentResult = {
       url: response.finalUrl,
@@ -3346,6 +3584,19 @@ export async function opResearchRun(
         "boundary, not a bug (FOUNDING §14/§18).",
     );
   }
+  if (pagesDiscarded > 0) {
+    notes.push(
+      `${pagesDiscarded} fetched page(s) were DISCARDED because they never named the handle: a search hit is a ` +
+        "machine suggestion, and a page that does not mention the account cannot be a statement about it. " +
+        "Weak coverage, not an absence of public evidence.",
+    );
+  }
+  if (claimsUnattributed > 0) {
+    notes.push(
+      `${claimsUnattributed} candidate(s) were NOT attributed to this account: the statement named the source page, ` +
+        "not the handle. A third-party publisher's own name, links and address describe the publisher.",
+    );
+  }
   if (planned.length === 0 && searchUnavailableReason !== null) {
     notes.push(
       "No sources were available to this run. Configure a search provider or pass --url to name public pages " +
@@ -3384,6 +3635,8 @@ export async function opResearchRun(
       claimsStored,
       claimsDuplicate,
       claimsRefused,
+      pagesDiscarded,
+      claimsUnattributed,
     },
     claims: claimViews,
     status,
@@ -4230,6 +4483,13 @@ export type AuditProbeState =
 export type AuditRecordState =
   /** The account is tracked AND stored rows exist for it. */
   | "OBSERVED"
+  /**
+   * Stored rows exist, but every one of them is synthetic: the record is a
+   * data set's footprint, not a reading of the account. Distinct from
+   * OBSERVED on purpose — "there are rows" and "the account was observed"
+   * are different facts.
+   */
+  | "SYNTHETIC"
   /** Nothing is stored: either untracked, or tracked with no scan rows yet. */
   | "NOT_OBSERVED";
 
@@ -4321,6 +4581,22 @@ export interface AuditReport {
    * an inference. Always present; `attempted: false` carries the reason.
    */
   web: AuditWebReport;
+  /**
+   * The distinction the whole report exists to make, in one machine-readable
+   * block: a report was GENERATED, and an account was (or was not) OBSERVED.
+   * Those are different facts, and a caller that only sees an exit code or a
+   * headline must not confuse them.
+   */
+  observation: {
+    /** Did a real request reach Instagram? False for fixture and import sources. */
+    realPlatformRequest: boolean;
+    /** Did the configured source return an observation of THIS account? */
+    observed: boolean;
+    /** The class of the evidence the probe produced, if any. */
+    evidenceClass: "LIVE" | "IMPORTED" | "SYNTHETIC" | "NONE";
+    /** One sentence a caller can print verbatim. */
+    statement: string;
+  };
   /**
    * The concise summary: one headline and one row per evidence class, each
    * derived from the section that holds it. Platform observation, stored
@@ -4529,12 +4805,25 @@ export async function opAudit(
       (total, entry) => total + entry.count,
       0,
     );
+    // "Rows exist" and "the account was observed" are different facts. When
+    // every stored row is synthetic, the record is a data set's footprint and
+    // says so — a reader must never take 68 generated insight points for a
+    // reading of the account.
+    const recordClass = research.identity.route.evidenceClass;
+    const recordState: AuditRecordState =
+      storedRows === 0
+        ? "NOT_OBSERVED"
+        : recordClass === "SYNTHETIC"
+          ? "SYNTHETIC"
+          : "OBSERVED";
     record = {
       tracked: true,
-      state: storedRows > 0 ? "OBSERVED" : "NOT_OBSERVED",
+      state: recordState,
       reason:
         storedRows > 0
-          ? null
+          ? recordState === "SYNTHETIC"
+            ? "Every stored row for this account is SYNTHETIC (generated data). The row counts below are real rows, but they are not a reading of this account, and no figure in them describes it."
+            : null
           : "This account is tracked, but no scan has stored rows for it yet: a tracked account is not an observed one.",
       target: trackedTarget,
       identity: research.identity.account,
@@ -4944,11 +5233,44 @@ export async function opAudit(
     ],
   };
 
+  // The one block that separates "a report was produced" from "the account
+  // was observed". Generated from the probe's own answer, never from the
+  // report's existence: a caller must be able to read this without parsing
+  // prose.
+  const observed = probe.state === "OBSERVED" || probe.state === "PARTIAL";
+  const realPlatformRequest =
+    probe.attempted && probe.sourceKind === "remote-api" && observed;
+  const evidenceClass: AuditReport["observation"]["evidenceClass"] = !observed
+    ? "NONE"
+    : ctx.provider.synthetic
+      ? "SYNTHETIC"
+      : ctx.provider.name === "import"
+        ? "IMPORTED"
+        : "LIVE";
+  const observation: AuditReport["observation"] = {
+    realPlatformRequest,
+    observed,
+    evidenceClass,
+    statement: !probe.attempted
+      ? "NO OBSERVATION: no request was made. The configuration is blocked — see the Configuration section."
+      : !observed
+        ? `NO OBSERVATION: the configured source (${ctx.provider.sourceId ?? "none"}) returned ${probe.state}. ` +
+          "That is a fact about this source, not about the account's existence."
+        : realPlatformRequest
+          ? "OBSERVED (LIVE): an authorized request to the official Instagram Graph API returned this account's data."
+          : evidenceClass === "SYNTHETIC"
+            ? "OBSERVED (SYNTHETIC): the configured source is a fixture set. No real account was contacted and no figure here describes a real account."
+            : evidenceClass === "IMPORTED"
+              ? "OBSERVED (IMPORTED): the operator's own Instagram data export answered. Real data, but a record of an export — never a live observation."
+              : "OBSERVED.",
+  };
+
   return {
     generatedAt: new Date().toISOString(),
     requested,
     username,
     referenceForm: parsed.reference.form,
+    observation,
     config: {
       state: configState,
       provider: ctx.provider.name,
@@ -4969,4 +5291,996 @@ export async function opAudit(
     limitations,
     nextSteps,
   };
+}
+
+// ---------------------------------------------------------------------------
+// investigate — ONE username in, one provenance-backed dossier out.
+//
+// The product decision this implements: the user supplies a handle and
+// IGTrack does the rest. They should not have to add a target, queue scans,
+// run the worker, run a research query and then read three different
+// reports to find out what is known. Every stage that a configured source
+// can answer runs here, automatically, and every stage that cannot says so
+// with the reason and the configuration that would change it.
+//
+// The rules the pipeline never bends:
+//
+//   * A stage is reported separately from the next one, with what it
+//     retrieved and what it could not.
+//   * The evidence classes are never blended: a platform observation, a
+//     public-web statement, the operator's export, an operator's finding, a
+//     derivation and a fixture are six different things.
+//   * A source that was not consulted is reported as not consulted. A source
+//     that was consulted and returned nothing is reported as returning
+//     nothing. These are not the same answer.
+//   * Nothing is inferred about a person that the evidence does not support.
+//   * Re-running is incremental: observations dedupe by identity, so a second
+//     investigation adds what changed and re-reports what did not.
+// ---------------------------------------------------------------------------
+
+export interface InvestigateInput {
+  /** A username, an @handle, or an instagram.com profile URL. */
+  username: string;
+  /** What the operator is trying to find out. Derived from the handle when omitted. */
+  question?: string | undefined;
+  /** Public pages the operator names explicitly (highest trust tier). */
+  urls?: readonly string[] | undefined;
+  /** Cap on documents fetched by the public-web stage (1..RESEARCH_MAX_SOURCES). */
+  maxSources?: number | undefined;
+  /** Skip the public-web stage entirely. */
+  web?: boolean | undefined;
+  /** Ignore the document freshness window and refetch. */
+  refresh?: boolean | undefined;
+  /** Cap on jobs the platform stage may execute. */
+  maxJobs?: number | undefined;
+  /** Re-read now, ignoring the per-target scan cadence. Off by default. */
+  force?: boolean | undefined;
+}
+
+export interface InvestigateContent {
+  /** Media rows stored for the account, newest published first, bounded. */
+  media: Array<{
+    postId: string;
+    caption: string | null;
+    publishedAt: string | null;
+    firstObservedAt: string | null;
+    likeCount: number | null;
+    commentCount: number | null;
+    repostsCount: number | null;
+    mediaType: string | null;
+    commentsState: string | null;
+    sourceId: string;
+    evidenceId: string | null;
+  }>;
+  /** Hashtags and terms derived from the stored captions. */
+  hashtags: SynthesisTerm[];
+  terms: SynthesisTerm[];
+  /** Comments authored on the account's own media, with their authors. */
+  comments: Array<{
+    postId: string;
+    commentId: string;
+    author: string;
+    text: string;
+    createdAt: string;
+    evidenceId: string | null;
+  }>;
+  /** Story mentions — the accounts named in the account's own stories. */
+  storyMentions: Array<{ storyId: string; username: string; visibilityClass: string }>;
+  /** Media by other accounts in which this account is tagged. */
+  taggedMedia: Array<{ mediaId: string; ownerUsername: string | null; takenAt: string | null }>;
+  /** The corpus size behind the derived terms — never a term without its source. */
+  captionRows: number;
+}
+
+export interface InvestigateWeb {
+  /** Whether the public-web stage ran at all. */
+  attempted: boolean;
+  /** What the stage did, in its own vocabulary. */
+  outcome: string;
+  /** The queries actually issued. */
+  queries: string[];
+  /** The search provider that answered, or null when none was configured. */
+  searchProvider: string | null;
+  /** Why no search provider was usable, when that is the case. */
+  searchUnavailableReason: string | null;
+  /** Documents read, with their per-document outcome. */
+  documents: Array<{ url: string; outcome: string; reason: string | null; facts: number }>;
+  /** Facts extracted, with their citation. */
+  facts: Array<{
+    predicate: string;
+    value: string;
+    sourceUrl: string;
+    sourceTitle: string | null;
+    excerpt: string;
+    retrievedAt: string;
+    /** Whether the finding is filed in the claims ledger or only reported here. */
+    stored: boolean;
+  }>;
+  totals: { planned: number; fetched: number; failed: number; facts: number; stored: number };
+}
+
+export interface InvestigateResult {
+  investigation: {
+    startedAt: string;
+    completedAt: string;
+    /** Exactly what the operator typed. */
+    requested: string;
+    /** The normalized handle every section is about. */
+    username: string;
+    referenceForm: string;
+    /** The target this investigation recorded into, when one exists. */
+    targetId: string | null;
+    observationMode: "OWNED" | "DISCOVERY" | null;
+    /** One row per stage: what it did, what it retrieved, why it stopped. */
+    stages: InvestigationStage[];
+    /** Every source consulted, and every source not consulted. */
+    sources: InvestigationSource[];
+    /** One row per evidence class: what it means and how much of it there is. */
+    evidenceClasses: Array<{ class: EvidenceClass; label: string; items: number }>;
+    /**
+     * How many items the investigation actually RETRIEVED — rows read, facts
+     * extracted, ranks computed. Attempts are not retrieval: a scan that was
+     * queued and refused retrieved nothing.
+     */
+    retrievedItems: number;
+  };
+  /** Account identity and profile metadata. */
+  identity: ResearchResult["identity"];
+  /** The stored observation record. */
+  platform: ResearchResult["platform"];
+  /** Accessible content: posts, captions, comments, mentions, tags. */
+  content: InvestigateContent;
+  /** Relationship evidence — live and synthetic, never blended. */
+  relationships: {
+    live: RelationshipRank[];
+    synthetic: RelationshipRank[];
+    method: RelationshipsResult["method"] | null;
+  };
+  /** The public-web stage's result. */
+  web: InvestigateWeb;
+  /** Operator/agent findings, with their citations. */
+  claims: ResearchResult["claims"];
+  /** Where two sources disagree. Both sides, no winner. */
+  contradictions: ResearchResult["contradictions"];
+  /** Changes between comparable observations. */
+  changes: ResearchResult["changes"];
+  /** Uncertain leads, kept apart from the confirmed findings. */
+  leads: ResearchResult["leads"];
+  /** Themes derived from the stored captions. */
+  themes: ResearchResult["themes"];
+  /** Publishing cadence derived from the stored timestamps. */
+  cadence: ResearchResult["cadence"];
+  /** Per-capability coverage: what was observed, and why each gap is a gap. */
+  coverage: DossierCoverageRow[];
+  /** Everything the investigation could not get, and what would change that. */
+  gaps: InvestigationGap[];
+  /** The exact next commands, with the reason for each. */
+  nextSteps: Array<{ action: string; because: string }>;
+  /** The full research report this dossier is built from — the same object
+   * `igtrack research` prints, so the two can never disagree. */
+  report: ResearchResult;
+  notes: string[];
+}
+
+/**
+ * The evidence class a stored source id belongs to.
+ *
+ * The class follows the SOURCE, never the fact that a source happened to
+ * answer: a fixture set that observes an account produces SYNTHETIC evidence,
+ * not a platform observation. Getting this wrong is how generated data ends
+ * up described as a live reading.
+ */
+function evidenceClassForSource(sourceId: string): EvidenceClass {
+  const kind = sourceId.split(":")[0] ?? "";
+  if (kind === "fixture") return EVIDENCE_CLASS.SYNTHETIC;
+  if (kind === "import") return EVIDENCE_CLASS.EXPORT;
+  if (kind === "graph") return EVIDENCE_CLASS.PLATFORM;
+  return EVIDENCE_CLASS.OPERATOR;
+}
+
+/** The question an investigation asks when the operator did not supply one. */
+function defaultQuestion(handle: string): string {
+  return `What is publicly documented about @${handle}?`;
+}
+
+function stage(
+  id: InvestigationStage["id"],
+  objective: string,
+  status: InvestigationStage["status"],
+  options: {
+    source?: string | null;
+    reason?: string | null;
+    retrieved?: Record<string, number>;
+    classes?: EvidenceClass[];
+  } = {},
+): InvestigationStage {
+  return {
+    id,
+    objective,
+    status,
+    source: options.source ?? null,
+    reason: options.reason ?? null,
+    retrieved: options.retrieved ?? {},
+    evidenceClasses: options.classes ?? [],
+  };
+}
+
+export async function opInvestigate(
+  ctx: CliContext,
+  input: InvestigateInput,
+  deps: {
+    /** Injected web transport, so a test can exercise the pipeline without sockets. */
+    fetcher?: Pick<ResearchFetcher, "fetchPage">;
+    search?: ResearchSearchProvider;
+  } = {},
+): Promise<InvestigateResult> {
+  const startedAt = new Date();
+  const notes: string[] = [];
+  const stages: InvestigationStage[] = [];
+  const gaps: InvestigationGap[] = [];
+  const sources: InvestigationSource[] = [];
+
+  // --- A. Normalize and validate the reference.
+  const requested = input.username;
+  const parsed = parseAccountReference(requested);
+  if (!parsed.ok) {
+    throw new UsageError(
+      `${parsed.message} \`igtrack investigate\` accepts a username, an @handle, or an instagram.com profile URL.`,
+    );
+  }
+  const handle = parsed.reference.username;
+
+  const provider = ctx.provider.provider;
+  if (provider === null) {
+    throw new CliError(
+      "PROVIDER_UNAVAILABLE",
+      `Investigation made no request: provider "${ctx.provider.name}" is not usable. ${ctx.provider.error ?? "unknown reason"}`,
+      3,
+    );
+  }
+  // The class of everything this source produces. A fixture set that observes
+  // an account produces SYNTHETIC evidence — the class follows the source.
+  const sourceClass = evidenceClassForSource(ctx.provider.sourceId ?? "none");
+
+  // --- B. Resolve the account through the permitted sources.
+  const resolved = await provider.resolveAccount(handle);
+  const sourceObserves = resolved.status === CapabilityStatus.AVAILABLE;
+  let discovered = false;
+  let discoveryNote: string | null = null;
+  if (!sourceObserves && provider.capabilities()[CapabilityName.DISCOVER_ACCOUNT] === true) {
+    const probe = await provider.discoverAccount(handle);
+    if (probe.status === CapabilityStatus.AVAILABLE) {
+      discovered = true;
+    } else {
+      discoveryNote =
+        probe.error?.message ??
+        probe.note ??
+        "the documented discovery route returned no public data for this account";
+    }
+  }
+  const resolveNote =
+    resolved.status === CapabilityStatus.AVAILABLE
+      ? `the configured source observes @${handle}`
+      : resolved.error?.message ??
+        resolved.note ??
+        `the configured source returned ${resolved.status} for @${handle}`;
+
+  // Identity: a platform id already bound to a DIFFERENT username is a
+  // different account. Similar names are not the same person, and the platform
+  // id — not the spelling — is the identity.
+  const observedIgId =
+    sourceObserves && resolved.data !== undefined
+      ? resolved.data.igId
+      : undefined;
+  if (observedIgId !== undefined) {
+    const bound = await getAccountByIgId(ctx.db, observedIgId);
+    if (bound !== null && bound.usernameLower !== handle.toLowerCase()) {
+      throw new CliError(
+        "IDENTITY_CONFLICT",
+        `The platform id for @${handle} is already bound to @${bound.username}. Two accounts cannot share one platform id, ` +
+          "so nothing was recorded: this is a different account that happens to have a similar name.",
+        2,
+      );
+    }
+  }
+
+  stages.push(
+    stage(
+      INVESTIGATION_STAGE.IDENTITY,
+      "Normalize the reference and resolve the account through the permitted sources",
+      sourceObserves
+        ? INVESTIGATION_STAGE_STATUS.COMPLETED
+        : discovered
+          ? INVESTIGATION_STAGE_STATUS.COMPLETED
+          : INVESTIGATION_STAGE_STATUS.BLOCKED,
+      {
+        source: ctx.provider.sourceId,
+        reason: sourceObserves
+          ? resolveNote
+          : discovered
+            ? `the documented discovery route answered for @${handle}`
+            : `${resolveNote}${discoveryNote === null ? "" : `; discovery: ${discoveryNote}`}`,
+        retrieved: sourceObserves
+          ? { accounts: 1 }
+          : discovered
+            ? { accounts: 1 }
+            : {},
+        classes: sourceObserves ? [sourceClass] : [],
+      },
+    ),
+  );
+  if (!sourceObserves && !discovered) {
+    gaps.push({
+      subject: `platform account data for @${handle}`,
+      kind: "investigation",
+      reason: `${resolveNote}. The configured source does not observe this account, so no platform field was read.`,
+      howToImprove:
+        "Point IGTRACK_GRAPH_USERNAME at an account you own (IGTRACK_PROVIDER=graph), or set IGTRACK_PROVIDER=import with an export of this account. " +
+        "For another public professional account, enable the documented discovery route (IGTRACK_GRAPH_BUSINESS_DISCOVERY=1).",
+    });
+  }
+  sources.push({
+    id: ctx.provider.sourceId ?? "no source",
+    evidenceClass: evidenceClassForSource(ctx.provider.sourceId ?? "none"),
+    queried: true,
+    reason: sourceObserves
+      ? "the account is observable through this source"
+      : discovered
+        ? "the documented discovery route answered"
+        : resolveNote,
+    items: sourceObserves || discovered ? 1 : 0,
+  });
+
+  // --- The target. A DISCOVERY target is for an account the platform reached
+  // through the documented cross-account route; anything else is the account
+  // this deployment was asked to observe.
+  //
+  // The route was already probed above, so the target is created directly
+  // rather than through a second probe: probing twice would let a transient
+  // failure abort an investigation that has already been answered.
+  const mode: "OWNED" | "DISCOVERY" = discovered ? "DISCOVERY" : "OWNED";
+  const { target } = await createTarget(ctx.db, {
+    userId: ctx.userId,
+    username: handle,
+    ...(discovered ? { observationMode: "DISCOVERY" as const } : {}),
+  });
+  const targetId = target.id;
+
+  // --- C/E. The platform stage: queue what the source can answer, then
+  // execute it. The queue is shared, so other targets' jobs can be drained
+  // too — the report states what THIS investigation did, read back from this
+  // target's own job rows.
+  //
+  // The cadence is respected by default: a scan that was already done inside
+  // this target's scheduling window is NOT re-read, so repeating an
+  // investigation is cheap and does not hammer the platform. `force` asks for
+  // a fresh look.
+  const queued = await opScanRun(ctx, {
+    target: targetId,
+    ...(input.force === true ? { force: true } : {}),
+  });
+  const platformStage = stage(
+    INVESTIGATION_STAGE.PLATFORM,
+    "Observe every field the selected source exposes for the account",
+    INVESTIGATION_STAGE_STATUS.COMPLETED,
+    {
+      source: ctx.provider.sourceId,
+      reason: `${queued.enqueued.length} scan(s) queued; ${queued.skipped.length} refused or skipped`,
+      retrieved: { queued: queued.enqueued.length, skipped: queued.skipped.length },
+      classes: sourceObserves ? [sourceClass] : [],
+    },
+  );
+  if (queued.enqueued.length === 0) {
+    platformStage.status = INVESTIGATION_STAGE_STATUS.BLOCKED;
+    platformStage.reason =
+      queued.skipped[0]?.reason ??
+      "the configured source exposes no scan kind for this account";
+    gaps.push({
+      subject: "platform observations for this account",
+      kind: "investigation",
+      reason: platformStage.reason,
+      howToImprove:
+        "Configure a source that observes this account (IGTRACK_PROVIDER=graph with the owned account, or IGTRACK_PROVIDER=import with its export).",
+    });
+  }
+
+  const maxJobs = Math.max(input.maxJobs ?? 25, 1);
+  if (queued.enqueued.length > 0) {
+    // The CONTEXT's provider, not a freshly built one: the investigation must
+    // observe through the source the caller configured, and the evidence class
+    // it reports must match the rows it writes.
+    const src: ExecutionSource = {
+      provider,
+      source: {
+        id: provider.sourceId,
+        kind: sourceKindFor(provider.sourceId),
+        name: `${provider.sourceId} provider`,
+        providerVersion: provider.sourceId.split(":").pop() ?? "unknown",
+      },
+    };
+    const workerId = makeWorkerId();
+    for (let i = 0; i < maxJobs; i += 1) {
+      const outcome = await pollOnce(ctx.db, workerId, src);
+      if (outcome.state === "none") break;
+    }
+  }
+  // What this target's own jobs recorded — not the whole shared queue.
+  const targetJobs = await listJobsForTarget(ctx.db, targetId, 50);
+  const completed = targetJobs.filter((j) => j.outcome === "COMPLETED").length;
+  const partial = targetJobs.filter((j) => j.outcome === "COMPLETED_PARTIAL").length;
+  const failed = targetJobs.filter((j) => j.status === "failed").length;
+  platformStage.retrieved = {
+    ...platformStage.retrieved,
+    jobs: targetJobs.length,
+    completed,
+    partial,
+    failed,
+  };
+  if (targetJobs.length > 0) {
+    platformStage.reason =
+      `${targetJobs.length} scan job(s) on record: ${completed} completed, ${partial} partial, ${failed} failed`;
+    if (failed > 0) {
+      platformStage.status = INVESTIGATION_STAGE_STATUS.PARTIAL;
+      const firstError = targetJobs.find(
+        (j): j is (typeof targetJobs)[number] & { errorMessage: string } =>
+          j.errorMessage !== null,
+      )?.errorMessage;
+      if (firstError !== undefined) {
+        gaps.push({
+          subject: "one or more platform scans",
+          kind: "investigation",
+          reason: firstError,
+          howToImprove: "igtrack scans list --target " + handle + " shows every job and its recorded failure.",
+        });
+      }
+    }
+  }
+  stages.push(platformStage);
+
+  // --- D. The content stage: what the observation actually recorded.
+  const detail = await getOwnedTargetDetail(ctx.db, ctx.userId, targetId);
+  const content = buildInvestigateContent(detail);
+  const contentStage = stage(
+    INVESTIGATION_STAGE.CONTENT,
+    "Read back the accessible content: posts, captions, comments, mentions, tags",
+    content.media.length + content.comments.length + content.storyMentions.length + content.taggedMedia.length >
+      0
+      ? INVESTIGATION_STAGE_STATUS.COMPLETED
+      : INVESTIGATION_STAGE_STATUS.BLOCKED,
+    {
+      source: ctx.provider.sourceId,
+      reason:
+        content.media.length + content.comments.length + content.storyMentions.length + content.taggedMedia.length >
+        0
+          ? `${content.media.length} media row(s), ${content.comments.length} comment(s), ${content.storyMentions.length} mention(s), ${content.taggedMedia.length} tagged-media row(s)`
+          : "no content rows were recorded for this account",
+      retrieved: {
+        media: content.media.length,
+        comments: content.comments.length,
+        storyMentions: content.storyMentions.length,
+        taggedMedia: content.taggedMedia.length,
+        captionRows: content.captionRows,
+      },
+      classes: sourceObserves ? [sourceClass] : [],
+    },
+  );
+  stages.push(contentStage);
+
+  // --- The relationships stage.
+  const relationships = await opRelationships(ctx, { target: targetId });
+  const relationshipStage = stage(
+    INVESTIGATION_STAGE.RELATIONSHIPS,
+    "Rank the accounts this one is observed to interact with, by evidence class",
+    relationships.ranks.length + relationships.syntheticRanks.length > 0
+      ? INVESTIGATION_STAGE_STATUS.COMPLETED
+      : INVESTIGATION_STAGE_STATUS.BLOCKED,
+    {
+      source: ctx.provider.sourceId,
+      reason:
+        relationships.ranks.length + relationships.syntheticRanks.length > 0
+          ? `${relationships.ranks.length} live rank(s), ${relationships.syntheticRanks.length} synthetic rank(s)`
+          : "no interaction was observed for this account",
+      retrieved: {
+        live: relationships.ranks.length,
+        synthetic: relationships.syntheticRanks.length,
+      },
+      classes: [
+        ...(relationships.ranks.length > 0 && sourceClass !== EVIDENCE_CLASS.SYNTHETIC
+          ? [sourceClass]
+          : []),
+        ...(relationships.syntheticRanks.length > 0 ? [EVIDENCE_CLASS.SYNTHETIC] : []),
+      ],
+    },
+  );
+  stages.push(relationshipStage);
+
+  // --- F/G. The public-web stage. A DISCOVERY target is another account
+  // observed through the documented route: a research RUN is an owned-account
+  // operation (D47), so its findings are reported here and not filed.
+  const web: InvestigateWeb = {
+    attempted: false,
+    outcome: "NOT_ATTEMPTED",
+    queries: [],
+    searchProvider: null,
+    searchUnavailableReason: null,
+    documents: [],
+    facts: [],
+    totals: { planned: 0, fetched: 0, failed: 0, facts: 0, stored: 0 },
+  };
+  if (input.web === false) {
+    stages.push(
+      stage(INVESTIGATION_STAGE.WEB, "Discover and retrieve public references", INVESTIGATION_STAGE_STATUS.SKIPPED, {
+        source: null,
+        reason: "the operator skipped the public-web stage (--no-web)",
+      }),
+    );
+  } else {
+    const question = input.question?.trim() || defaultQuestion(handle);
+    if (mode === "OWNED") {
+      const run = await opResearchRun(
+        ctx,
+        {
+          target: targetId,
+          question,
+          ...(input.urls !== undefined ? { urls: input.urls } : {}),
+          ...(input.maxSources !== undefined ? { maxSources: input.maxSources } : {}),
+          ...(input.refresh === true ? { refresh: true } : {}),
+        },
+        { ...(deps.fetcher !== undefined ? { fetcher: deps.fetcher } : {}) },
+      );
+      web.attempted = true;
+      web.outcome = run.status;
+      web.queries = run.search.queries;
+      web.searchProvider = run.search.provider;
+      web.searchUnavailableReason = run.search.unavailableReason;
+      web.documents = run.documents.map((doc) => ({
+        url: doc.url,
+        outcome: doc.outcome,
+        reason: doc.outcomeReason,
+        facts: 0,
+      }));
+      web.facts = run.claims.map((claim) => ({
+        predicate: claim.predicate,
+        value: claim.value,
+        sourceUrl: claim.sourceUrl ?? "",
+        sourceTitle: claim.sourceTitle,
+        excerpt: claim.excerpt ?? "",
+        retrievedAt: claim.retrievedAt ?? claim.recordedAt,
+        stored: true,
+      }));
+      web.totals = {
+        planned: run.totals.planned,
+        fetched: run.totals.fetched,
+        failed: run.totals.failed,
+        // STATEMENTS, not extracted candidates: a candidate that the
+        // attribution gate refused is not a fact about the account.
+        facts: run.claims.length,
+        stored: run.totals.claimsStored,
+      };
+      stages.push(
+        stage(
+          INVESTIGATION_STAGE.WEB,
+          "Discover and retrieve public references",
+          run.status === "FAILED"
+            ? INVESTIGATION_STAGE_STATUS.FAILED
+            : run.status === "COMPLETED_PARTIAL"
+              ? INVESTIGATION_STAGE_STATUS.PARTIAL
+              : INVESTIGATION_STAGE_STATUS.COMPLETED,
+          {
+            source: run.search.provider ?? "public web",
+            reason: `${run.totals.claimsStored} claim(s) filed, ${run.totals.claimsRefused} refused by the registry, ${run.totals.pagesDiscarded} page(s) discarded for not naming the handle`,
+            retrieved: {
+              queries: run.search.queries.length,
+              candidates: run.search.candidateUrls,
+              documents: run.totals.fetched + run.totals.failed,
+              claims: run.totals.claimsStored,
+            },
+            classes: [EVIDENCE_CLASS.WEB],
+          },
+        ),
+      );
+    } else {
+      // Read-only: the documented route observed another account, and an
+      // autonomous run against a name the operator has not owned is not
+      // permitted (D47). The findings are reported; they are not filed.
+      const probe = await opAuditWebProbe(
+        { username: handle, ...(input.urls !== undefined ? { urls: input.urls } : {}) },
+        {
+          ...(deps.fetcher !== undefined ? { fetcher: deps.fetcher } : {}),
+          ...(deps.search !== undefined ? { search: deps.search } : {}),
+        },
+      );
+      web.attempted = probe.attempted;
+      web.outcome = probe.outcomeClass;
+      web.queries = probe.search.queries;
+      web.searchProvider = probe.search.provider;
+      web.searchUnavailableReason = probe.search.unavailableReason;
+      web.documents = probe.documents.map((doc) => ({
+        url: doc.url,
+        outcome: doc.outcome,
+        reason: doc.outcomeReason,
+        facts: doc.facts,
+      }));
+      web.facts = probe.facts.map((fact) => ({
+        predicate: fact.predicate,
+        value: fact.value,
+        sourceUrl: fact.sourceUrl,
+        sourceTitle: fact.sourceTitle,
+        excerpt: fact.excerpt,
+        // A fact without a retrieval time has no provenance; say so rather
+        // than inventing a timestamp.
+        retrievedAt: fact.retrievedAt ?? "unavailable",
+        stored: false,
+      }));
+      web.totals = {
+        planned: probe.totals.planned,
+        fetched: probe.totals.fetched,
+        failed: probe.totals.failed,
+        facts: probe.totals.facts,
+        stored: 0,
+      };
+      stages.push(
+        stage(
+          INVESTIGATION_STAGE.WEB,
+          "Discover and retrieve public references",
+          probe.totals.facts > 0
+            ? INVESTIGATION_STAGE_STATUS.COMPLETED
+            : probe.attempted
+              ? INVESTIGATION_STAGE_STATUS.PARTIAL
+              : INVESTIGATION_STAGE_STATUS.BLOCKED,
+          {
+            source: probe.search.provider ?? "public web",
+            reason:
+              `${probe.totals.facts} statement(s) extracted; reported only — a research run is an owned-account operation, ` +
+              "so a DISCOVERY target's findings are not filed. Use `igtrack claims add` to keep one.",
+            retrieved: {
+              queries: probe.search.queries.length,
+              documents: probe.totals.fetched + probe.totals.failed,
+              facts: probe.totals.facts,
+            },
+            classes: [EVIDENCE_CLASS.WEB],
+          },
+        ),
+      );
+    }
+    if (web.searchProvider !== null) {
+      sources.push({
+        id: web.searchProvider,
+        evidenceClass: EVIDENCE_CLASS.WEB,
+        queried: true,
+        reason: `${web.totals.fetched} document(s) read, ${web.totals.facts} statement(s) extracted`,
+        items: web.totals.facts,
+      });
+      // A search that RAN and found nothing is a finding, not a silence: the
+      // gap has to say that the index was asked and did not hold anything
+      // about this handle. "No public evidence exists" is a different claim,
+      // and this report must never make it.
+      if (web.totals.facts === 0) {
+        gaps.push({
+          subject: "public-web references",
+          kind: "investigation",
+          reason:
+            `the search (${web.searchProvider}) ran ${web.queries.length} quer(y/ies) and produced ` +
+            `${web.totals.fetched} readable document(s) and no statement about this handle. ` +
+            "That is the index's coverage, not evidence that nothing exists — one index was asked, and a different one may hold pages it does not.",
+          howToImprove:
+            "Set IGTRACK_RESEARCH_SEARCH_API_KEY with IGTRACK_RESEARCH_SEARCH_PROVIDER=auto (adds the Brave index), or name pages directly with --url.",
+        });
+      }
+    } else {
+      sources.push({
+        id: "public-web",
+        evidenceClass: EVIDENCE_CLASS.WEB,
+        queried: false,
+        reason:
+          web.searchUnavailableReason ??
+          "no search provider was configured, so no public page was found",
+        items: 0,
+      });
+      gaps.push({
+        subject: "public-web references",
+        kind: "investigation",
+        reason:
+          web.searchUnavailableReason ??
+          "no search provider is configured, so the public-web stage found no candidate pages",
+        howToImprove:
+          "Set IGTRACK_RESEARCH_SEARCH_PROVIDER=auto (uses IGTRACK_RESEARCH_SEARCH_API_KEY with Brave when a key is present, otherwise the keyless FreeSerp index), or name pages with --url.",
+      });
+    }
+  }
+
+  // --- I/J. The dossier: one report over the stored record.
+  const report = await opResearch(ctx, { target: targetId });
+  // The derived topics belong with the content they came from, and the corpus
+  // size travels with them: a term without its corpus is not a finding.
+  content.hashtags = report.themes.hashtags;
+  content.terms = report.themes.terms;
+  const correlateStage = stage(
+    INVESTIGATION_STAGE.CORRELATE,
+    "Correlate the evidence across classes: themes, cadence, contradictions",
+    report.themes.state === "DERIVED" || report.contradictions.length > 0
+      ? INVESTIGATION_STAGE_STATUS.COMPLETED
+      : INVESTIGATION_STAGE_STATUS.PARTIAL,
+    {
+      source: "stored observations",
+      reason:
+        report.contradictions.length > 0
+          ? `${report.contradictions.length} contradiction(s) found — both sides shown, no winner chosen`
+          : `${report.themes.captionRows} caption(s) read for themes; no contradiction between the sources on record`,
+      retrieved: {
+        captionRows: report.themes.captionRows,
+        contradictions: report.contradictions.length,
+        timestampRows: report.cadence.timestampRows,
+      },
+      classes: [EVIDENCE_CLASS.DERIVED],
+    },
+  );
+  stages.push(correlateStage);
+
+  // Every capability the registry lists, with its reason — the coverage table
+  // is the "what remains unknown" answer, per capability.
+  //
+  // When the platform stage is blocked, "not observed" must NOT be explained
+  // as "a scan can still run": the source refuses to observe this account, so
+  // a scan could never have run. The real reason replaces the generic one.
+  for (const row of report.coverage) {
+    if (row.state === "OBSERVED") continue;
+    const blockedPlatform =
+      platformStage.status === INVESTIGATION_STAGE_STATUS.BLOCKED &&
+      row.state === "NOT_OBSERVED";
+    gaps.push({
+      subject: row.label,
+      kind: "capability",
+      reason: blockedPlatform
+        ? `${platformStage.reason ?? "the configured source does not observe this account"} (so a scan of it could not run)`
+        : row.reason ?? "not observed",
+      howToImprove: row.unlock ?? null,
+    });
+  }
+  if (relationships.ranks.length === 0 && relationships.syntheticRanks.length === 0) {
+    gaps.push({
+      subject: "follower, following and interaction records",
+      kind: "investigation",
+      reason:
+        "no interaction was observed for this account. The platform exposes follower and following LISTS only for the account the deployment owns; for any other account they are platform-absent, not unimplemented.",
+      howToImprove:
+        "IGTRACK_PROVIDER=import with the operator's own export is the only lawful route to a real roster, mutual-follow and follow-change evidence.",
+    });
+  }
+
+  // The evidence-class summary: how much of each class this investigation
+  // actually produced. The classes are never merged, and the counts are
+  // ITEMS — a class is not credited because a stage merely ran.
+  const classCounts = new Map<EvidenceClass, number>();
+  const add = (cls: EvidenceClass, n: number): void => {
+    if (n <= 0) return;
+    classCounts.set(cls, (classCounts.get(cls) ?? 0) + n);
+  };
+  add(
+    sourceClass,
+    content.media.length +
+      content.comments.length +
+      content.storyMentions.length +
+      content.taggedMedia.length +
+      relationships.ranks.length +
+      (report.platform.profile.latest === null ? 0 : 1),
+  );
+  add(EVIDENCE_CLASS.SYNTHETIC, relationships.syntheticRanks.length);
+  add(EVIDENCE_CLASS.WEB, web.totals.facts);
+  add(EVIDENCE_CLASS.OPERATOR, report.claims.totals.active);
+  add(
+    EVIDENCE_CLASS.DERIVED,
+    report.themes.terms.length + report.contradictions.length,
+  );
+  // The VALUES are the class names (the keys are the short aliases), so the
+  // summary iterates the values.
+  const evidenceClasses = (Object.values(EVIDENCE_CLASS) as EvidenceClass[])
+    .map((cls) => ({
+      class: cls,
+      label: EVIDENCE_CLASS_LABELS[cls],
+      items: classCounts.get(cls) ?? 0,
+    }))
+    .filter((row) => row.items > 0 || row.class === EVIDENCE_CLASS.PLATFORM);
+
+  const nextSteps = buildInvestigateNextSteps(ctx, {
+    handle,
+    mode,
+    sourceObserves,
+    discovered,
+    relationships,
+    web,
+    report,
+  });
+
+  const completedAt = new Date();
+  stages.push(
+    stage(
+      INVESTIGATION_STAGE.DOSSIER,
+      "Assemble the dossier: what is known, what was derived, and what is still unknown",
+      INVESTIGATION_STAGE_STATUS.COMPLETED,
+      {
+        source: "stored observations + the public web",
+        reason: `${gaps.length} gap(s) stated; ${evidenceClasses.length} evidence class(es) present`,
+        retrieved: { gaps: gaps.length, evidenceClasses: evidenceClasses.length },
+        classes: [EVIDENCE_CLASS.DERIVED],
+      },
+    ),
+  );
+
+  // What was actually RETRIEVED — not what was attempted. A scan that was
+  // queued and then refused retrieved nothing, and the exit code has to say
+  // so.
+  const retrievedItems =
+    content.media.length +
+    content.comments.length +
+    content.storyMentions.length +
+    content.taggedMedia.length +
+    web.totals.facts +
+    relationships.ranks.length +
+    relationships.syntheticRanks.length +
+    report.claims.totals.active +
+    (report.platform.profile.latest === null ? 0 : 1);
+
+  return {
+    investigation: {
+      startedAt: startedAt.toISOString(),
+      completedAt: completedAt.toISOString(),
+      requested,
+      username: handle,
+      referenceForm: parsed.reference.form,
+      targetId,
+      observationMode: mode,
+      stages,
+      sources,
+      evidenceClasses,
+      retrievedItems,
+    },
+    identity: report.identity,
+    platform: report.platform,
+    content,
+    relationships: {
+      live: relationships.ranks,
+      synthetic: relationships.syntheticRanks,
+      method: relationships.method,
+    },
+    web,
+    claims: report.claims,
+    contradictions: report.contradictions,
+    changes: report.changes,
+    leads: report.leads,
+    themes: report.themes,
+    cadence: report.cadence,
+    coverage: report.coverage,
+    gaps,
+    nextSteps,
+    report,
+    notes: [...report.notes, ...notes],
+  };
+}
+
+/** The content section, read back from the stored record with its provenance. */
+function buildInvestigateContent(
+  detail: Awaited<ReturnType<typeof getOwnedTargetDetail>>,
+): InvestigateContent {
+  const media: InvestigateContent["media"] = [];
+  const comments: InvestigateContent["comments"] = [];
+  const storyMentions: InvestigateContent["storyMentions"] = [];
+  const taggedMedia: InvestigateContent["taggedMedia"] = [];
+  if (detail === null) {
+    return {
+      media,
+      comments,
+      storyMentions,
+      taggedMedia,
+      hashtags: [],
+      terms: [],
+      captionRows: 0,
+    };
+  }
+  for (const post of detail.posts) {
+    media.push({
+      postId: post.postId,
+      caption: post.caption,
+      publishedAt: post.takenAt === null ? null : post.takenAt.toISOString(),
+      firstObservedAt: post.observedAt.toISOString(),
+      likeCount: post.likeCount,
+      commentCount: post.commentCount,
+      repostsCount: post.repostsCount,
+      mediaType: post.mediaType,
+      commentsState: post.commentsState,
+      sourceId: post.sourceId,
+      evidenceId: post.evidenceId,
+    });
+  }
+  for (const group of detail.postComments) {
+    for (const comment of group.comments) {
+      comments.push({
+        postId: group.postId,
+        commentId: comment.commentId,
+        author: comment.username,
+        text: comment.body,
+        createdAt: comment.commentedAt.toISOString(),
+        evidenceId: comment.evidenceId,
+      });
+    }
+  }
+  for (const group of detail.storyMentions) {
+    for (const mention of group.mentions) {
+      storyMentions.push({
+        storyId: group.storyId,
+        username: mention.username,
+        visibilityClass: mention.visibilityClass,
+      });
+    }
+  }
+  for (const row of detail.taggedMedia) {
+    taggedMedia.push({
+      mediaId: row.mediaId,
+      ownerUsername: row.ownerUsername,
+      takenAt: row.takenAt === null ? null : row.takenAt.toISOString(),
+    });
+  }
+  const captionRows = detail.posts.filter((p) => p.caption !== null).length;
+  return {
+    media,
+    comments,
+    storyMentions,
+    taggedMedia,
+    hashtags: [],
+    terms: [],
+    captionRows,
+  };
+}
+
+/** The next commands, each with the reason it is the next one. */
+function buildInvestigateNextSteps(
+  ctx: CliContext,
+  input: {
+    handle: string;
+    mode: "OWNED" | "DISCOVERY";
+    sourceObserves: boolean;
+    discovered: boolean;
+    relationships: RelationshipsResult;
+    web: InvestigateWeb;
+    report: ResearchResult;
+  },
+): Array<{ action: string; because: string }> {
+  const steps: Array<{ action: string; because: string }> = [];
+  if (!input.sourceObserves && !input.discovered) {
+    steps.push({
+      action: "igtrack config",
+      because:
+        "no platform source observes this account, so its platform fields were never read. `igtrack config` shows which credentials the deployment has and which are missing.",
+    });
+  }
+  if (input.web.totals.facts === 0 && input.web.searchProvider === null) {
+    steps.push({
+      action: "igtrack audit " + input.handle + " --url \"https://example.org/page-that-names-" + input.handle + "\"",
+      because:
+        "no public-web source was available, so nothing on the open web was read. Naming a page you know discusses the handle widens the pass without inventing a source.",
+    });
+  }
+  if (input.relationships.ranks.length === 0 && input.relationships.syntheticRanks.length === 0) {
+    steps.push({
+      action: "igtrack capabilities",
+      because:
+        "the registry names exactly which capabilities have a lawful source and which are platform-absent — it is the shortest route from \"not observed\" to \"never observable\".",
+    });
+  }
+  if (input.report.claims.totals.active === 0 && input.web.totals.facts > 0) {
+    steps.push({
+      action: "igtrack claims list --target " + input.handle,
+      because:
+        "the public-web stage found statements; the claims ledger is where a finding with its citation is kept, so the next investigation can build on it.",
+    });
+  }
+  if (steps.length === 0) {
+    steps.push({
+      action: "igtrack research " + input.handle,
+      because:
+        "the full report over the stored record — observations, claims, contradictions and coverage — is one command away.",
+    });
+  }
+  void ctx;
+  return steps;
 }

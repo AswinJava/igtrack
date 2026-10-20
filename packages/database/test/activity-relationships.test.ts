@@ -20,11 +20,27 @@ import {
 
 const available = await probeDatabase(TEST_DATABASE_URL);
 
+// The ranking's arithmetic is what this file pins. The source class is
+// deliberately a LIVE one: a synthetic observation is evidence about the
+// fixture, not about a person, so it never contributes to a live ranking (the
+// isolation is pinned separately, below).
 const SOURCE = {
+  id: "graph:owned:v1",
+  kind: SourceKind.GRAPH_API,
+  name: "Graph owned v1",
+} as const;
+
+// A synthetic source, used only to prove it cannot reach a live ranking.
+const SYNTHETIC_SOURCE = {
   id: "fixture:v1",
   kind: SourceKind.FIXTURE,
   name: "Fixture v1",
 } as const;
+
+// The two evidence classes a ranking is computed over. A ranking never
+// blends them: a caller asks for one class at a time.
+const LIVE = ["GRAPH_API"] as const;
+const SYNTHETIC = ["FIXTURE"] as const;
 
 const hash = (label: string): string =>
   Buffer.from(label.padEnd(64, "0")).toString("hex").slice(0, 64);
@@ -204,7 +220,7 @@ describe.runIf(available)("relationship structure (mutual, span)", () => {
   });
 
   it("marks mutual and current membership without inventing timestamps", async () => {
-    const ranks = await getRelationshipsForUser(handle.db, userId, targetId);
+    const { ranks } = await getRelationshipsForUser(handle.db, userId, targetId, LIVE);
     const byName = new Map(ranks.map((r) => [r.username, r]));
     const alice = byName.get("alice")!;
     expect(alice.mutual).toBe(true);
@@ -265,7 +281,7 @@ describe.runIf(available)("relationship structure (mutual, span)", () => {
       });
     }
 
-    const ranks = await getRelationshipsForUser(handle.db, userId, targetId);
+    const { ranks } = await getRelationshipsForUser(handle.db, userId, targetId, LIVE);
     const byName = new Map(ranks.map((r) => [r.username, r]));
     const friend = byName.get("close_friend")!;
     expect(friend.signals.comments).toBe(2);
@@ -320,7 +336,7 @@ describe.runIf(available)("relationship structure (mutual, span)", () => {
       });
     }
 
-    const ranks = await getRelationshipsForUser(handle.db, userId, targetId);
+    const { ranks } = await getRelationshipsForUser(handle.db, userId, targetId, LIVE);
     const ranked = ranks.find((r) => r.username === "window_friend")!;
     // Both stored mentions count; only the one inside the 30-day window is
     // recent. The score uses the all-time count — a decay constant would be
@@ -341,6 +357,57 @@ describe.runIf(available)("relationship structure (mutual, span)", () => {
   });
 
   it("returns [] for unknown targets instead of fabricating ranks", async () => {
-    expect(await getRelationshipsForUser(handle.db, userId, "00000000-0000-0000-0000-000000000000")).toEqual([]);
+    const { ranks } = await getRelationshipsForUser(handle.db, userId, "00000000-0000-0000-0000-000000000000", LIVE);
+    expect(ranks).toEqual([]);
+  });
+
+  it("never lets a synthetic interaction reach a live ranking", async () => {
+    // A synthetic mention on a synthetic story: the fixture's own invented
+    // interaction. It must not appear in the LIVE ranking, and it must not be
+    // silently dropped either — it belongs in the synthetic ranking, which
+    // the caller renders separately and labels.
+    await recordStory(handle.db, {
+      owner: { username: "rel_target" },
+      sourceId: SYNTHETIC_SOURCE.id,
+      story: {
+        storyId: "synthetic-story",
+        mediaType: "IMAGE",
+        takenAt: T1.toISOString(),
+        expiresAt: new Date(T1.getTime() + 24 * 3_600_000).toISOString(),
+        hasLink: false,
+        stickerKinds: [],
+        mentions: [
+          {
+            account: { username: "synthetic_friend" },
+            visibilityClass: "VISIBLE",
+            meta: {
+              category: ObservationCategory.OBSERVED,
+              confidence: Confidence.HIGH,
+              observedAt: T1.toISOString(),
+            },
+          },
+        ],
+        meta: {
+          category: ObservationCategory.OBSERVED,
+          confidence: Confidence.HIGH,
+          observedAt: T1.toISOString(),
+        },
+      },
+      evidence: {
+        ...evidenceFor("story", "synthetic-story", T1),
+        source: SYNTHETIC_SOURCE,
+      },
+    });
+
+    const live = await getRelationshipsForUser(handle.db, userId, targetId, LIVE);
+    expect(live.ranks.find((r) => r.username === "synthetic_friend")).toBeUndefined();
+    expect(live.sourceKinds).not.toContain("FIXTURE");
+
+    // The same row IS a real (synthetic) observation — it appears in the
+    // synthetic ranking, so "no live observation" is never rendered as "no
+    // interaction at all".
+    const synthetic = await getRelationshipsForUser(handle.db, userId, targetId, SYNTHETIC);
+    expect(synthetic.ranks.find((r) => r.username === "synthetic_friend")).toBeDefined();
+    expect(synthetic.sourceKinds).toEqual(["FIXTURE"]);
   });
 });

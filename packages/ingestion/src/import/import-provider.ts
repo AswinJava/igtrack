@@ -146,6 +146,14 @@ export class ImportProvider implements InstagramProvider {
     };
   }
 
+  /**
+   * One export, one owner. Local, no request — the worker uses it to refuse a
+   * scan before it writes anything under a target this export does not cover.
+   */
+  async observesAccount(username: string): Promise<boolean> {
+    return username.trim().replace(/^@+/, "").toLowerCase() === this.username.toLowerCase();
+  }
+
   async resolveAccount(username: string): Promise<CapabilityResult<NormalizedAccountRef>> {
     const meta = this.meta();
     // One export, one owner. Any other username is honestly not-observable

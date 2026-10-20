@@ -24,7 +24,7 @@ const TEST_DATABASE_URL =
   "postgresql://igtrack:igtrack@127.0.0.1:5432/igtrack_test";
 
 async function probe(url: string): Promise<boolean> {
-  const sql = postgres(url, { max: 1, connect_timeout: 3 });
+  const sql = postgres(url, { max: 1, connect_timeout: 10 });
   try {
     await sql`SELECT 1`;
     return true;

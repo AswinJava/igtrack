@@ -330,17 +330,25 @@ function researchMarkdown(result: ResearchResult): string {
     }
   }
 
-  lines.push("", "## Leads (stored signal rows — not claims, not researched)", "");
+  lines.push("", "## Leads (stored signal rows - not claims, not researched)", "");
   if (result.leads.state === "UNAVAILABLE") {
-    lines.push(`UNAVAILABLE — ${display(result.leads.reason)}`);
+    lines.push(`UNAVAILABLE - ${display(result.leads.reason)}`);
   } else {
     lines.push(...mdTable(["account", "signals"], result.leads.items.map((lead) => [lead.username, lead.signals.join(" · ")])));
+    if (result.leads.syntheticItems.length > 0) {
+      lines.push(
+        "",
+        "Synthetic leads (fixture data - evidence about the fixture, never about a person):",
+        "",
+        ...mdTable(["account", "signals"], result.leads.syntheticItems.map((lead) => [lead.username, lead.signals.join(" · ")])),
+      );
+    }
   }
   lines.push("", result.leads.note);
 
   lines.push("", "## Connections (evidence-ranked; counts of stored rows, never affinity)", "");
   if (result.connections.state === "UNAVAILABLE") {
-    lines.push(`UNAVAILABLE — ${display(result.connections.reason)}`);
+    lines.push(`UNAVAILABLE - ${display(result.connections.reason)}`);
   } else {
     lines.push(
       ...mdTable(
@@ -353,6 +361,22 @@ function researchMarkdown(result: ResearchResult): string {
         ]),
       ),
     );
+    if (result.connections.syntheticRanks.length > 0) {
+      lines.push(
+        "",
+        "Synthetic connections (fixture data - never evidence about a person):",
+        "",
+        ...mdTable(
+          ["account", "mentions", "comments", "deltas"],
+          result.connections.syntheticRanks.map((rank) => [
+            rank.username,
+            String(rank.signals.mentions),
+            String(rank.signals.comments),
+            String(rank.signals.deltas),
+          ]),
+        ),
+      );
+    }
     if (result.connections.truncated) {
       lines.push("", "Note: more ranked accounts are stored than this list shows.");
     }
@@ -777,9 +801,9 @@ export async function runResearch(args: ParsedArgs): Promise<number> {
       }
     }
 
-    sections.push("", "Leads (stored signal rows — not claims, not researched)");
+    sections.push("", "Leads (stored signal rows - not claims, not researched)");
     if (result.leads.state === "UNAVAILABLE") {
-      sections.push(`  UNAVAILABLE — ${display(result.leads.reason)}`);
+      sections.push(`  UNAVAILABLE - ${display(result.leads.reason)}`);
     } else {
       sections.push(
         table(
@@ -787,12 +811,21 @@ export async function runResearch(args: ParsedArgs): Promise<number> {
           result.leads.items.map((lead) => [lead.username, lead.signals.join(" · ")]),
         ),
       );
+      if (result.leads.syntheticItems.length > 0) {
+        sections.push(
+          "  Synthetic leads (fixture data — evidence about the fixture, never about a person):",
+          table(
+            ["account", "signals"],
+            result.leads.syntheticItems.map((lead) => [lead.username, lead.signals.join(" · ")]),
+          ),
+        );
+      }
     }
     sections.push(`  ${result.leads.note}`);
 
     sections.push("", "Connections (evidence-ranked; counts of stored rows, never affinity)");
     if (result.connections.state === "UNAVAILABLE") {
-      sections.push(`  UNAVAILABLE — ${display(result.connections.reason)}`);
+      sections.push(`  UNAVAILABLE - ${display(result.connections.reason)}`);
     } else {
       sections.push(
         table(
@@ -803,6 +836,18 @@ export async function runResearch(args: ParsedArgs): Promise<number> {
           ]),
         ),
       );
+      if (result.connections.syntheticRanks.length > 0) {
+        sections.push(
+          "  Synthetic connections (fixture data — never evidence about a person):",
+          table(
+            ["account", "signals"],
+            result.connections.syntheticRanks.map((rank) => [
+              rank.username,
+              `mentions x${rank.signals.mentions} · comments x${rank.signals.comments} · deltas x${rank.signals.deltas}`,
+            ]),
+          ),
+        );
+      }
       if (result.connections.truncated) {
         sections.push("  Note: more ranked accounts are stored than this list shows.");
       }

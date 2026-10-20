@@ -37,6 +37,7 @@ import {
 import { FixtureProvider } from "@igtrack/ingestion";
 import { runStoryScan } from "../src/provider.js";
 import type { ExecutionSource } from "../src/index.js";
+import { fixtureSetForAccount } from "./fixture-set.js";
 import {
   createFreshTestDb,
   probeDatabase,
@@ -164,59 +165,6 @@ function storySource(config: StorySourceConfig = {}): ExecutionSource {
   };
 }
 
-async function realFixtureSource(): Promise<ExecutionSource> {
-  const version = "v1";
-  const repoFixtures = join(
-    tmpdir(),
-    `igtrack-story-${Math.random().toString(36).slice(2)}`,
-  );
-  await mkdir(repoFixtures, { recursive: true });
-  // Copy the real repo fixture set so the scan exercises genuine normalization.
-  const { readFile } = await import("node:fs/promises");
-  const manifestText = await readFile(
-    join(process.cwd(), "packages", "ingestion", "fixtures", version, "manifest.json"),
-    "utf8",
-  );
-  await writeFile(join(repoFixtures, "manifest.json"), manifestText);
-  for (const file of ["profile.json", "stories.json"]) {
-    await copyFile(
-      join(process.cwd(), "packages", "ingestion", "fixtures", version, file),
-      join(repoFixtures, file),
-    );
-  }
-  const provider = new FixtureProvider({ fixturesDir: repoFixtures });
-  return {
-    provider,
-    source: { id: provider.sourceId, kind: SourceKind.FIXTURE, name: "story fixture" },
-  };
-}
-
-async function malformedStoriesSource(): Promise<ExecutionSource> {
-  const dir = await mkdtemp(join(tmpdir(), "igtrack-story-bad-"));
-  await writeFile(
-    join(dir, "manifest.json"),
-    JSON.stringify({
-      version: "v1",
-      target_username: "aurora.wilde",
-      captured_at: OBSERVED_AT,
-      files: {
-        profile: "profile.json",
-        stories: "stories.json",
-        followers: [],
-        following: [],
-        posts: [],
-        comments: {},
-      },
-    }),
-  );
-  await writeFile(join(dir, "stories.json"), "{ broken json");
-  const provider = new FixtureProvider({ fixturesDir: dir });
-  return {
-    provider,
-    source: { id: provider.sourceId, kind: SourceKind.FIXTURE, name: "malformed story fixture" },
-  };
-}
-
 describe.runIf(dbAvailable)("worker STORY_SCAN", () => {
   let handle: DatabaseHandle;
   let userId: string;
@@ -242,6 +190,34 @@ describe.runIf(dbAvailable)("worker STORY_SCAN", () => {
       username: `story_target_${targetCounter}`,
     });
     return target.id;
+  }
+
+  /**
+   * A target for a REAL fixture set: the account that set declares.
+   *
+   * A fixture set speaks about exactly one account, and the worker's
+   * identity gate refuses a scan of any other target rather than answering
+   * it with the set's bytes. Each test therefore gets its own set, bound to
+   * its own account (and its own platform id — one platform id may never be
+   * bound to two accounts).
+   */
+  async function makeFixtureTarget(options: { broken?: boolean } = {}): Promise<{
+    targetId: string;
+    source: ExecutionSource;
+  }> {
+    targetCounter += 1;
+    const account = `story_target_${targetCounter}`;
+    const set = await fixtureSetForAccount(account, {
+      ...(options.broken === true
+        ? {
+            mutate: async (dir: string) => {
+              await writeFile(join(dir, "stories.json"), "{ broken json");
+            },
+          }
+        : {}),
+    });
+    const { target } = await createTarget(handle.db, { userId, username: account });
+    return { targetId: target.id, source: set.source };
   }
 
   async function makeJob(targetId: string): Promise<JobRecord> {
@@ -376,16 +352,17 @@ describe.runIf(dbAvailable)("worker STORY_SCAN", () => {
   });
 
   it("malformed story fixture → non-retryable SCHEMA_MISMATCH, no rows (ST5)", async () => {
-    const targetId = await makeTarget();
+    const { targetId, source } = await makeFixtureTarget({ broken: true });
     const job = await makeJob(targetId);
+    const before = await storyRows(targetId);
 
-    await expect(runStoryScan(handle.db, job, await malformedStoriesSource()))
-      .rejects.toMatchObject({
-        name: "JobExecutionError",
-        kind: CapabilityErrorKind.SCHEMA_MISMATCH,
-        retryable: false,
-      });
-    expect(await storyRows(targetId)).toHaveLength(0);
+    await expect(runStoryScan(handle.db, job, source)).rejects.toMatchObject({
+      name: "JobExecutionError",
+      kind: CapabilityErrorKind.SCHEMA_MISMATCH,
+      retryable: false,
+    });
+    // Nothing was written: the count is unchanged, not merely "small".
+    expect(await storyRows(targetId)).toHaveLength(before.length);
   });
 
   it("duplicate story ingestion across logical scans dedupes (ST6)", async () => {
@@ -472,10 +449,10 @@ describe.runIf(dbAvailable)("worker STORY_SCAN", () => {
   });
 
   it("real fixture set end-to-end: normalizes stories and classifies every mention variant (ST7)", async () => {
-    const targetId = await makeTarget();
+    const { targetId, source } = await makeFixtureTarget();
     const job = await makeJob(targetId);
 
-    const result = await runStoryScan(handle.db, job, await realFixtureSource());
+    const result = await runStoryScan(handle.db, job, source);
     expect(result).toBe("succeeded");
 
     const rows = await storyRows(targetId);

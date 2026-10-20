@@ -32,7 +32,7 @@ const SEEDED_USERNAME = "target_a"; // the seed's owned account, claims attached
 const DISCOVERY_USERNAME = "dune.harbor"; // the other account the fixture set can discover
 
 async function probe(url: string): Promise<boolean> {
-  const sql = postgres(url, { max: 1, connect_timeout: 3 });
+  const sql = postgres(url, { max: 1, connect_timeout: 10 });
   try {
     await sql`SELECT 1`;
     return true;

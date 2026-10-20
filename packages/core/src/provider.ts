@@ -40,6 +40,24 @@ export interface Cursor {
 export interface InstagramProvider {
   readonly sourceId: string;
   capabilities(): ProviderCapabilities;
+  /**
+   * LOCAL identity predicate: does this provider observe the named account?
+   *
+   * The answer must be a pure local check — configuration, a manifest, an
+   * in-memory string comparison — never a network read. It is not an
+   * observation and must never be reported as one; it only says which
+   * account this source is allowed to speak about.
+   *
+   * The worker asks BEFORE it writes anything under a target. A source that
+   * observes one account (a fixture set, the operator's own export, the
+   * authorized Graph account) must never answer for another one: serving
+   * account A's bytes under account B's record is how synthetic or foreign
+   * data becomes evidence about a real account.
+   *
+   * Optional: a provider that does not implement it asserts nothing, and the
+   * worker cannot gate on it. The three shipped providers implement it.
+   */
+  observesAccount?(username: string): Promise<boolean>;
   resolveAccount(username: string): Promise<CapabilityResult<NormalizedAccountRef>>;
   getProfile(account: NormalizedAccountRef): Promise<CapabilityResult<NormalizedProfile>>;
   getStories(account: NormalizedAccountRef): Promise<CapabilityResult<NormalizedStory[]>>;

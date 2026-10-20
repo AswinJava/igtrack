@@ -879,3 +879,214 @@ environment — the phase reports `UNAVAILABLE` with the exact env vars, which i
 itself the pinned behaviour). The transport's failure modes remain pinned
 separately in `packages/ingestion/test/research-fetch.test.ts`; the three live
 fetches above verify the success path, not the internet's full behaviour.
+
+---
+
+## 20. Phase I — the identity gate: an observation belongs to the account it is about
+
+**Date:** 2026-10-20 · **Status:** adopted
+
+### 20.1 The defect, as it actually showed up in a live database
+
+A deployment configured with `IGTRACK_PROVIDER=fixture` was asked about a real
+handle. The `sel_win_` target ended up holding:
+
+- two COMPLETE follow snapshots (5 followers, 4 following) whose members were
+  the fixture set's invented accounts, with `evidence.source_reference` set to
+  `sel_win_`;
+- two posts, three comments and 68 insight points from the same fixture set,
+  filed under the same target;
+- and a genuine WEB claim — a public Instagram reel published by `@serpaix.ai`
+  that names `sel_win_` beside it — which is real research evidence and is
+  preserved untouched.
+
+The evidence rows were labelled `synthetic: true` and the source was
+`fixture:v1`. That was not enough. The rows were filed under a REAL account's
+record, and from that point on every downstream derivation — the follower
+roster, the follow/unfollow deltas, the relationship score, the "own-account
+insights" coverage row, the dossier's "77 stored rows" — was a statement
+about a person who had never been observed.
+
+The cause was structural, not a missing check in one place:
+
+| # | Fact | Where |
+|---|---|---|
+| 1 | A fixture set observes exactly one account. | `packages/ingestion/fixtures/v1/manifest.json` declares `target_username` |
+| 2 | Only `resolveAccount` compared the requested username with the set's subject. | `fixture-provider.ts` |
+| 3 | The worker never called `resolveAccount`: it went from a target row straight to a capability call. | `workers/monitoring/src/executors.ts` |
+| 4 | The follow diff compared the newest snapshot of ANY source with the new one, so a synthetic roster could be diffed against a live one. | `follows.ts` `latestFollowSnapshot` |
+| 5 | The relationship ranking aggregated story mentions, comments and deltas with no source filter at all. | `app-queries.ts` `getRelationshipsForUser` |
+
+So: the provider served one account's bytes for any username it was handed,
+and the storage path believed it.
+
+### 20.2 Decision log (Phase I)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D76 | **A provider declares which account it observes** (`InstagramProvider.observesAccount?`, a local, no-I/O predicate). The worker checks it before a single row is written, `igtrack scans run` and the scheduler refuse to enqueue a scan it cannot answer, and the fixture provider additionally refuses every account-scoped capability for a foreign account, at its own boundary. | The provider is where the knowledge lives, so the guard belongs there; the worker is the only writer, so the guard belongs there too. One predicate, checked in one place at write time and at both enqueue paths, closes every route — including a job enqueued by some other path. The refusal says "this source does not observe that account", never "that account does not exist". |
+| D77 | **A relationship ranking is computed over ONE evidence class at a time, and the classes are never blended.** `getRelationshipsForUser` takes the source classes as an argument; the CLI renders a live ranking and a synthetic ranking as separate sections. | A synthetic interaction is evidence about a fixture, not about a person: letting it into a live score would be demo data moving a real number. Excluding it outright was the other option, and it is wrong too — it would silently empty the product's own demo and hide the fact that observations exist. Two labelled rankings say both things: "no live observation" AND "here is what the fixture produced". |
+| D78 | **A follow diff only ever compares snapshots from the same source**, and a stored record carries the class of the evidence behind it (`SYNTHETIC` / `LIVE` / `MIXED` / `NONE`) on every surface that shows its rows. | "There are rows" and "the account was observed" are different facts, and only the second one may be rendered as "OBSERVED". The class travels with the row counts, the coverage table, the stored-record state and the audit's Observation block, so a reader never has to infer it from a source id. |
+| D79 | **The synthetic seed no longer enqueues a provider scan.** It writes its own observations, with their own evidence and source id, and the demo flow is "add a target the configured source can observe, then scan". | The seed's queued `PROFILE_SCAN` was for an account no provider observes, so it could only ever fail — and before the gate it filed the fixture set's roster under that account. The seed is a data seeder; scanning is the worker's job, driven by the operator's target list. |
+| D80 | **`igtrack audit` distinguishes "a report was produced" from "the account was observed":** exit 0 means the configured source returned an observation, exit 4 means the report was produced and NO observation was made, and the report's `observation` block says in one place whether a real platform request reached Instagram. | The mission's own complaint: an audit report that generates successfully is not the same thing as an account that was observed, and a script must be able to tell them apart without parsing prose. Exit 0 means "the source answered" — the class (LIVE / IMPORTED / SYNTHETIC) is reported separately, because a fixture or an export source can never set `realPlatformRequest`. |
+| D81 | **The research run applies the same two gates the audit probe applies**: a machine-found page that never names the handle is discarded, and a machine-found statement that names the source rather than the handle is not attributed to the account. The run also issues the handle's own four-query budget and reports a search transport failure instead of dropping it. | The probe and the run are two doors into the same ledger; a gate on one door only is a door that leaks. The run's hardcoded `"H" organization` / `"H" about contact` pair was the near-duplicate the shared query module was written to replace, and dropping `outcome.error` turned a broken index into a silent zero-candidate run. |
+| D82 | **No stored row was deleted.** The contaminated `sel_win_` rows are labelled `SYNTHETIC` on every surface that shows them; the target and the WEB claim are preserved. | The ledger is append-only, the rows are now honestly labelled, and an operator's database is not the agent's to prune. The remediation is documented and reversible rather than executed unasked (see §20.4). |
+| D83 | **The scheduler carries the same identity gate.** `runSchedulerTick` takes the provider as an optional dependency and skips a target the source does not observe, so the automatic path never queues a scan that cannot succeed. | D47's rule is "refuse at enqueue AND at execute", and the scheduler is the automatic enqueue path. A permanently-failing job per window per kind is noise that trains the operator to ignore failures. The dependency is optional and narrow — the scheduler still decides WHAT is due, never what is observable — and the worker's execute-time gate stays the backstop for a job that arrives by another route. |
+| D84 | **A fixture set whose manifest and profile name different accounts is REFUSED, not resolved.** And `igtrack targets add` tells the operator immediately when the configured source does not observe the account they are adding. | The two files name the same subject; a set that disagrees would serve one account's bytes under another's name — the same contamination, reached by configuration instead of by a username. Fail-closed is the only safe reading of a broken set. And a target the source cannot observe is still created (a target is not an observation, and the operator may be registering it before configuring the source) — but the operator is told now, on the same principle as D49: an unreachable account is a fact to learn at add time, not after a week of scans that can never produce data. |
+
+### 20.3 What was deliberately NOT added
+
+- **No "account binding" option on the fixture provider.** A constructor
+  argument that rebinds a fixture set to any account would have made the
+  contamination easy to re-introduce on purpose. Tests that need their own
+  subject copy the set and rebind it there
+  (`workers/monitoring/test/fixture-set.ts`).
+- **No deletion of the contaminated rows.** See D82 and §20.4.
+- **No new capability, no new provider route, no new table.** The gate is a
+  check, not a feature: it closes a path that should never have been open.
+- **No weakening of the refusals.** Nothing in §14 is touched: likers, other
+  accounts' rosters, highlights and hidden interactions stay platform-absent.
+
+### 20.4 Operator remediation for a record that was contaminated before this phase
+
+The rows this phase found in a live database are left in place (D82). They are
+labelled `SYNTHETIC` everywhere they surface, and no scan can add another one
+— the gate refuses the source that produced them. If an operator wants the
+wrong rows gone, here is the reviewed statement, with the cascade rules it
+relies on (`follow_snapshot_members`, `follow_deltas`, `post_comments`,
+`post_children`, `post_presence` and `post_changes` all cascade from their
+parent; `insight_points` and `evidence` do not).
+
+It removes the observation rows only. The target, the account, the operator's
+WEB claim and every other row stay exactly where they are.
+
+```sql
+BEGIN;
+-- Capture the evidence ids FIRST: the child rows below are the only thing
+-- that identifies them, and deleting them first would orphan the ledger.
+CREATE TEMP TABLE igtrack_doomed_evidence AS
+SELECT e.id FROM evidence e
+WHERE e.source_id = 'fixture:v1'
+  AND (
+       e.source_reference = 'sel_win_'
+    OR e.id IN (SELECT ip.evidence_id FROM insight_points ip
+                JOIN ig_accounts ia ON ia.id = ip.ig_account_id
+                WHERE ia.username = 'sel_win_')
+    OR e.id IN (SELECT p.evidence_id FROM posts p
+                JOIN targets t ON t.id = p.target_id
+                JOIN ig_accounts ia ON ia.id = t.ig_account_id
+                WHERE ia.username = 'sel_win_')
+    OR e.id IN (SELECT pc.evidence_id FROM post_comments pc
+                JOIN posts p ON p.id = pc.post_db_id
+                JOIN targets t ON t.id = p.target_id
+                JOIN ig_accounts ia ON ia.id = t.ig_account_id
+                WHERE ia.username = 'sel_win_')
+  );
+
+DELETE FROM follow_snapshots fs
+  USING targets t, ig_accounts ia
+ WHERE fs.target_id = t.id AND t.ig_account_id = ia.id
+   AND ia.username = 'sel_win_';      -- cascades: members, deltas
+
+DELETE FROM posts p
+  USING targets t, ig_accounts ia
+ WHERE p.target_id = t.id AND t.ig_account_id = ia.id
+   AND ia.username = 'sel_win_';      -- cascades: comments, children, presence, changes
+
+DELETE FROM insight_points ip
+  USING ig_accounts ia
+ WHERE ip.ig_account_id = ia.id AND ia.username = 'sel_win_';
+
+DELETE FROM evidence e USING igtrack_doomed_evidence d WHERE e.id = d.id;
+DROP TABLE igtrack_doomed_evidence;
+COMMIT;
+```
+
+Take a `pg_dump` first. The statement is written for one target; the account
+name is the only thing to change.
+
+### 20.5 Verification for Phase I
+
+| Item | Evidence |
+|---|---|
+| Typecheck | `pnpm typecheck` — clean across every workspace package |
+| Provider isolation | `packages/ingestion/test/fixture-identity-guard.test.ts` — every account-scoped capability refuses a foreign account with `ACCOUNT_NOT_FOUND`; the refusal text says it is not a statement about the account's existence; a set whose manifest and profile disagree is refused |
+| Write-path isolation | `workers/monitoring/test/worker-identity-gate.test.ts` — a refused scan writes no snapshot, no member, no delta and no evidence row; the refusal is permanent; the scheduler never queues such a scan |
+| Ranking isolation | `packages/database/test/activity-relationships.test.ts` — a synthetic mention is absent from the live ranking and present in the synthetic one |
+| Audit | `apps/cli/test/audit.test.ts` — exit 0 for an observed account, exit 4 for a report with no observation, exit 3 for a blocked configuration; the `observation` block names the class and whether a real platform request happened; a stored record of synthetic rows renders as `SYNTHETIC`, never as `OBSERVED` |
+| Public-web run | `apps/cli/test/research-run.test.ts` — the run path now discards a machine-found page that never names the handle and refuses to attribute a statement that names the source rather than the handle |
+
+---
+
+## 21. Phase J — the username-first investigation: one handle in, one dossier out
+
+**Date:** 2026-10-20 · **Status:** adopted
+
+### 21.1 The founder decision
+
+The core product is **not** an export importer, not a bag of disconnected
+commands, and not a manual research assistant. It is:
+
+> Input one Instagram username → automatically investigate all permitted and
+> technically accessible sources → extract and correlate information → produce
+> the deepest possible evidence-backed intelligence dossier.
+
+The operator should not have to collect profile details, supply separate
+search queries, or configure an investigation one step at a time.
+
+### 21.2 What the repository actually did before this phase
+
+Audited, not assumed:
+
+| | Before |
+|---|---|
+| A username took **five commands** | `targets add` → `scans run` → `work` → `research` / `dossier` → `audit`. The orchestration was the operator's job. |
+| The read surfaces were separate | `audit` (read-only, one probe + stored record + web phase), `research` (over stored rows), `dossier` (the stored record), `relationships`, `insights`, `activity`. A dossier existed, but the operator had to assemble it from four reports. |
+| The public-web phase was a separate opt-in | `research --run --question "…"` — the operator had to know it existed, phrase the question, and name the sources. |
+| The capability truth lived in a registry, not in a report | `igtrack capabilities` printed 25 rows. Nothing told an operator *for this account* what was obtainable, from which source, and what was missing. |
+| A target detail bundle existed but was unused | `getOwnedTargetDetail` already read back posts, comments, mentions, children, rosters, deltas and jobs. No surface rendered it. |
+
+### 21.3 Decision log (Phase J)
+
+| # | Decision | Rationale |
+|---|---|---|
+| D85 | **One command orchestrates every stage: `igtrack investigate <username>`** (MCP `igtrack_investigate`). Stages run in order — IDENTITY, PLATFORM, CONTENT, RELATIONSHIPS, WEB, CORRELATE, DOSSIER — and each is reported separately, with what it retrieved and why it stopped. | The founder's acceptance criterion, expressed as code. Orchestration is the product: the stages already existed, but the operator had to know them, order them, and read their results in three places. |
+| D86 | **The investigation reuses the existing operations rather than reimplementing them.** It calls `opTargetAdd`, `opScanRun`, the worker drain, `opRelationships`, `opResearchRun` / `opAuditWebProbe` and `opResearch` — so the dossier is literally the `igtrack research` report plus the investigation's own framing. | One operations layer, two surfaces, no drift: a bug fixed in the report is fixed for the investigation too, and the two can never disagree. |
+| D87 | **The evidence class follows the SOURCE, not the fact that a source answered.** A fixture set that observes an account produces `SYNTHETIC_FIXTURE` evidence; the six classes are counted separately in every report. | Phase I's lesson, applied to the new surface: the class is the single most load-bearing label in the product, and deriving it from "did we get data" would credit a demo run with a platform observation. |
+| D88 | **The platform id is the identity, and it is checked BEFORE anything is written.** A resolved id already bound to a different username stops the investigation with `IDENTITY_CONFLICT`; nothing is recorded. | Two accounts cannot share one platform id. A handle that merely looks similar is a different person, and merging them would merge two histories. The check is the same one the account repository already enforces on write — moved earlier, where it can still be explained. |
+| D89 | **A DISCOVERY target is created only when the documented Business Discovery route actually answered.** Otherwise the target is the account the deployment was asked to observe, and the platform stages report — with the source's own words — that the source does not observe it. The public-web stage still runs. | A third-party investigation must not be blocked by the absence of a platform credential: the open web is a lawful source for any handle, and the report says plainly which stages could not run. A target is not an observation, so creating one is not a false claim. |
+| D90 | **The public-web stage runs the read-only probe for a DISCOVERY target and the acquisition run for an owned one.** The probe's findings are reported and NOT filed; the refusal of an autonomous run against an account the operator has not owned is D47's, unchanged. | D47 is a refusal, and changing a refusal needs its own dated decision with evidence. The founder's ask — "continue with other useful sources" — is satisfied without lifting it: the findings are still in the dossier, with their citations, and the dossier says they were not filed. |
+| D91 | **Exit 4 means "the dossier was produced and NOTHING was retrieved."** Exit 0 means something was retrieved; 2 is usage; 3 is a blocked configuration. | A dossier full of gaps is a real answer, and a script must be able to tell it from a dossier with findings without parsing prose. |
+| D92 | **The scan cadence is respected by default; `--force` re-reads now.** A repeated investigation is therefore cheap and does not hammer the platform, while the observations themselves stay incremental (they dedupe by identity). | The founder's "repeat investigations, change detection, incremental collection" is a property of the storage, not of the queue. Re-reading on every invocation would have made a repeat investigation a rate-limit hazard. |
+| D93 | **`docs/SOURCE-MATRIX.md` is the operative per-category truth**: fields sought, source, permission, credentials, status, limits, freshness, the refusal behaviour, and the test that pins it. | The capability registry already knew this per capability, but it was not reachable as "what can I get for THIS account, and why not the rest". A matrix written against the code is the difference between a plan and a reference. |
+| D94 | **No new table.** The investigation run is composed from the target, the jobs, the observations, the claims and the research runs that already exist. | A run record would be a second place for the same facts, and it would drift. Everything the dossier says is already stored, with its own evidence. |
+| D95 | **The full research report shows the synthetic class too, labelled.** `connections` carries `syntheticRanks` beside `ranks`, and `leads` carries `syntheticItems` beside `items`. | Phase I split the ranking by evidence class, and the research report — which reads the LIVE ranking — went quiet: a fixture deployment showed "Connections: (none)" while its coverage table said four story mentions were observed. Under-reporting is its own dishonesty. The two classes stay apart and both are shown. |
+
+### 21.4 What was deliberately NOT added
+
+- **No crawling, no private endpoints, no session cookies, no anti-bot
+  evasion, no authenticated access to a private profile.** The founder's
+  "do not circumvent source restrictions simply to increase apparent coverage"
+  is a hard line, and the matrix's refusals are the same ones §14.1 records.
+- **No "import required" gate.** A third-party investigation never requires
+  the operator's own export; the export is one source among several, and the
+  dossier says which stages it could not run.
+- **No second implementation of the dossier.** The investigation composes the
+  existing report; it does not re-derive themes, ranks or coverage.
+- **No inference about a person.** Leads are reported as leads, separately
+  from the confirmed findings, and the dossier carries no inferred
+  relationships, proximity or private attributes.
+
+### 21.5 Verification for Phase J
+
+| Item | Evidence |
+|---|---|
+| Orchestration | `apps/cli/test/investigate.test.ts` — the stages run in order, each with a source and a reason; the account is resolved, recorded and observed in one command |
+| Evidence classes | the same file — a fixture set's rows are `SYNTHETIC_FIXTURE` and `PLATFORM_OBSERVATION` stays 0; the stored record agrees |
+| Relationship separation | the same file — the live ranking is empty and the synthetic ranking is not, for the same account |
+| Missing credentials / inaccessible accounts | the same file — every stage is BLOCKED with the source's own reason, the refusal says the account's existence is not denied, and "a scan can still run" is NOT used as the explanation |
+| Exit codes | the same file — 4 when nothing was retrieved, 0 when something was; usage is 2 |
+| Incremental re-runs | the same file — a second investigation adds no duplicate rows and reuses the same target |
+| CLI/MCP parity | the same file — the MCP tool returns the same stages in the same order, from the same operation |
+| MCP surface | `apps/cli/test/mcp.test.ts` — `igtrack_investigate` is in the published tool set |
+| Live public-web path | `scripts/bench-search.ts` — the real pipeline over the real index, with a positive control |

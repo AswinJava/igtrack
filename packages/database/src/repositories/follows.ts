@@ -164,11 +164,25 @@ export async function recordFollowSnapshot(
   });
 }
 
+/**
+ * The previous snapshot this scan diffs against.
+ *
+ * The filter is part of the lookup on purpose. A diff answers "what changed
+ * between two readings of the SAME roster source" — a synthetic fixture set
+ * and a live export are different populations, and diffing them would
+ * manufacture NEW_FOLLOWER / LOST_FOLLOWER deltas naming real accounts out
+ * of synthetic data. `sourceId` pins one source; `sourceKinds` selects a
+ * class of sources. With neither, the newest snapshot of any source is
+ * returned (read-only callers that want "the current roster").
+ */
 export async function latestFollowSnapshot(
   db: Database,
   targetId: string,
   direction: FollowDirection,
+  filter?: { sourceId?: string; sourceKinds?: readonly string[] },
 ): Promise<FollowSnapshotRecord | null> {
+  const sourceId = filter?.sourceId;
+  const sourceKinds = filter?.sourceKinds;
   const rows = await db
     .select()
     .from(followSnapshots)
@@ -176,6 +190,15 @@ export async function latestFollowSnapshot(
       and(
         sql`${followSnapshots.targetId} = ${targetId}`,
         sql`${followSnapshots.direction} = ${direction}`,
+        ...(sourceId !== undefined ? [sql`${followSnapshots.sourceId} = ${sourceId}`] : []),
+        ...(sourceKinds !== undefined && sourceKinds.length > 0
+          ? [
+              sql`${followSnapshots.sourceId} IN (SELECT id FROM sources WHERE kind IN (${sql.join(
+                sourceKinds.map((kind) => sql`${kind}`),
+                sql`, `,
+              )}))`,
+            ]
+          : []),
       ),
     )
     .orderBy(desc(followSnapshots.takenAt))
@@ -299,7 +322,18 @@ export interface DeltaWithAccount extends FollowDeltaRecord {
 export async function listRecentDeltas(
   db: Database,
   targetId: string,
-  options: { direction?: FollowDirection; limit?: number; since?: Date } = {},
+  options: {
+    direction?: FollowDirection;
+    limit?: number;
+    since?: Date;
+    /**
+     * Restrict to deltas derived into a snapshot whose source belongs to one
+     * of these classes. A delta inherits its class from the snapshot it was
+     * derived into, so this is how a synthetic roster is kept out of a live
+     * view of the same target.
+     */
+    sourceKinds?: readonly string[];
+  } = {},
 ): Promise<DeltaWithAccount[]> {
   const conditions = [eq(followDeltas.targetId, targetId)];
   if (options.direction !== undefined) {
@@ -307,6 +341,17 @@ export async function listRecentDeltas(
   }
   if (options.since !== undefined) {
     conditions.push(gte(followDeltas.firstSeenAt, options.since));
+  }
+  if (options.sourceKinds !== undefined && options.sourceKinds.length > 0) {
+    conditions.push(
+      sql`${followDeltas.toSnapshotId} IN (
+            SELECT id FROM follow_snapshots
+            WHERE source_id IN (SELECT id FROM sources WHERE kind IN (${sql.join(
+              options.sourceKinds.map((kind) => sql`${kind}`),
+              sql`, `,
+            )}))
+          )`,
+    );
   }
 
   return db

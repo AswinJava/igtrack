@@ -234,9 +234,44 @@ function evidenceFrom(
   };
 }
 
+/**
+ * The identity gate every scan passes before a single row is written.
+ *
+ * A provider observes a bounded set of accounts: a fixture set observes one,
+ * the operator's export observes one, the Graph path observes the authorized
+ * owned one. Scanning a target the configured source cannot see would file
+ * that source's bytes under a real account's record — synthetic rosters and
+ * insight sets presented as evidence about an account nobody observed.
+ *
+ * The check is a LOCAL predicate on the provider (no request is made), it
+ * applies to OWNED targets only (a DISCOVERY target is answered by the
+ * documented Business Discovery route, which has its own gate), and it fails
+ * the job permanently: retrying cannot change which accounts a source
+ * observes.
+ *
+ * The message is deliberately careful — "this source does not observe that
+ * account" is NOT "that account does not exist".
+ */
+async function assertProviderObserves(
+  src: ExecutionSource,
+  account: { username: string },
+): Promise<void> {
+  const observes = src.provider.observesAccount;
+  if (observes === undefined) return;
+  if (await observes.call(src.provider, account.username)) return;
+  throw new JobExecutionError(
+    `Provider "${src.provider.sourceId}" does not observe @${account.username}, so nothing was recorded for this target. ` +
+      "This is a provider/identity mismatch — it is NOT evidence that the account does not exist. " +
+      "Configure a source that covers it (IGTRACK_PROVIDER=graph with the owned account, " +
+      "or IGTRACK_PROVIDER=import with the matching export) or remove the target.",
+    { retryable: false },
+  );
+}
+
 async function loadAccountForTarget(
   db: Database,
   job: JobRecord,
+  src: ExecutionSource,
 ): Promise<{ account: NonNullable<Awaited<ReturnType<typeof getAccountById>>>; target: NonNullable<Awaited<ReturnType<typeof getTarget>>> }> {
   if (job.targetId === null) {
     throw new JobExecutionError(`job ${job.kind} requires a target`, { retryable: false });
@@ -248,6 +283,12 @@ async function loadAccountForTarget(
   const account = await getAccountById(db, target.igAccountId);
   if (account === null) {
     throw new JobExecutionError(`ig_account ${target.igAccountId} not found`, { retryable: false });
+  }
+  // A DISCOVERY target is answered by the documented Business Discovery edge
+  // and never by the owned-account capabilities, so the owned gate does not
+  // apply to it.
+  if (target.observationMode === "OWNED") {
+    await assertProviderObserves(src, account);
   }
   return { account: account as NonNullable<Awaited<ReturnType<typeof getAccountById>>>, target };
 }
@@ -282,7 +323,7 @@ export async function runProfileScan(
   job: JobRecord,
   src: ExecutionSource,
 ): Promise<JobResult> {
-  const { account, target } = await loadAccountForTarget(db, job);
+  const { account, target } = await loadAccountForTarget(db, job, src);
   const source = src.source;
 
   const caps = src.provider.capabilities();
@@ -388,7 +429,7 @@ export async function runDiscoveryScan(
   job: JobRecord,
   src: ExecutionSource,
 ): Promise<JobResult> {
-  const { account, target } = await loadAccountForTarget(db, job);
+  const { account, target } = await loadAccountForTarget(db, job, src);
   const source = src.source;
 
   // Execute-time mode guard (D47): the queue refuses an owned kind for a
@@ -642,7 +683,7 @@ export async function runFollowScan(
     throw new JobExecutionError(`${cfg.jobKind} requires a target`, { retryable: false });
   }
   const targetId = job.targetId;
-  const { account } = await loadAccountForTarget(db, job);
+  const { account } = await loadAccountForTarget(db, job, src);
   const target = await getTarget(db, targetId);
   if (target === null) {
     throw new JobExecutionError(`target ${targetId} not found`, { retryable: false });
@@ -844,7 +885,10 @@ export async function runFollowScan(
 
   // Derived follow deltas vs the PREVIOUS snapshot — must be read before the
   // new snapshot is inserted, otherwise "latest" is the snapshot we just wrote.
-  const previous = await latestFollowSnapshot(db, targetId, direction);
+  // Scoped to THIS source: a synthetic roster and a live roster are different
+  // populations, and diffing them would name real accounts as lost followers
+  // on the strength of synthetic data.
+  const previous = await latestFollowSnapshot(db, targetId, direction, { sourceId: source.id });
 
   // Observation identity is the logical scan time (stable across retries and
   // lease reclaims), not this execution's wall clock. captured_at stays real.
@@ -937,7 +981,7 @@ export async function runStoryScan(
   job: JobRecord,
   src: ExecutionSource,
 ): Promise<JobResult> {
-  const { account } = await loadAccountForTarget(db, job);
+  const { account } = await loadAccountForTarget(db, job, src);
   const source = src.source;
 
   const caps = src.provider.capabilities();
@@ -1085,7 +1129,7 @@ export async function runTagsScan(
   job: JobRecord,
   src: ExecutionSource,
 ): Promise<JobResult> {
-  const { account, target } = await loadAccountForTarget(db, job);
+  const { account, target } = await loadAccountForTarget(db, job, src);
   const source = src.source;
 
   // Execute-time mode guard (D47): the queue refuses an owned kind for a
@@ -1327,7 +1371,7 @@ export async function runPostScan(
     throw new JobExecutionError("POST_SCAN requires a target", { retryable: false });
   }
   const targetId = job.targetId;
-  const { account } = await loadAccountForTarget(db, job);
+  const { account } = await loadAccountForTarget(db, job, src);
   const target = await getTarget(db, targetId);
   if (target === null) {
     throw new JobExecutionError(`target ${targetId} not found`, { retryable: false });
@@ -1665,7 +1709,7 @@ export async function runInsightsScan(
   job: JobRecord,
   src: ExecutionSource,
 ): Promise<JobResult> {
-  const { account } = await loadAccountForTarget(db, job);
+  const { account } = await loadAccountForTarget(db, job, src);
   const source = src.source;
 
   const caps = src.provider.capabilities();

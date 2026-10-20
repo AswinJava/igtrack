@@ -23,6 +23,7 @@ const EXPECTED_TOOLS = [
   "igtrack_evidence",
   "igtrack_evidence_chain",
   "igtrack_insights",
+  "igtrack_investigate",
   "igtrack_lookup",
   "igtrack_mention_read",
   "igtrack_plan",

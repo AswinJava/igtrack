@@ -67,8 +67,14 @@ proof that the account does not exist. Fixture answers are synthetic; import
 answers are the operator's own export; graph answers are the documented Graph
 API routes only (Business Discovery only when IGTRACK_GRAPH_BUSINESS_DISCOVERY=1).
 
-Exit codes: 0 report produced, 2 usage/invalid reference, 3 configuration
-blocked (the report is still printed — read its "next steps").
+Exit codes: 0 report produced AND the configured source returned an observation
+of the account, 2 usage/invalid reference, 3 configuration blocked (the report
+is still printed — read its "next steps"), 4 report produced but NO observation
+was made (the source returned NOT_OBSERVED / UNSUPPORTED / NOT_AUTHORIZED / an
+error). Exit 0 means "the source answered" — the report's "Observation" block
+separately says whether a real platform request reached Instagram
+(observation.realPlatformRequest), and a fixture or export source can never set
+it.
 
 Examples:
   igtrack audit sel_win_
@@ -78,31 +84,53 @@ Examples:
 
 /**
  * Exit code from the report alone, so --json and the human screen cannot
- * disagree. A report whose configuration is blocked exits 3 (mirroring
- * \`doctor\`) even though the report itself was produced; a probe/provider
- * failure inside a usable configuration stays 0, because the audit DID run and
- * its answer — including "the probe failed with this retryable error" — is the
- * honest product. A broken search-provider configuration is the same class of
- * failure as a broken provider configuration: it names a variable that is
- * wrong, not an absence of data. Usage and invalid references never reach this
- * function: they throw with exit 2 before a report exists.
+ * disagree.
+ *
+ *   0 — the report was produced AND the configured source returned an
+ *       observation of the account. The report states the evidence class
+ *       (LIVE / IMPORTED / SYNTHETIC) separately: exit 0 means "the source
+ *       answered", never "Instagram was contacted" — that is `observation.
+ *       realPlatformRequest`, and only a live provider can set it.
+ *   2 — usage or an invalid reference (thrown before a report exists).
+ *   3 — the configuration is blocked. The report is still printed — read its
+ *       "next steps". Nothing was observed and nothing could be.
+ *   4 — the report was produced, but NO observation was made: the source
+ *       returned NOT_OBSERVED / UNSUPPORTED / NOT_AUTHORIZED / a provider
+ *       error, or no request was attempted.
+ *
+ * The distinction between 0 and 4 is the point of this command: a report that
+ * generates successfully is not the same thing as an account that was
+ * observed, and a script must be able to tell them apart without reading the
+ * report. A broken search-provider configuration is the same class of failure
+ * as a broken provider configuration: it names a variable that is wrong, not
+ * an absence of data.
  */
 export function auditExitCode(report: AuditReport): number {
   if (report.config.state === "CONFIGURATION_ERROR") return 3;
-  return report.errors.some(
-    (error) => error.step === "web" && error.code === "CONFIGURATION_ERROR",
-  )
-    ? 3
-    : 0;
+  if (
+    report.errors.some(
+      (error) => error.step === "web" && error.code === "CONFIGURATION_ERROR",
+    )
+  ) {
+    return 3;
+  }
+  return report.observation.observed ? 0 : 4;
 }
 
 function coverageTable(rows: AuditReport["record"]["coverage"]): string {
   if (rows === null) return "  (no stored rows: coverage is computed from evidence this deployment recorded)";
   return table(
-    ["capability", "state", "rows", "reason"],
+    ["capability", "state", "evidence", "rows", "reason"],
     rows.map((row) => [
       row.label,
       row.state,
+      // The class travels with the state: "OBSERVED" alone would let a
+      // fixture's rows read as a reading of the account.
+      row.evidenceClass === null
+        ? "-"
+        : row.evidenceClass === "SYNTHETIC"
+          ? "SYNTHETIC"
+          : row.evidenceClass,
       row.observedRows === null ? "no writer" : String(row.observedRows),
       row.reason === null ? "-" : row.reason.replace(/\s+/g, " ").slice(0, 90),
     ]),
@@ -114,6 +142,17 @@ export function renderAuditHuman(report: AuditReport): string {
   const sections: string[] = [
     `Audit      @${report.username}  (requested "${report.requested}" · ${report.referenceForm.toLowerCase()})`,
     `Generated  ${report.generatedAt}`,
+    "",
+    "Observation (a report was generated — that is NOT the same as an account being observed)",
+    table(
+      ["field", "value"],
+      [
+        ["account observed", report.observation.observed ? "YES" : "NO"],
+        ["real platform request", report.observation.realPlatformRequest ? "YES" : "NO"],
+        ["evidence class", report.observation.evidenceClass],
+        ["statement", report.observation.statement],
+      ],
+    ),
     "",
     "Summary (one row per evidence class — they are never blended)",
     `  ${report.summary.headline}`,
@@ -231,6 +270,16 @@ export function renderAuditHuman(report: AuditReport): string {
                 [
                   "route",
                   `${report.record.route.providerMethod} — ${report.record.route.scope} (sources: ${report.record.route.observingSources.join(", ")})`,
+                ],
+                [
+                  "stored evidence class",
+                  report.record.route.evidenceClass === "SYNTHETIC"
+                    ? "SYNTHETIC — the stored rows are generated data, not a reading of this account"
+                    : report.record.route.evidenceClass === "MIXED"
+                      ? "MIXED — some stored rows are generated data and some are not; no single figure describes this account"
+                      : report.record.route.evidenceClass === "LIVE"
+                        ? "LIVE — a real platform route or the operator's own export produced these rows"
+                        : "NONE — nothing is stored for this account",
                 ],
               ] as Array<[string, string]>)),
         ],

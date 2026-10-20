@@ -10,7 +10,11 @@ export const TEST_DATABASE_URL =
   "postgresql://igtrack:igtrack@127.0.0.1:5432/igtrack_test";
 
 export async function probeDatabase(url: string): Promise<boolean> {
-  const sql = postgres(url, { max: 1, connect_timeout: 3 });
+  // A 10-second connect timeout, not 3: under the load of a full suite on a
+  // containerised host a fresh connection can take longer than that, and a
+  // false negative here SILENTLY SKIPS an entire database-backed suite. A
+  // suite must skip only when the database is genuinely unreachable.
+  const sql = postgres(url, { max: 1, connect_timeout: 10 });
   try {
     await sql`SELECT 1`;
     return true;

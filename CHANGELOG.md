@@ -6,6 +6,113 @@ the *why* behind every honesty rule below.
 
 ## 0.1.0 — unreleased
 
+### The username-first investigation: one handle in, one dossier out (2026-10-20)
+
+The product is not an export importer, a bag of commands, or a manual
+research assistant. It is: **one username in, every permitted source
+investigated, one provenance-backed dossier out.** That is now a command.
+
+- **`igtrack investigate <username>`** (MCP: `igtrack_investigate`) runs every
+  stage the configured sources support and returns one dossier: the stages it
+  ran and what each retrieved, the evidence classes it produced, the content it
+  read with its provenance, the relationships it ranked, the public-web
+  statements it found with their citations, and every gap with the reason and
+  the configuration that would close it. The operator no longer adds a target,
+  queues scans, runs the worker, phrases a question and reads three reports
+  to find out what is known.
+- **The stages are reported separately**: IDENTITY, PLATFORM, CONTENT,
+  RELATIONSHIPS, WEB, CORRELATE, DOSSIER — each with its source, what it
+  retrieved, and why it stopped. A stage that could not run says so with the
+  source's own words.
+- **The evidence class follows the source.** A fixture set that observes an
+  account produces `SYNTHETIC_FIXTURE` evidence, not a platform observation.
+  The six classes — platform observation, public-web statement, the
+  operator's export, an operator's finding, a derivation, a fixture — are
+  counted separately and never merged.
+- **The platform id is the identity, and it is checked before anything is
+  written.** A resolved id already bound to a different username stops the
+  investigation with `IDENTITY_CONFLICT`; two similar names are never merged.
+- **A third-party investigation is never blocked by a missing platform
+  credential.** The platform stages report that the source does not observe
+  the account, and the public-web stage still runs.
+- **Exit 4 means "the dossier was produced and nothing was retrieved"** — a
+  different claim from "the report failed" (0) or "the configuration is
+  blocked" (3).
+- **Repeating an investigation is incremental**: the scan cadence is respected
+  by default, and the observations dedupe by identity.
+- **`docs/SOURCE-MATRIX.md`** is the operative per-category truth: fields
+  sought, source, permission, credentials, status, limits, freshness, the
+  refusal behaviour, and the test that pins it.
+- The dossier is composed from the existing operations, so it can never
+  disagree with `igtrack research`.
+- **`igtrack research` shows the synthetic class too, labelled.** Its
+  connections and leads sections carry the synthetic ranks beside the live
+  ones — a fixture deployment used to report "Connections: (none)" while its
+  own coverage table said four story mentions were observed, and
+  under-reporting is its own dishonesty.
+- **The database-backed suites no longer skip themselves under load.** The
+  reachability probe connected with a 3-second timeout, so a loaded host could
+  make a whole suite skip itself as "no database" — a silent coverage hole in
+  a green run. The probe now waits 10 seconds and skips only when the
+  database is genuinely unreachable.
+
+### The identity gate: synthetic data can no longer become a real account's evidence (2026-10-20)
+
+Found in a live database: with `IGTRACK_PROVIDER=fixture`, a scan of a real
+handle filed the fixture set's follower roster, posts, comments and insight
+points under that handle's target. The rows were labelled `synthetic: true`,
+but they were filed under a real account, and every downstream derivation —
+the roster, the follow/unfollow deltas, the relationship score, the
+"own-account insights" coverage row — was a statement about a person who had
+never been observed.
+
+- **A provider declares which account it observes.** `InstagramProvider` gains
+  an optional `observesAccount?` predicate (local, no request). The fixture,
+  Graph and import providers implement it: a fixture set observes the account
+  its manifest declares, the Graph path the authorized owned account, the
+  import provider the export's owner.
+- **The worker refuses a scan it cannot answer, and writes nothing.** The
+  refusal is permanent and says "this source does not observe that account",
+  never "that account does not exist". `igtrack scans run` refuses the same
+  scan at enqueue, so a doomed job is never queued — and the scheduler, the
+  automatic enqueue path, now carries the same gate.
+- **The fixture provider refuses at its own boundary too.** Every
+  account-scoped capability returns `ACCOUNT_NOT_FOUND` for a foreign
+  account, so no caller can be the thing that forgets to check — and a
+  hand-written set whose manifest and profile name *different* accounts is
+  refused outright rather than resolved in favour of either file.
+- **`igtrack targets add` says so when the configured source cannot observe
+  the account.** The target is still created (a target is not an
+  observation), but the operator learns it at add time instead of after a
+  week of scans that can never produce data.
+- **A follow diff only compares snapshots from the same source**, so a
+  synthetic roster can no longer be diffed against a live one.
+- **Relationship rankings are computed over one evidence class at a time.**
+  `igtrack relationships` now renders a live section and a synthetic section
+  separately: a synthetic interaction is evidence about a fixture, never about
+  a person, and it can never move a live score.
+- **A stored record carries its evidence class** (`SYNTHETIC` / `LIVE` /
+  `MIXED` / `NONE`) wherever its row counts are shown, and a record whose
+  rows are all synthetic is rendered as `SYNTHETIC`, never as `OBSERVED`.
+- **`igtrack audit` now distinguishes a report from an observation.** Exit 0
+  means the configured source returned an observation; the new exit 4 means the
+  report was produced and no observation was made. The report's `observation`
+  block says in one place whether a real platform request reached Instagram
+  and what class the evidence is.
+- **The research run applies the same two gates the audit probe applies** (a
+  machine-found page that never names the handle is discarded; a statement
+  that names the source rather than the handle is not attributed to the
+  account), asks the handle's own four-query budget, and reports a search
+  transport failure instead of dropping it.
+- **The synthetic seed no longer enqueues a provider scan.** It writes its own
+  observations; the demo flow is now "add a target the configured source can
+  observe, then scan".
+- **No stored row was deleted.** The contaminated rows are labelled
+  `SYNTHETIC` on every surface that shows them; the target and the WEB claim
+  filed against it are preserved.
+
+Full rationale and evidence: [docs/FOUNDING.md](docs/FOUNDING.md) §20 (D76–D82).
+
 ### Cursor loops and identity collisions (2026-10-19)
 
 - **A repeated follower/following cursor now ends the scan as PARTIAL.** The

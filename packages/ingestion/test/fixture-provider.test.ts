@@ -373,4 +373,51 @@ describe("FixtureProvider provenance honesty", () => {
     expect(result.nextCursor).toBeUndefined();
     expect(result.data).toHaveLength(1);
   });
+
+  it("refuses a private account's profile instead of returning an empty one", async () => {
+    // A private account is a fact about ACCESS, not about data: the provider
+    // must say the profile is not available rather than return an empty
+    // profile, which would read as "this account has no fields".
+    const dir = mkdtempSync(join(tmpdir(), "igtrack-fixture-private-"));
+    writeFileSync(
+      join(dir, "manifest.json"),
+      JSON.stringify({
+        version: "v1",
+        target_username: "private.person",
+        captured_at: "2026-08-27T12:00:00.000Z",
+        files: {
+          profile: "profile.json",
+          stories: "stories.json",
+          followers: [],
+          following: [],
+          posts: [],
+          comments: {},
+        },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "profile.json"),
+      JSON.stringify({
+        schema_version: "v1",
+        captured_at: "2026-08-27T12:00:00.000Z",
+        profile: { id: "9000000009", username: "private.person", is_private: true },
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "stories.json"),
+      JSON.stringify({ schema_version: "v1", captured_at: "2026-08-27T12:00:00.000Z", stories: [] }),
+      "utf8",
+    );
+
+    const p = new FixtureProvider({ fixturesDir: dir, clock: () => FIXED_NOW });
+    const result = await p.getProfile({ username: "private.person" });
+    expect(result.status).toBe(CapabilityStatus.ERROR);
+    expect(result.error?.kind).toBe(CapabilityErrorKind.ACCOUNT_PRIVATE);
+    expect(result.error?.retryable).toBe(false);
+    // No data field at all: an empty profile would be indistinguishable from
+    // "this account has no fields".
+    expect(result.data).toBeUndefined();
+  });
 });

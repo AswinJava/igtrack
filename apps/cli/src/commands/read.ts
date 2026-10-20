@@ -103,8 +103,10 @@ export async function runRelationships(args: ParsedArgs): Promise<number> {
 
     const human = [
       `Target   @${result.target.username} (${result.target.status})`,
+      "",
+      "Live relationships (observed platform routes and the operator's own export)",
       result.ranks.length === 0
-        ? "No relationships observed yet. Relationship ranks come from COMPLETE follower/following snapshots, story mentions, and comment authorship on owned media."
+        ? "No LIVE relationship observed. This is not a claim that nobody interacted with the account — it means no live observation is on record. See the synthetic section below and the method note."
         : table(
             ["account", "score", "mentions", "comments", "deltas", "mutual", "first seen", "last seen", "last signal", "basis"],
             result.ranks.map((r) => [
@@ -121,13 +123,33 @@ export async function runRelationships(args: ParsedArgs): Promise<number> {
             ]),
           ),
       result.truncated
-        ? `Note: more ranks exist than the ${result.ranks.length} shown; raise --limit to see them.`
+        ? `Note: more live ranks exist than the ${result.ranks.length} shown; raise --limit to see them.`
         : "",
+      "",
+      "Synthetic relationships (fixture data — evidence about a fixture, NEVER about a person)",
+      result.syntheticRanks.length === 0
+        ? "None recorded."
+        : table(
+            ["account", "score", "mentions", "comments", "deltas", "mutual", "first seen", "last seen", "last signal", "basis"],
+            result.syntheticRanks.map((r) => [
+              `@${r.username}`,
+              String(r.score),
+              `${r.signals.mentions}${r.signalsWithinWindow.mentions > 0 ? ` (${r.signalsWithinWindow.mentions} in ${result.method.recencyWindowDays}d)` : ""}`,
+              `${r.signals.comments}${r.signalsWithinWindow.comments > 0 ? ` (${r.signalsWithinWindow.comments} in ${result.method.recencyWindowDays}d)` : ""}`,
+              `${r.signals.deltas}${r.signalsWithinWindow.deltas > 0 ? ` (${r.signalsWithinWindow.deltas} in ${result.method.recencyWindowDays}d)` : ""}`,
+              r.mutual ? "yes" : "no",
+              r.firstSeenAt === null ? "unavailable" : r.firstSeenAt,
+              r.lastSeenAt === null ? "not currently observed" : r.lastSeenAt,
+              r.lastSignalAt === null ? "no signal event" : r.lastSignalAt,
+              r.firstSeenBasis ?? "none",
+            ]),
+          ),
       "",
       `Method: ${result.method.scoreFormula}`,
       ...result.method.signals.map((s) => `  ${s.kind} × ${s.weight} — ${s.means}`),
       `  ${result.method.recencyNote}`,
       `  ${result.method.evidenceNote}`,
+      `  ${result.method.sourceNote}`,
     ]
       .filter((line) => line !== "")
       .join("\n");

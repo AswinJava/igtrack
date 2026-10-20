@@ -14,6 +14,7 @@ import {
   opDossier,
   opEvidence,
   opInsights,
+  opInvestigate,
   opLookup,
   opMentionedCommentProbe,
   opPlan,
@@ -49,6 +50,7 @@ import {
 const INSTRUCTIONS = `IGTrack is an evidence-first observation engine for Instagram accounts you are authorized to observe.
 
 How to use these tools:
+0. \`igtrack_investigate\` is the PRIMARY tool: give it a username and it runs every investigation stage the configured sources support and returns one dossier — the stages it ran, what each retrieved, the evidence classes it produced, the content and relationships it read, the public-web statements it found with their citations, and every gap with the reason and what would close it. Start there unless the operator named a specific operation.
 1. Call \`igtrack_status\` first. It names the active provider and whether data is synthetic.
 2. \`igtrack_scans_run\` only QUEUES work. \`igtrack_work\` executes it. Nothing is observed until a worker runs.
 3. Read with \`igtrack_activity\`, \`igtrack_relationships\`, \`igtrack_insights\`, \`igtrack_tags\`, \`igtrack_evidence\`. Every row carries its source id, confidence, and evidence id — quote them when you report a claim.
@@ -688,6 +690,72 @@ export function buildServer(): McpServer {
               ...(args.urls !== undefined ? { urls: args.urls } : {}),
               ...(args.maxSources !== undefined ? { maxSources: args.maxSources } : {}),
               ...(args.refresh === true ? { refresh: true } : {}),
+            }),
+          ),
+        ),
+      ),
+  );
+
+  server.registerTool(
+    "igtrack_investigate",
+    {
+      title: "Investigate one username and return the dossier",
+      description:
+        "ONE username in, one provenance-backed dossier out. Resolves the account through the permitted sources, then runs every investigation stage the configured sources support — platform observation, content, relationships, public web, correlation — and returns what was investigated, what was actually retrieved, what was derived from it, what remains unknown, why it could not be retrieved, and which configuration would close each gap. The evidence classes are never merged: a platform observation, a public-web statement, the operator's export, an operator's finding, a derivation and a fixture are six different things, and each is counted separately. The account is identified by its PLATFORM ID, not by its spelling, so two similar names are never merged. Writes: the target, its observations, and any public-web findings — re-running is incremental, because observations dedupe by identity. This is the same pipeline the `igtrack investigate` command runs.",
+      annotations: { readOnlyHint: false },
+      inputSchema: {
+        username: z
+          .string()
+          .min(1)
+          .describe("Instagram username, @handle, or instagram.com profile URL"),
+        question: z
+          .string()
+          .optional()
+          .describe("What you are trying to find out. Derived from the handle when omitted."),
+        urls: z
+          .array(z.string())
+          .max(10)
+          .optional()
+          .describe("Public http(s) pages to read in the web stage (highest trust tier)."),
+        maxSources: z
+          .number()
+          .int()
+          .min(1)
+          .max(10)
+          .optional()
+          .describe("Cap on documents the web stage fetches (enforced ceiling: 10)."),
+        web: z
+          .boolean()
+          .optional()
+          .describe("Set false to skip the public-web stage entirely (no search request is made)."),
+        refresh: z.boolean().optional().describe("Ignore the 24h freshness window and re-fetch."),
+        force: z
+          .boolean()
+          .optional()
+          .describe("Re-read the platform now, ignoring the per-target scan cadence."),
+        maxJobs: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Cap on jobs the platform stage executes (default 25)."),
+      },
+    },
+    async (args) =>
+      guarded(async () =>
+        withContext(async (ctx) =>
+          withMeta(
+            ctx,
+            await opInvestigate(ctx, {
+              username: args.username,
+              ...(args.question !== undefined ? { question: args.question } : {}),
+              ...(args.urls !== undefined ? { urls: args.urls } : {}),
+              ...(args.maxSources !== undefined ? { maxSources: args.maxSources } : {}),
+              ...(args.web !== undefined ? { web: args.web } : {}),
+              ...(args.refresh !== undefined ? { refresh: args.refresh } : {}),
+              ...(args.force !== undefined ? { force: args.force } : {}),
+              ...(args.maxJobs !== undefined ? { maxJobs: args.maxJobs } : {}),
             }),
           ),
         ),

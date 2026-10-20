@@ -39,6 +39,21 @@ could.
 
 ## What it does
 
+- **Investigates one username, end to end** — `igtrack investigate <username>`
+  (MCP: `igtrack_investigate`) is the primary workflow: you give it a handle
+  and it runs every stage the configured sources support — resolve the account,
+  observe the platform fields, read back the accessible content, rank the
+  relationships, search and retrieve public references, correlate the classes
+  — then hands you **one dossier** saying what was investigated, what was
+  actually retrieved, what was derived from it, what remains unknown, why each
+  thing could not be retrieved, and which configuration would close each gap.
+  You do not add a target, queue scans, run the worker and read three reports
+  to find out what is known. The account is identified by its **platform id**,
+  not by its spelling, so two similar names are never merged, and the
+  evidence classes — platform observation, public-web statement, the
+  operator's own export, an operator's finding, a derivation, a fixture — are
+  counted separately and never merged. The full per-source truth is in
+  [docs/SOURCE-MATRIX.md](docs/SOURCE-MATRIX.md).
 - **Observes** — profile, active stories, story mentions, following/follower counts, public posts, comments, carousels, **tagged media** (media by other accounts that tag the owned account, through the documented tags edge — stored first-observed-wins; removal is never claimed), and **own-account insights** (follower-count series, daily reach/views/engagement, country demographics). Each observation is stored with source id, observation id, observed vs. captured time, confidence, and SHA-256 hashes in an append-only evidence ledger. When explicitly enabled, `igtrack lookup <username>` also **probes** another public professional account's public profile and recent media through the documented Business Discovery edge — read-through, persisted nowhere. Recording such an account is a second, explicit act: `igtrack targets add <username> --observed` probes the route once, refuses with the platform's reason if it cannot answer, and only then tracks it; `igtrack dossier <username>` reads the recorded profile, its bounded media preview (the ceiling is stated, never shown as "the account's posts"), the per-capability coverage, and the refusals, each with its reason. `igtrack mention <commentId>` reads one comment that mentions the owned account, on demand, from an id delivered by a Meta webhook — read-through, persisted nowhere.
 - **Derives** — follow deltas, profile changes, **post caption edits and disappearances** (posts no longer observed in a complete media listing — never called "deleted"), story lifetimes, mention roll-ups, relationship rankings (story mentions, comment authorship on owned media, follow deltas) and **insight series**. Every derived row points at the observations it came from. Truncated (PARTIAL) scans are recorded but **never diffed**, so partiality cannot fabricate a "lost follower" or a vanished post, and a metric the platform did not return is stored as an **absence with a reason**, never a zero.
 - **Records what sources say** — a **claims ledger** for findings your own agent researches on the open web: a closed predicate registry, source URL + short excerpt + SHA-256 hash, stated/retrieved/recorded times kept as distinct facts, and hard write-time refusals for sensitive person-level predicates. Derived labels (`CORROBORATED` = ≥2 distinct source domains, `CONFLICTED` = both sides shown, no winner) are computed from stored rows, never stored; duplicates are refused — re-submitting the same finding is not corroboration; retraction keeps the row readable with its reason. `igtrack research <target>` renders one deterministic report — platform observations and external claims in separate, labelled sections, stale claims flagged for review but never hidden, and every empty section states why. IGTrack never *generates* or infers claims (FOUNDING D67/D68) — and when the engine fetches them itself under `--run`, it does so through the bounded, SSRF-gated, predicate-checked acquisition layer described below (D69).
@@ -56,12 +71,19 @@ cp .env.example .env                     # local Postgres defaults already work
 docker compose up -d                     # Postgres 16 on localhost:5432
 
 pnpm igtrack setup                       # migrate + load the synthetic demo
+pnpm igtrack investigate aurora.wilde    # ONE command: every supported stage, one dossier
 pnpm igtrack status                      # provider, targets, queue, source health
-pnpm igtrack scans run                   # queue scans
-pnpm igtrack work --max 10               # run the worker: this is what observes
 pnpm igtrack activity                    # what was observed, with evidence ids
-pnpm igtrack insights target_a           # own-account insights: the recorded series, absences named
+pnpm igtrack insights aurora.wilde       # own-account insights: the recorded series, absences named
 ```
+
+`igtrack investigate` is the whole workflow: it resolves the account, runs the
+scans the configured source can answer, runs the public-web stage, and prints
+the dossier — the stages it ran, the evidence classes it produced, the
+content it read, the relationships it ranked, the web statements it found
+with their citations, and every gap with the reason and the configuration that
+would close it. The lower-level commands (`targets add`, `scans run`, `work`,
+`research`, `dossier`) still exist for when you want exactly one of them.
 
 No database configured yet? `pnpm igtrack setup --local` uses the Docker Compose
 database and records the URL in `.env` for you.
@@ -70,6 +92,26 @@ Everything in the default path is **synthetic fixture data**, labelled as such o
 every payload (`_meta.synthetic: true`) and on every screen. It is deterministic,
 offline, and legal to run forever. It exists so you can see the whole system
 working — including its honesty surfaces — before pointing it at a real account.
+
+A fixture set observes **exactly one account** — the one its manifest declares
+(`aurora.wilde` in the packaged set). That is not a limitation of the demo, it
+is the rule that keeps synthetic data from becoming evidence about a real
+account: a scan of any other target is **refused** with the reason, both when
+it is queued and when it runs. `igtrack setup` therefore seeds a demo record
+for its own fictional account (`target_a`) and never queues a scan of it; add a
+target the configured source can observe, as above, and the worker will observe
+that one.
+
+The import provider is the other lawful local source: it reads the operator's
+**own** Instagram data export. It is environment-driven — there is no
+`igtrack import` command — so set these in `.env` and then use the ordinary
+`targets add` / `scans run` / `work` flow:
+
+```bash
+IGTRACK_PROVIDER=import
+IGTRACK_IMPORT_DIR=/path/to/your/instagram-export      # its root, connections/, or followers_and_following/
+IGTRACK_IMPORT_USERNAME=your_own_handle                # the export's owner — the only account it observes
+```
 
 ## Use it with your AI agent
 
@@ -164,8 +206,28 @@ candidate sources. Runs are refused for DISCOVERY targets (D47). Via MCP:
 ## Investigate an arbitrary username — the central use case
 
 You have a handle and nothing else: no credentials, no cooperation, no
-registration. `igtrack audit` answers what is known about that one account,
-from where, and what can never be known — in five sections, all read-only:
+registration.
+
+**`igtrack investigate` is the primary workflow.** One command runs every
+stage the configured sources support and returns one dossier:
+
+```bash
+pnpm igtrack investigate serpaix.ai                    # every supported stage, one dossier
+pnpm igtrack investigate serpaix.ai --url https://example.org/about
+pnpm igtrack investigate serpaix.ai --no-web           # platform stages only, no search request
+pnpm igtrack investigate serpaix.ai --json             # the same dossier, machine-readable
+```
+
+It resolves the account through the permitted sources, runs the scans the
+source can answer, reads the accessible content back with its provenance,
+ranks the relationships **by evidence class** (live and synthetic never
+blended), searches and retrieves public references with every fact's URL and
+retrieval time, correlates the classes, and states every gap with the reason
+and the configuration that would close it. The account is identified by its
+**platform id**, so two similar names are never merged.
+
+`igtrack audit` is the same subject read **without recording anything** — the
+read-only look, in five sections:
 
 ```bash
 pnpm igtrack audit sel_win_                                   # config + probe + stored record + public web + refusals
@@ -209,6 +271,28 @@ than its cadence is prefixed `STALE —`. Staleness is a flag, never a verdict �
 nothing is expired, retracted or dropped. The clause-by-clause map of this
 requirement to code, source, auth and verification lives in
 [docs/verification/REQUIREMENT-AUDIT.md](docs/verification/REQUIREMENT-AUDIT.md).
+
+### A report is not an observation
+
+The audit answers two different questions, and it never merges them:
+
+- **was a report produced?** always yes (unless the configuration is blocked);
+- **was the account observed?** that is the `observation` block, and it is the
+  only thing that decides the exit code.
+
+| Exit | Meaning |
+|---|---|
+| 0 | the report was produced **and** the configured source returned an observation of the account |
+| 2 | usage error or an invalid account reference (nothing was observed) |
+| 3 | the configuration is blocked — the report is still printed; read its "next steps" |
+| 4 | the report was produced and **no observation was made** |
+
+Exit 0 means "the source answered", not "Instagram was contacted": the
+`observation` block separately reports `realPlatformRequest` (only a live
+provider can set it) and the evidence class (`LIVE` / `IMPORTED` /
+`SYNTHETIC` / `NONE`). A fixture-backed or export-backed report is never
+presented as a live observation, and a stored record whose rows are all
+synthetic is rendered as `SYNTHETIC`, never as `OBSERVED`.
 
 ## Capability honesty, in one screen
 

@@ -28,12 +28,25 @@ export interface SchedulerTickOptions {
   intervals?: ScanIntervalConfig;
   // Bounded batch per tick (S10): a large fleet is scheduled across ticks.
   batchLimit?: number;
+  /**
+   * The source the queue is for, used only for the IDENTITY gate: a target
+   * the source does not observe is never enqueued, because a scan it cannot
+   * answer would sit in the queue only to fail (D47's rule, applied to the
+   * automatic path).
+   *
+   * Optional, and deliberately narrow: the scheduler decides WHAT is due, not
+   * what is observable. Without a provider it keeps its orchestration-only
+   * behaviour and the worker's execute-time gate is the backstop.
+   */
+  provider?: { observesAccount?: (username: string) => Promise<boolean> };
 }
 
 export interface SchedulerTickResult {
   targetsConsidered: number;
   enqueued: number;
   deduplicated: number;
+  /** Targets skipped because the configured source does not observe them. */
+  skippedUnobservable: number;
   perKind: Record<SchedulableScanKind, { enqueued: number; deduplicated: number }>;
 }
 
@@ -68,6 +81,7 @@ export async function runSchedulerTick(
     targetsConsidered: 0,
     enqueued: 0,
     deduplicated: 0,
+    skippedUnobservable: 0,
     perKind: Object.fromEntries(
       SCHEDULABLE_KINDS.map((kind) => [kind, { enqueued: 0, deduplicated: 0 }]),
     ) as SchedulerTickResult["perKind"],
@@ -88,6 +102,21 @@ export async function runSchedulerTick(
     result.targetsConsidered = prefs.length;
 
     for (const target of prefs) {
+      // Identity gate (D47's rule on the automatic path): a target the
+      // configured source does not observe is never enqueued. Its scans
+      // would sit in the queue only to fail — and the worker's execute-time
+      // gate is the backstop for a job that arrives by another route.
+      //
+      // A DISCOVERY target is exempt: it is answered by the documented
+      // Business Discovery route, which observes OTHER accounts by name.
+      if (
+        options.provider?.observesAccount !== undefined &&
+        target.observationMode === "OWNED" &&
+        !(await options.provider.observesAccount(target.username))
+      ) {
+        result.skippedUnobservable += 1;
+        continue;
+      }
       // Per-target cadence: the window is computed against this target's
       // effective interval, so a 2x target lands in half as many windows
       // while a 0.5x target lands in twice as many. Kinds outside the

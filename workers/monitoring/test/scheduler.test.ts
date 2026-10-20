@@ -246,5 +246,9 @@ describe.runIf(dbAvailable)("scheduler fleet coverage", () => {
       rows.map((r) => r.key?.split(":")[2] ?? ""),
     );
     expect(coveredTargets.size).toBe(250);
-  });
+    // 250 targets × 2 ticks is 500 enqueues against a real database: the
+    // 30 s default is tight on a slow or containerised host, and a timeout
+    // here says nothing about the scheduler. The assertion above is
+    // unchanged.
+  }, 180_000);
 });

@@ -72,7 +72,7 @@ const GRAPH_PLACEHOLDER_VALUES = [
 ];
 
 async function probe(url: string): Promise<boolean> {
-  const sql = postgres(url, { max: 1, connect_timeout: 3 });
+  const sql = postgres(url, { max: 1, connect_timeout: 10 });
   try {
     await sql`SELECT 1`;
     return true;
@@ -208,10 +208,16 @@ describe.skipIf(!databaseUp)("audit command", () => {
     expect(report.probe.businessDiscovery).toBeNull(); // a graph-only switch
     expect(report.probe.why).toContain("persists nothing");
 
-    // Phase 3 — the stored read-back, with rows behind every observed state.
+    // Phase 3 - the stored read-back, with rows behind every observed state.
     expect(report.record.tracked).toBe(true);
-    expect(report.record.state).toBe("OBSERVED");
-    expect(report.record.reason).toBeNull();
+    // The record is SYNTHETIC, not OBSERVED: the rows exist, but every one of
+    // them is generated data, so the record is a data set's footprint and not
+    // a reading of the account. "There are rows" and "the account was
+    // observed" are different facts.
+    expect(report.record.state).toBe("SYNTHETIC");
+    expect(report.record.route?.evidenceClass).toBe("SYNTHETIC");
+    expect(report.record.reason).toContain("SYNTHETIC");
+    expect(report.record.reason).toContain("not a reading of this account");
     expect(report.record.target?.observationMode).toBe("OWNED");
     expect(report.record.identity?.username).toBe(OWNED_USERNAME);
     expect(report.record.route?.observingSources.every((s) => s.startsWith("fixture:"))).toBe(true);
@@ -335,7 +341,14 @@ describe.skipIf(!databaseUp)("audit command", () => {
 
     // Next steps point at the registry's lawful sources, not at nothing.
     expect(report.nextSteps[0]?.action).toBe("igtrack capabilities");
-    expect(auditExitCode(report)).toBe(0);
+    // Exit 4, not 0: the report was produced, but NO observation was made.
+    // A report that generates successfully is not the same thing as an
+    // account that was observed, and a script must be able to tell them
+    // apart without reading the report.
+    expect(report.observation.observed).toBe(false);
+    expect(report.observation.evidenceClass).toBe("NONE");
+    expect(report.observation.statement).toContain("NO OBSERVATION");
+    expect(auditExitCode(report)).toBe(4);
   }, 30_000);
 
   it("separates 'tracked' from 'observed' for a target that has never been scanned", async () => {
@@ -365,7 +378,10 @@ describe.skipIf(!databaseUp)("audit command", () => {
         true,
       );
       expect(report.nextSteps.length).toBeGreaterThan(0);
-      expect(auditExitCode(report)).toBe(0);
+      // A tracked account that was never observed is still "not observed":
+      // exit 4 says so, so a script cannot read a registration as evidence.
+      expect(report.observation.observed).toBe(false);
+      expect(auditExitCode(report)).toBe(4);
     } finally {
       // Leave the suite's target list as the other tests found it.
       await opTargetRemove(ctx, neverScanned);
@@ -509,7 +525,7 @@ describe.skipIf(!databaseUp)("audit command", () => {
     );
   }, 30_000);
 
-  it("sends a non-retryable source failure to doctor while the report itself stays exit 0", async () => {
+  it("sends a non-retryable source failure to doctor, and the exit code says nothing was observed", async () => {
     await withEnv(
       { IGTRACK_FIXTURES_DIR: `${IMPORT_SAMPLE_DIR}/does-not-exist` },
       async () => {
@@ -529,7 +545,12 @@ describe.skipIf(!databaseUp)("audit command", () => {
           );
           // A non-retryable failure has a real remedy and no dead end.
           expect(report.nextSteps[0]?.action).toBe("igtrack doctor");
-          expect(auditExitCode(report)).toBe(0);
+          // The report is still produced, but the source answered with a
+          // failure, not with an observation: exit 4 says "no observation",
+          // which is the truth a script needs. (Exit 0 would have claimed
+          // the account was observed.)
+          expect(report.observation.observed).toBe(false);
+          expect(auditExitCode(report)).toBe(4);
         } finally {
           await brokenCtx.close();
         }
@@ -572,7 +593,11 @@ describe.skipIf(!databaseUp)("audit command", () => {
     expect(AUDIT_HELP).toContain("--json");
     expect(AUDIT_HELP).toContain("--url URL[,URL…]");
     expect(AUDIT_HELP).toContain("queues no scan, writes no row");
-    expect(AUDIT_HELP).toContain("Exit codes: 0 report produced, 2 usage/invalid reference, 3");
+    // The exit-code contract is documented, including the distinction the
+    // command exists to make: a report that generated is not an account that
+    // was observed.
+    expect(AUDIT_HELP).toContain("Exit codes: 0 report produced AND the configured source returned an observation");
+    expect(AUDIT_HELP).toContain("4 report produced but NO observation");
     expect(AUDIT_HELP).toContain("igtrack audit sel_win_");
     expect(AUDIT_HELP).toContain("NEVER");
   });
@@ -719,7 +744,12 @@ describe.skipIf(!databaseUp)("audit command", () => {
         true,
       );
       expect(report.nextSteps.some((s) => s.action.includes("claims add"))).toBe(true);
-      expect(auditExitCode(report)).toBe(0);
+      // The web phase produced statements, but the PLATFORM produced nothing
+      // for this handle: exit 4 reports that the account was not observed,
+      // so a public statement is never mistaken for a platform observation.
+      expect(report.observation.observed).toBe(false);
+      expect(report.observation.evidenceClass).toBe("NONE");
+      expect(auditExitCode(report)).toBe(4);
     }, 30_000);
 
     it("derives corroboration across independent sources and contradiction without picking a winner", async () => {
@@ -1275,6 +1305,6 @@ describe.skipIf(!databaseUp)("audit command", () => {
     expect(stale).toBeDefined();
     expect(stale?.because).toContain("cadence");
     // The stale row is still a row: staleness labels evidence, it never drops it.
-    expect(report.record.state).toBe("OBSERVED");
+    expect(report.record.state).toBe("SYNTHETIC");
   }, 30_000);
 });

@@ -81,6 +81,9 @@ export async function runTargets(args: ParsedArgs): Promise<number> {
           ? ""
           : `Probe    ${result.probe.status} · observed ${display(result.probe.observedAt)} · ${display(result.probe.note)}`,
         result.note,
+        result.unobservable === undefined
+          ? ""
+          : `WARNING  ${result.unobservable}`,
       ]
         .filter((line) => line !== "")
         .join("\n");

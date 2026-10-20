@@ -15,7 +15,6 @@ import {
   recordCapabilitySuccess,
   markCapabilityUnavailable,
 } from "../repositories/source-health.js";
-import { enqueueJob } from "../jobs/queue.js";
 import { users } from "../schema/index.js";
 import { sql } from "drizzle-orm";
 
@@ -376,12 +375,14 @@ export async function seed(db: Database): Promise<void> {
     });
   }
 
-  await enqueueJob(db, {
-    kind: "PROFILE_SCAN",
-    targetId: target.id,
-    idempotencyKey: "seed:profile-scan:day-2",
-    payload: { synthetic: true },
-  });
+  // The seed writes its OWN observations, with their own evidence and the
+  // synthetic source id. It deliberately enqueues NO provider scan: a scan is
+  // executed by whatever provider the deployment has configured, and that
+  // provider observes a bounded set of accounts — `target_a` is not one of
+  // them. Queueing it would produce a job that can only fail, and (before the
+  // worker's identity gate) a job that filed the fixture set's synthetic
+  // roster under this account. The demo flow is: add a target the configured
+  // source can observe, then `igtrack scans run` and `igtrack work`.
 
   const latest = await latestFollowSnapshot(db, target.id, "FOLLOWING");
   if (latest === null) {

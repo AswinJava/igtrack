@@ -29,6 +29,7 @@ import {
 
 export type { ExecutionSource, JobResult, FollowerScanOptions } from "./provider.js";
 export { createExecutionSource, providerFromEnv, defaultFixturesDir } from "./provider.js";
+export { sourceKindFor } from "./executors.js";
 import {
   runSchedulerTick,
   schedulerEnabled,
@@ -334,12 +335,13 @@ export async function runWorkerLoop(opts: {
       // retried at the next tick interval, never on every poll iteration.
       lastSchedulerTick = Date.now();
       try {
-        const tick = await runSchedulerTick(db);
+        const tick = await runSchedulerTick(db, { provider: src.provider });
         if (tick.enqueued > 0) {
           logWorker("info", "scheduler_tick", {
             enqueued: tick.enqueued,
             deduplicated: tick.deduplicated,
             targets: tick.targetsConsidered,
+            skippedUnobservable: tick.skippedUnobservable,
           });
         }
       } catch (err) {

@@ -339,6 +339,15 @@ export class GraphProvider implements InstagramProvider {
     throw await graphHttpFailure(res);
   }
 
+  /**
+   * The Graph path observes exactly one account: the authorized owned one.
+   * Local, no request — the worker uses it to refuse a scan before it writes
+   * anything under a target the authorized account does not cover.
+   */
+  async observesAccount(username: string): Promise<boolean> {
+    return username.trim().replace(/^@+/, "").toLowerCase() === this.ownedUsername;
+  }
+
   async resolveAccount(username: string): Promise<CapabilityResult<NormalizedAccountRef>> {
     const meta = this.meta();
     // The Graph path observes the authorized owned account only. Any other

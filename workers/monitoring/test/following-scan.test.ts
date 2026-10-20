@@ -35,6 +35,7 @@ import {
 import { FixtureProvider } from "@igtrack/ingestion";
 import { runFollowingScan } from "../src/provider.js";
 import type { ExecutionSource } from "../src/index.js";
+import { fixtureSetForAccount } from "./fixture-set.js";
 import {
   createFreshTestDb,
   probeDatabase,
@@ -191,33 +192,6 @@ function scriptedFollowingSource(
         );
       },
     },
-  };
-}
-
-async function malformedFixtureSource(): Promise<ExecutionSource> {
-  const dir = await mkdtemp(join(tmpdir(), "igtrack-following-"));
-  await mkdir(join(dir, "following"), { recursive: true });
-  await writeFile(
-    join(dir, "manifest.json"),
-    JSON.stringify({
-      version: "v1",
-      target_username: "aurora.wilde",
-      captured_at: OBSERVED_AT,
-      files: {
-        profile: "profile.json",
-        stories: "stories.json",
-        followers: [],
-        following: ["following/page-1.json"],
-        posts: [],
-        comments: {},
-      },
-    }),
-  );
-  await writeFile(join(dir, "following", "page-1.json"), "{ not valid json !!!");
-  const provider = new FixtureProvider({ fixturesDir: dir });
-  return {
-    provider,
-    source: { id: provider.sourceId, kind: SourceKind.FIXTURE, name: "malformed fixture" },
   };
 }
 
@@ -394,16 +368,26 @@ describe.runIf(dbAvailable)("worker FOLLOWING_SCAN", () => {
   });
 
   it("malformed fixture → non-retryable SCHEMA_MISMATCH, no rows (F4)", async () => {
-    const targetId = await makeTarget();
-    const job = await makeJob(targetId);
+    // The malformed set is bound to its own account: a fixture set speaks
+    // about exactly one account, and the worker's identity gate refuses a
+    // scan of any other target rather than answering it with the set's bytes.
+    targetCounter += 1;
+    const account = `following_target_${targetCounter}`;
+    const set = await fixtureSetForAccount(account, {
+      mutate: async (dir: string) => {
+        await writeFile(join(dir, "following", "page-1.json"), "{ not valid json !!!");
+      },
+    });
+    const { target } = await createTarget(handle.db, { userId, username: account });
+    const job = await makeJob(target.id);
+    const before = await followingSnapshotRows(target.id);
 
-    await expect(runFollowingScan(handle.db, job, await malformedFixtureSource()))
-      .rejects.toMatchObject({
-        name: "JobExecutionError",
-        kind: CapabilityErrorKind.SCHEMA_MISMATCH,
-        retryable: false,
-      });
-    expect(await followingSnapshotRows(targetId)).toHaveLength(0);
+    await expect(runFollowingScan(handle.db, job, set.source)).rejects.toMatchObject({
+      name: "JobExecutionError",
+      kind: CapabilityErrorKind.SCHEMA_MISMATCH,
+      retryable: false,
+    });
+    expect(await followingSnapshotRows(target.id)).toHaveLength(before.length);
   });
 
   it("keeps every acquired page across crash/resume; fabricates no losses (F5, F6)", async () => {

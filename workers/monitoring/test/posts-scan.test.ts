@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { join } from "node:path";
 import {
   CapabilityStatus,
   Confidence,
@@ -26,10 +25,10 @@ import {
   type DatabaseHandle,
   type JobRecord,
 } from "@igtrack/database";
-import { FixtureProvider } from "@igtrack/ingestion";
 import { JobExecutionError, runPostScan } from "../src/provider.js";
 import { executeOne } from "../src/index.js";
 import type { ExecutionSource } from "../src/index.js";
+import { fixtureSetForAccount } from "./fixture-set.js";
 import {
   createFreshTestDb,
   probeDatabase,
@@ -39,15 +38,6 @@ import {
 const dbAvailable = await probeDatabase(TEST_DATABASE_URL);
 
 const OBSERVED_AT = "2026-08-27T14:00:00.000Z";
-
-function fixtureSource(): ExecutionSource {
-  const fixturesDir = join(process.cwd(), "packages", "ingestion", "fixtures", "v1");
-  const provider = new FixtureProvider({ fixturesDir });
-  return {
-    provider,
-    source: { id: provider.sourceId, kind: SourceKind.FIXTURE, name: "posts fixture" },
-  };
-}
 
 function postStub(postId: string): NormalizedPost {
   return {
@@ -198,6 +188,22 @@ describe.runIf(dbAvailable)("worker POSTS_SCAN", () => {
     return target.id;
   }
 
+  /**
+   * A target for the REAL fixture provider.
+   *
+   * A fixture set speaks about exactly one account, so a test that drives
+   * the packaged payload needs its own set bound to its own account — and
+   * therefore its own target, or the job queue would deduplicate the two
+   * tests' scans into one.
+   */
+  async function makeFixtureTarget(): Promise<{ targetId: string; source: ExecutionSource }> {
+    targetCounter += 1;
+    const account = `post_target_${targetCounter}`;
+    const set = await fixtureSetForAccount(account);
+    const { target } = await createTarget(handle.db, { userId, username: account });
+    return { targetId: target.id, source: set.source };
+  }
+
   async function makeJob(targetId: string): Promise<JobRecord> {
     const { job } = await enqueueJob(handle.db, { kind: "POSTS_SCAN", targetId });
     const claimed = await claimJob(handle.db, "worker-posts");
@@ -208,9 +214,9 @@ describe.runIf(dbAvailable)("worker POSTS_SCAN", () => {
   }
 
   it("fixture provider → 2 posts, 3 comments on post-1, post-2 comment-less (P1)", async () => {
-    const targetId = await makeTarget();
+    const { targetId, source } = await makeFixtureTarget();
     const job = await makeJob(targetId);
-    const result = await runPostScan(handle.db, job, fixtureSource());
+    const result = await runPostScan(handle.db, job, source);
     expect(result).toBe("succeeded");
 
     const rows = await listPosts(handle.db, targetId);
@@ -227,14 +233,14 @@ describe.runIf(dbAvailable)("worker POSTS_SCAN", () => {
   });
 
   it("re-running the scan deduplicates posts and comments (P2)", async () => {
-    const targetId = await makeTarget();
+    const { targetId, source } = await makeFixtureTarget();
     const first = await makeJob(targetId);
-    expect(await runPostScan(handle.db, first, fixtureSource())).toBe("succeeded");
+    expect(await runPostScan(handle.db, first, source)).toBe("succeeded");
     await completeJob(handle.db, first.id, "worker-posts");
     const { job: second } = await enqueueJob(handle.db, { kind: "POSTS_SCAN", targetId });
     const claimed = await claimJob(handle.db, "worker-posts");
     expect(claimed?.id).toBe(second.id);
-    expect(await runPostScan(handle.db, claimed!, fixtureSource())).toBe("succeeded");
+    expect(await runPostScan(handle.db, claimed!, source)).toBe("succeeded");
     expect(await listPosts(handle.db, targetId)).toHaveLength(2);
   });
 
@@ -268,11 +274,11 @@ describe.runIf(dbAvailable)("worker POSTS_SCAN", () => {
   });
 
   it("executeOne dispatches POSTS_SCAN through the worker boundary (P6)", async () => {
-    const targetId = await makeTarget();
+    const { targetId, source } = await makeFixtureTarget();
     const { job } = await enqueueJob(handle.db, { kind: "POSTS_SCAN", targetId });
     const claimed = await claimJob(handle.db, "worker-dispatch");
     expect(claimed?.id).toBe(job.id);
-    const outcome = await executeOne(handle.db, "worker-dispatch", fixtureSource(), claimed!);
+    const outcome = await executeOne(handle.db, "worker-dispatch", source, claimed!);
     expect(outcome.state).toBe("succeeded");
     expect(postsTable).toBeDefined();
     expect(await listPosts(handle.db, targetId)).toHaveLength(2);
