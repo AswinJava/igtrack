@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IGTrack — evidence-first Instagram analytics you can prove</title>
+<meta name="description" content="Self-hosted Instagram analytics with an append-only evidence ledger. Every number traces to an observation; anything the platform does not expose is reported UNAVAILABLE with a reason. JSON CLI and a 38-tool MCP server.">
+<link rel="canonical" href="https://aswinjava.github.io/igtrack/">
+<meta name="theme-color" content="#0b0f14">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="IGTrack">
+<meta property="og:title" content="IGTrack — know what changed. Prove it.">
+<meta property="og:description" content="Evidence-first Instagram analytics: self-hosted, agent-native, append-only SHA-256 ledger. Gaps are reported as gaps, never as zero.">
+<meta property="og:url" content="https://aswinjava.github.io/igtrack/">
+<meta property="og:image" content="https://aswinjava.github.io/igtrack/assets/social-preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="IGTrack — know what changed. Prove it.">
+<meta name="twitter:description" content="Evidence-first Instagram analytics. Self-hosted CLI + MCP server. Every row carries a source, a timestamp and a SHA-256 hash.">
+<meta name="twitter:image" content="https://aswinjava.github.io/igtrack/assets/social-preview.png">
+
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b0f14'/%3E%3Ctext x='32' y='43' font-family='monospace' font-size='26' font-weight='700' fill='%2335e3a5' text-anchor='middle'%3EIG%3C/text%3E%3C/svg%3E">
+
+<style>
+:root{
+  --bg:#0b0f14; --panel:#111820; --panel-2:#0e141b; --line:#1e2a36;
+  --text:#e6edf3; --muted:#8b98a5; --dim:#5d6b78;
+  --mint:#35e3a5; --mint-dim:#1f8f68; --amber:#e3b341; --red:#f85149;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  --max:1080px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+a{color:var(--mint);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:var(--max);margin:0 auto;padding:0 24px}
+.skip{position:absolute;left:-9999px}
+.skip:focus{left:24px;top:12px;background:var(--panel);padding:8px 12px;border-radius:6px;z-index:50}
+
+header{position:sticky;top:0;z-index:40;background:rgba(11,15,20,.82);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.nav{display:flex;align-items:center;gap:28px;height:60px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.2px;color:var(--text)}
+.brand:hover{text-decoration:none}
+.mark{width:26px;height:26px;border-radius:7px;background:linear-gradient(180deg,#13202b,#0c141b);border:1px solid #24384a;display:grid;place-items:center;font:700 11px/1 var(--mono);color:var(--mint)}
+.nav nav{display:flex;gap:22px;margin-left:auto;align-items:center}
+.nav nav a{color:var(--muted);font-size:14px}
+.nav nav a:hover{color:var(--text);text-decoration:none}
+.pill{font:600 11px/1 var(--mono);color:var(--mint);border:1px solid var(--mint-dim);background:rgba(53,227,165,.07);padding:5px 8px;border-radius:999px}
+
+.hero{padding:84px 0 40px;border-bottom:1px solid var(--line);position:relative;overflow:hidden}
+.hero:before{content:"";position:absolute;inset:0;background:
+  radial-gradient(720px 320px at 78% -8%,rgba(53,227,165,.10),transparent 70%),
+  radial-gradient(520px 260px at 8% 8%,rgba(56,139,253,.07),transparent 70%);pointer-events:none}
+.eyebrow{font:600 12px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--mint);margin:0 0 18px}
+h1{font-size:clamp(34px,5.4vw,58px);line-height:1.06;letter-spacing:-.02em;margin:0 0 20px;max-width:16ch}
+h1 span{color:var(--mint)}
+.lede{font-size:clamp(16px,2vw,19px);color:var(--muted);max-width:62ch;margin:0 0 30px}
+.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:34px}
+.btn{display:inline-flex;align-items:center;gap:8px;font:600 14px/1 var(--sans);padding:12px 18px;border-radius:9px;border:1px solid transparent}
+.btn:hover{text-decoration:none}
+.btn.primary{background:var(--mint);color:#04150f}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn.ghost{border-color:var(--line);color:var(--text);background:var(--panel)}
+.btn.ghost:hover{border-color:#2b3d4f}
+
+.install{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px;max-width:560px;font:13px/1.4 var(--mono);color:#c9d6e2;overflow:auto}
+.install .p{color:var(--dim);user-select:none}
+.install button{margin-left:auto;flex:none;background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:6px;font:600 11px/1 var(--mono);padding:6px 9px;cursor:pointer}
+.install button:hover{color:var(--text);border-color:#2b3d4f}
+.install button:focus-visible,.btn:focus-visible{outline:2px solid var(--mint);outline-offset:2px}
+
+section{padding:64px 0;border-bottom:1px solid var(--line)}
+h2{font-size:clamp(24px,3.2vw,32px);letter-spacing:-.015em;margin:0 0 10px}
+.sub{color:var(--muted);max-width:68ch;margin:0 0 34px}
+
+.contract{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px}
+.card h3{margin:0 0 6px;font-size:15px;letter-spacing:.02em}
+.card p{margin:0;color:var(--muted);font-size:14px}
+.tag{font:600 10px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;padding:4px 7px;border-radius:5px;display:inline-block;margin-bottom:12px}
+.tag.o{color:var(--mint);background:rgba(53,227,165,.09);border:1px solid rgba(53,227,165,.25)}
+.tag.d{color:#79c0ff;background:rgba(56,139,253,.10);border:1px solid rgba(56,139,253,.28)}
+.tag.r{color:var(--amber);background:rgba(227,179,65,.10);border:1px solid rgba(227,179,65,.28)}
+
+.terminal{background:#080c11;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.terminal .bar{display:flex;align-items:center;gap:7px;padding:11px 14px;border-bottom:1px solid var(--line);background:var(--panel-2)}
+.dot{width:10px;height:10px;border-radius:50%}
+.terminal .bar span{margin-left:8px;font:12px/1 var(--mono);color:var(--dim)}
+pre{margin:0;padding:20px;overflow:auto;font:13px/1.65 var(--mono);color:#c9d6e2}
+.k{color:var(--mint)} .m{color:var(--muted)} .w{color:var(--amber)} .b{color:#79c0ff}
+
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.feat h3{margin:0 0 8px;font-size:15px}
+.feat p{margin:0;color:var(--muted);font-size:14px}
+.feat .ico{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;margin-bottom:14px;background:rgba(53,227,165,.08);border:1px solid rgba(53,227,165,.22);color:var(--mint);font:700 13px/1 var(--mono)}
+
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;counter-reset:s}
+.step{position:relative;padding-top:8px}
+.step:before{counter-increment:s;content:counter(s);display:grid;place-items:center;width:26px;height:26px;border-radius:50%;border:1px solid var(--mint-dim);color:var(--mint);font:700 12px/1 var(--mono);margin-bottom:12px}
+.step h3{margin:0 0 6px;font-size:15px}
+.step p{margin:0 0 10px;color:var(--muted);font-size:14px}
+code{font:12.5px/1.5 var(--mono);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:2px 6px;color:#c9d6e2}
+.snippet{background:#080c11;border:1px solid var(--line);border-radius:10px;padding:16px 18px;font:12.5px/1.8 var(--mono);color:#c9d6e2;overflow:auto}
+
+.split{display:grid;grid-template-columns:1.05fr .95fr;gap:40px;align-items:center}
+ul.checks{list-style:none;padding:0;margin:0}
+ul.checks li{position:relative;padding:0 0 12px 26px;color:var(--muted);font-size:14.5px}
+ul.checks li:before{content:"";position:absolute;left:2px;top:7px;width:9px;height:9px;border-radius:2px;background:var(--mint);opacity:.85}
+ul.checks strong{color:var(--text);font-weight:600}
+
+footer{padding:44px 0 60px;color:var(--dim);font-size:13.5px}
+.foot{display:flex;flex-wrap:wrap;gap:16px 28px;align-items:center;justify-content:space-between}
+.foot nav{display:flex;gap:20px;flex-wrap:wrap}
+.foot a{color:var(--muted)}
+.foot a:hover{color:var(--text)}
+
+@media (max-width:860px){
+  .contract,.grid,.steps{grid-template-columns:1fr}
+  .split{grid-template-columns:1fr;gap:26px}
+  .hero{padding:56px 0 34px}
+  section{padding:48px 0}
+  .nav nav a:not(.keep){display:none}
+}
+@media (max-width:560px){
+  pre{font-size:11.5px}
+  .install{font-size:12px}
+  .cta .btn{width:100%;justify-content:center}
+}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="/igtrack/"><span class="mark">IG</span> IGTrack</a>
+    <nav aria-label="Primary">
+      <a href="#contract">Evidence model</a>
+      <a href="#features">Features</a>
+      <a href="#start">Quickstart</a>
+      <a href="https://github.com/AswinJava/igtrack/tree/master/docs">Docs</a>
+      <a class="keep" href="https://github.com/AswinJava/igtrack">GitHub ↗</a>
+      <span class="pill">v1.0.0</span>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">Self-hosted · Agent-native · AGPL-3.0</p>
+      <h1>Know what changed.<br><span>Prove it.</span></h1>
+      <p class="lede">An evidence-first Instagram analytics engine. Every row carries a source, an observed time and a SHA-256 hash — and anything the platform does not expose is reported <strong>UNAVAILABLE with a reason</strong>, never as zero.</p>
+      <div class="cta">
+        <a class="btn primary" href="#start">Get started</a>
+        <a class="btn ghost" href="https://github.com/AswinJava/igtrack">View on GitHub</a>
+      </div>
+      <div class="install">
+        <span class="p">$</span>
+        <span id="cmd">git clone https://github.com/AswinJava/igtrack.git &amp;&amp; cd igtrack &amp;&amp; pnpm install</span>
+        <button type="button" data-copy="git clone https://github.com/AswinJava/igtrack.git &amp;&amp; cd igtrack &amp;&amp; pnpm install" aria-label="Copy install command">copy</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="contract">
+    <div class="wrap">
+      <h2>Three states, never blurred</h2>
+      <p class="sub">Most analytics tools show a number and stop there. IGTrack keeps the distinction that matters: what was seen, what was computed from what was seen, and what the platform refuses to expose.</p>
+      <div class="contract">
+        <div class="card">
+          <span class="tag o">Observed</span>
+          <h3>Raw platform reads</h3>
+          <p>Profile snapshots, stories, posts, comments, tagged media and follow counts — stored with source id, capture time, confidence and content hash.</p>
+        </div>
+        <div class="card">
+          <span class="tag d">Derived</span>
+          <h3>Computed, traceable</h3>
+          <p>Follow deltas, caption edits, story lifetimes, relationship rankings. Every derived row points at the observations it came from.</p>
+        </div>
+        <div class="card">
+          <span class="tag r">Refused</span>
+          <h3>Absence, with a reason</h3>
+          <p>Follower rosters, liker lists, highlight contents and media bytes are named as unavailable. A truncated scan is stored, labelled and never diffed.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <h2>One command, one dossier</h2>
+      <p class="sub">Resolve a handle, run every stage the configured sources support, rank relationships and return a single cited dossier — including the gaps.</p>
+      <div class="terminal" role="img" aria-label="Terminal output of igtrack investigate aurora.wilde">
+        <div class="bar">
+          <span class="dot" style="background:#ff5f57"></span>
+          <span class="dot" style="background:#febc2e"></span>
+          <span class="dot" style="background:#28c840"></span>
+          <span>igtrack — investigate</span>
+        </div>
+<pre><span class="m">$</span> igtrack investigate @aurora.wilde
+
+  <span class="b">Account</span>      aurora.wilde · ig:17841400000000001 · public
+  <span class="b">Observed</span>     profile snapshot · 3 posts · 2 stories · comments · tagged media
+  <span class="b">Derived</span>      <span class="k">40 → 46 followers (+6)</span> · 2 new relationships ranked
+  <span class="b">Claims</span>       3 cited findings from 2 independent domains
+  <span class="b">Gaps</span>         follower roster — <span class="w">UNAVAILABLE</span> (no roster edge is exposed)
+               story highlights — <span class="w">UNAVAILABLE</span> (not in the logged-out payload)
+  <span class="b">Evidence</span>     41 observations · every row has a source id and SHA-256 hash</pre>
+      </div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="wrap">
+      <h2>Built like an instrument</h2>
+      <p class="sub">A Postgres-backed queue, a resumable scanner and an append-only ledger — the parts that make a diff trustworthy.</p>
+      <div class="grid">
+        <div class="card feat"><div class="ico">∑</div><h3>Append-only evidence ledger</h3><p>Observations are never rewritten. Corrections are new rows, so history stays auditable months later.</p></div>
+        <div class="card feat"><div class="ico">⇄</div><h3>Deltas with provenance</h3><p>Every change row links to the two observations it compares. Nothing is inferred from a missing page.</p></div>
+        <div class="card feat"><div class="ico">◐</div><h3>Partial scans never diff</h3><p>Completeness is recorded per scan. A truncated read can inform, but it can never produce a false claim.</p></div>
+        <div class="card feat"><div class="ico">⟳</div><h3>Resumable workers</h3><p>Leases, heartbeats and checkpoints on a Postgres queue — a restart resumes the scan instead of losing it.</p></div>
+        <div class="card feat"><div class="ico">▦</div><h3>Period reports</h3><p>Weekly, monthly and quarterly reports where every section is OBSERVED, DERIVED, EMPTY or UNAVAILABLE.</p></div>
+        <div class="card feat"><div class="ico">⌘</div><h3>38-tool MCP server</h3><p>The CLI and the MCP server call the same operations layer. Your agent gets identical results, not a second API.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="start">
+    <div class="wrap">
+      <h2>Running in two minutes</h2>
+      <p class="sub">Node 22+, pnpm and PostgreSQL 16. The default dataset is synthetic, deterministic and offline — safe to run forever.</p>
+      <div class="steps">
+        <div class="step"><h3>Clone and install</h3><p>Dependencies and workspace links.</p><div class="snippet">git clone https://github.com/AswinJava/igtrack.git<br>cd igtrack &amp;&amp; pnpm install</div></div>
+        <div class="step"><h3>Start PostgreSQL</h3><p>Compose brings up Postgres 16 on 5432.</p><div class="snippet">cp .env.example .env<br>docker compose up -d</div></div>
+        <div class="step"><h3>Set up and investigate</h3><p>Migrations, synthetic demo, first dossier.</p><div class="snippet">pnpm igtrack setup<br>pnpm igtrack investigate aurora.wilde</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap split">
+      <div>
+        <h2>Speak agent, natively</h2>
+        <p class="sub" style="margin-bottom:22px">One operations layer, two surfaces. The CLI is JSON-first; the MCP server exposes the same operations over stdio with no drift between them.</p>
+        <ul class="checks">
+          <li><strong>38 MCP tools</strong> for observation, derivation, reporting and research.</li>
+          <li><strong>25 declared capabilities</strong>, each with its state, supplier and reason when the answer is no.</li>
+          <li><strong>Claims ledger</strong> with a closed predicate registry, source URL, excerpt and hash.</li>
+          <li><strong>No telemetry.</strong> Self-hosted, your database, your history.</li>
+        </ul>
+      </div>
+      <div class="snippet">$ igtrack ask "what changed on aurora.wilde<br>&nbsp;&nbsp;in the last 7 days?"<br><br>$ igtrack status<br><span class="m">provider · targets · queue · source health</span><br><br>$ igtrack capabilities<br><span class="m">25 capabilities, 38 MCP tools</span></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div>© 2026 Aswin S · AGPL-3.0-or-later · Built for people who need to prove what changed.</div>
+    <nav aria-label="Footer">
+      <a href="https://github.com/AswinJava/igtrack">GitHub</a>
+      <a href="https://github.com/AswinJava/igtrack/releases">Releases</a>
+      <a href="https://github.com/AswinJava/igtrack/blob/master/docs/USER-GUIDE.md">User guide</a>
+      <a href="https://github.com/AswinJava/igtrack/blob/master/docs/ARCHITECTURE.md">Architecture</a>
+      <a href="https://github.com/AswinJava/igtrack/blob/master/SECURITY.md">Security</a>
+    </nav>
+  </div>
+</footer>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "IGTrack",
+  "description": "Evidence-first Instagram observation engine: self-hosted JSON CLI and MCP server with an append-only SHA-256 evidence ledger.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux, macOS, Windows",
+  "codeRepository": "https://github.com/AswinJava/igtrack",
+  "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+  "author": {"@type": "Person", "name": "Aswin S", "url": "https://github.com/AswinJava"},
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+  "softwareVersion": "1.0.0"
+}
+</script>
+<script>
+document.querySelectorAll("[data-copy]").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var t = b.getAttribute("data-copy").replace(/&amp;/g, "&");
+    navigator.clipboard.writeText(t).then(function () {
+      var old = b.textContent; b.textContent = "copied"; setTimeout(function () { b.textContent = old; }, 1400);
+    });
+  });
+});
+</script>
+</body>
+</html>

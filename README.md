@@ -13,7 +13,7 @@ Self-hosted · Agent-native (MCP) · No telemetry · Free forever
 [![MCP tools](https://img.shields.io/badge/MCP-38%20tools-7c3aed.svg)](docs/FEATURES.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-[Quickstart](#quickstart-2-minutes) · [Why IGTrack](#why-igtrack) · [Features](#what-it-does) · [MCP](#use-it-from-your-ai-agent) · [Docs](#documentation) · [Roadmap](docs/ROADMAP.md)
+[Website](https://aswinjava.github.io/igtrack/) · [Quickstart](#quickstart-2-minutes) · [Why IGTrack](#why-igtrack) · [Features](#what-it-does) · [MCP](#use-it-from-your-ai-agent) · [Docs](#documentation) · [Roadmap](docs/ROADMAP.md)
 
 <img src=".github/assets/social-preview.png" alt="IGTrack — Know what changed. Prove it." width="100%">
 
