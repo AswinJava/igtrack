@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/AswinJava/igtrack/discussions
+    about: Ask a usage question or float an idea before it becomes an issue.
+  - name: Security report
+    url: https://github.com/AswinJava/igtrack/security/advisories/new
+    about: Report a vulnerability privately. Do not open a public issue.
+  - name: Documentation
+    url: https://github.com/AswinJava/igtrack#documentation
+    about: Read the docs before filing — the answer may already be there.

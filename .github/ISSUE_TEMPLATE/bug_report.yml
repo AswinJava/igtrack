@@ -1,0 +1,78 @@
+name: Bug report
+description: Something behaves differently from what the docs say.
+title: "bug: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Evidence-first applies to bug
+        reports too: the more precisely you state what you ran and what came
+        back, the faster this gets fixed.
+
+        **Do not paste tokens, database URLs, passwords or captured personal
+        data.** Redact secrets; `igtrack config` and `igtrack doctor` print
+        presence and shape, never values, so their output is safe to attach.
+
+  - type: input
+    id: version
+    attributes:
+      label: IGTrack version
+      description: Output of `igtrack --version`, or the commit SHA.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - CLI command
+        - MCP tool
+        - Worker / scheduler
+        - Database / migrations
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The exact command or tool call, and the output you got.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: Quote the doc or help text that promised it, if there is one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, provider (`fixture`, `graph`, `import`, `public`, `anonstories`), and whether Postgres was involved.
+      placeholder: |
+        OS: Ubuntu 24.04
+        Node: 22.12.0
+        Provider: fixture
+        Postgres: 16 (docker compose)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This report contains no secrets or personal data.
+          required: true

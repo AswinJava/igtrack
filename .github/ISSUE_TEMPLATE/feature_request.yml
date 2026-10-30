@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose a capability, an operation or a documentation change.
+title: "feat: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        IGTrack is deliberately narrow: it observes only what a documented,
+        lawful source exposes, and it reports everything else as UNAVAILABLE
+        with a reason. Proposals that require session cookies, undocumented
+        endpoints, private accounts or media re-serving will be declined — not
+        because the work is hard, but because the product does not cross that
+        line. See [docs/CAPABILITIES.md](../docs/CAPABILITIES.md) first.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What question can you not answer today? Describe the decision you are trying to make, not the API you want.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed surface
+      description: Command name, MCP tool name, required inputs, and what the output should contain. If a source cannot supply the fact, say so.
+    validations:
+      required: true
+
+  - type: input
+    id: source
+    attributes:
+      label: Lawful source
+      description: Which documented source would supply this? (Graph API edge, the operator's own data export, logged-out public page, public web, operator-supplied claim.)
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing commands, exports or derivations that partly answer the question.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: This proposal does not require private-account access or undocumented endpoints.
+          required: true

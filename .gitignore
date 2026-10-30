@@ -35,7 +35,7 @@ logs/
 .tmp/
 
 # backups (pg_dump artifacts — never commit large dumps; keep scripts, not data)
-backups/
+backups/*
 !backups/.gitkeep
 
 # os / editor
