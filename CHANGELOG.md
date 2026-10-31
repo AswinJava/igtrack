@@ -4,6 +4,42 @@ All notable changes are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Activity Report** — `igtrack activity-report` and the `igtrack_activity_report`
+  MCP tool compose the four-tab Activity Report shape over stored rows: four
+  tabs in order (Activity Analytics, Ties & Trails, Stories &
+  Highlights, AI Insights), DAILY/WEEK/MONTH/SEASON/YEAR periods, a period
+  inventory with badges, delivered count and stable `data_id`s, a merged
+  timeline and closed-period totals. Unavailable metrics are `null` with
+  `UNAVAILABLE` and the capability-registry reason; pending periods are marked
+  `provisional` and never zero-filled; CLI and MCP call the same operation.
+- **`AI_INSIGHTS` capability** — documented absent: no provider returns
+  personality, relationship, financial or location inferences, so the AI
+  Insights tab is always refused rather than generated.
+- **Tracker** — `igtrack tracker [target]` and the `igtrack_tracker` MCP tool
+  project the stored ledger as a watchlist: one card per tracked account with
+  new followings, unfollows, posts, stories, comments, tags and mentions for
+  the latest **closed** period (weekly by default; `--at` selects exactly and
+  may mark an open window `IN_PROGRESS`). Naming a target adds follow
+  rosters, top commenters, recent comments, posts, hashtags, next-scan state
+  and the explicit refusal list. Follow counts stay `UNAVAILABLE` with the
+  coverage-gap reason unless a COMPLETE roster comparison measured them;
+  counts match `activity-report` for the same window because both read one
+  ledger. Read-only: no scan, queue or write.
+- **Viewer** — `igtrack viewer <input>` and the `igtrack_viewer` MCP tool
+  compose one account across six tabs in fixed order — stories, posts, reels,
+  highlights, reposts, tagged — from logged-out public-page reads
+  (`PUBLIC_WEB`) and login-free aggregator reads (`PUBLIC_AGGREGATOR`). The
+  tab strip, covered-tab refusal, declared-vs-observed post counts and
+  mention focus are shared; repost identities, tagged media of accounts you
+  do not own, likes and AI insights are typed `UNAVAILABLE` with the
+  capability-registry reason; media rows carry source URLs and the report
+  never proxies or re-serves bytes. Accepts handles, profile URLs and
+  post/reel/story permalinks; a highlight URL is refused with its reason.
+
 ## [1.0.0] — 2026-10-30
 
 The first public release: an evidence-first observation engine for Instagram

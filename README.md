@@ -10,7 +10,7 @@ Self-hosted · Agent-native (MCP) · No telemetry · Free forever
 [![CI](https://github.com/AswinJava/igtrack/actions/workflows/ci.yml/badge.svg)](https://github.com/AswinJava/igtrack/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522-339933.svg)](package.json)
-[![MCP tools](https://img.shields.io/badge/MCP-38%20tools-7c3aed.svg)](docs/FEATURES.md)
+[![MCP tools](https://img.shields.io/badge/MCP-41%20tools-7c3aed.svg)](docs/FEATURES.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 [Website](https://aswinjava.github.io/igtrack/) · [Quickstart](#quickstart-2-minutes) · [Why IGTrack](#why-igtrack) · [Features](#what-it-does) · [MCP](#use-it-from-your-ai-agent) · [Docs](#documentation) · [Roadmap](docs/ROADMAP.md)
@@ -67,13 +67,17 @@ month never could.**
 | | |
 |---|---|
 | **Investigate a handle end to end** | One command resolves the account, runs every stage the configured sources support, ranks relationships, retrieves public references and returns **one dossier**: what was investigated, what was actually retrieved, what was derived, what remains unknown, and why. |
+| **Audit in plain English** | Say `audit user @name` (or `collect everything you can about @name`) and it first **collects** — public-archive count history plus every supported stage — then reads the audit back: what is known, from where, and what can never be known. A missing account becomes a question with answerable options, never a guess. |
 | **Observe** | Profile, stories, story mentions, follower/following counts, posts, comments, carousels, tagged media, own-account insights (reach, views, engagement, demographics). Each observation carries source, time, confidence and hashes. |
 | **Derive** | Follow deltas, profile changes, caption edits and post disappearances, story lifetimes, mention roll-ups, relationship rankings and insight series. Every derived row points at the observations it came from. |
 | **Compose periods** | Weekly/monthly/quarterly reports from stored rows. Every section is `OBSERVED`, `DERIVED`, `EMPTY` or `UNAVAILABLE` — a window the rows cannot answer is a named gap. |
+| **Activity Report** | Four tabs in order — Activity Analytics, Ties & Trails, Stories & Highlights, AI Insights — across daily, weekly, monthly, quarterly and yearly periods, with a period inventory, badges, a mergeable timeline and measured totals. Structurally absent tabs (likes, highlights, AI insights) are present and typed `UNAVAILABLE` with the capability reason. |
+| **Tracker** | A watchlist with one card per tracked account: new followings, unfollows, posts, stories, comments, tags and mentions for the latest **closed** period — plus per-account rosters, top commenters, recent comments, posts and hashtags. Counts come from the same stored rows as the Activity Report; a follow metric is zero only when a COMPLETE roster comparison measured it. |
+| **Viewer** | One account across six tabs — stories, posts, reels, highlights, reposts, tagged — composed from logged-out public-page and login-free aggregator reads. Reposts and tagged media are present and typed `UNAVAILABLE` with the reason; media rows carry source URLs, never proxied bytes. |
 | **Audience & movement** | Mutuals, one-way follows and recent follow changes over **complete rosters only**, with first-seen times instead of invented follow timestamps. |
 | **Cited research** | A claims ledger for findings your agent researches on the open web: closed predicate registry, source URL, excerpt, hash, and corroboration computed from stored rows. |
 | **Run itself** | Postgres-backed queue (`FOR UPDATE SKIP LOCKED`, leases, heartbeats), resumable paged scans, checkpoints, retry classification and a per-target scheduler. |
-| **Speak agent** | A JSON-first CLI and a stdio MCP server exposing the same operations — **38 tools**, one operations layer, no drift. |
+| **Speak agent** | A JSON-first CLI and a stdio MCP server exposing the same operations — **42 tools**, one operations layer, no drift. |
 
 ### Honest by construction
 
@@ -87,7 +91,7 @@ follows     page 1..3 COMPLETE       relationship rank        media bytes
 comments    page 1..2 COMPLETE       (all with evidence)      repost identities
 ```
 
-`igtrack capabilities` prints the full registry: **25 capabilities**, each with
+`igtrack capabilities` prints the full registry: **26 capabilities**, each with
 its state, its supplier, and the reason when the answer is no.
 
 ## Quickstart (2 minutes)
@@ -117,6 +121,7 @@ manifest declares, so demo data can never become evidence about a real person.
 Then:
 
 ```bash
+pnpm igtrack ask "audit user aurora.wilde"   # collect everything readable, then report
 pnpm igtrack ask "what changed on aurora.wilde in the last 7 days?"
 pnpm igtrack guide                 # a plain-language tour
 pnpm igtrack status                # provider, targets, queue, source health
@@ -157,8 +162,8 @@ Then ask in plain language:
 
 `igtrack_ask` plans the operations from the sentence and returns what it
 understood, every assumption, what ran, and the answer with evidence ids. The
-agent can also call the 38 typed tools directly — `igtrack_investigate`,
-`igtrack_dossier`, `igtrack_report`, `igtrack_audience`,
+agent can also call the 42 typed tools directly — `igtrack_investigate`,
+`igtrack_dossier`, `igtrack_report`, `igtrack_activity_report`, `igtrack_tracker`, `igtrack_audience`,
 `igtrack_evidence_chain` and the rest. Destructive actions are never auto-run:
 they come back as a suggested command for a human to confirm.
 
@@ -243,7 +248,7 @@ the queue, the evidence ledger and every refusal are covered by the test suite.
 | [User guide](docs/USER-GUIDE.md) | The non-technical tour: start it, ask questions, read an answer. |
 | [Architecture](docs/ARCHITECTURE.md) | Layers, pipeline, epistemics, failure modes, extension points. |
 | [Feature reference](docs/FEATURES.md) | Every command, tool, provider and configuration variable. |
-| [Capability matrix](docs/CAPABILITIES.md) | All 25 capabilities, their state and their source. |
+| [Capability matrix](docs/CAPABILITIES.md) | All 26 capabilities, their state and their source. |
 | [Deployment](docs/DEPLOY.md) | Local, container, cron, backups, production checklist. |
 | [Roadmap](docs/ROADMAP.md) | What is next and what is deliberately out of scope. |
 | [Contributing](CONTRIBUTING.md) | The one rule that matters, and where to change what. |

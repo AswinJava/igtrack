@@ -94,6 +94,9 @@ const SOURCE_KIND_BY_CLASS: Record<string, SourceKind> = {
   import: SourceKind.IMPORT,
   graph: SourceKind.GRAPH_API,
   public: SourceKind.PUBLIC_WEB,
+  // Public web archives: pages the archive captured and served, never a
+  // platform response. Kept PUBLIC_WEB so a capture is never read as LIVE.
+  archive: SourceKind.PUBLIC_WEB,
   // A third-party public aggregator's relayed answer — not a page Instagram
   // served and not a platform API response; never blended with either.
   anonstories: SourceKind.PUBLIC_AGGREGATOR,

@@ -13,6 +13,7 @@ import { buildServer } from "../src/mcp/server.js";
 
 const EXPECTED_TOOLS = [
   "igtrack_activity",
+  "igtrack_activity_report",
   "igtrack_alerts",
   "igtrack_anonstories",
   "igtrack_ask",
@@ -28,6 +29,7 @@ const EXPECTED_TOOLS = [
   "igtrack_evidence",
   "igtrack_evidence_chain",
   "igtrack_export",
+  "igtrack_full_audit",
   "igtrack_insights",
   "igtrack_investigate",
   "igtrack_lookup",
@@ -49,6 +51,8 @@ const EXPECTED_TOOLS = [
   "igtrack_target_remove",
   "igtrack_target_set_status",
   "igtrack_targets_list",
+  "igtrack_tracker",
+  "igtrack_viewer",
   "igtrack_work",
 ].sort();
 

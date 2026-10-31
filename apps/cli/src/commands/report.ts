@@ -352,6 +352,40 @@ export async function runRecent(args: ParsedArgs): Promise<number> {
         ? "no COMPLETE snapshot on record"
         : `baseline ${display(block.baselineAt)} · latest ${display(block.latestAt)} · ${block.size ?? "?"} accounts`;
     const countCell = (value: number | null): string => (value === null ? "not read" : String(value));
+    const movement = result.countActivity;
+    const carried = (value: number | null): string => (value === null ? "not carried" : String(value));
+    const signed = (value: number | null): string =>
+      value === null ? "not carried" : `${value >= 0 ? "+" : ""}${value}`;
+    const shownPoints = movement.points.slice(-20);
+    const movementLines =
+      movement.state === "UNAVAILABLE"
+        ? `Count movement  unavailable — ${movement.reason ?? "no comparable observation is stored"}`
+        : movement.state === "EMPTY"
+          ? `Count movement  none across ${movement.points.length} comparable observation(s) — a computed zero, not missing data`
+          : [
+              "Count movement (stored profile observations; a count delta is movement of a number, never a named follow)",
+              table(
+                ["observed", "followers", "following", "posts", "source class"],
+                shownPoints.map((point) => [
+                  relativeTime(point.observedAt),
+                  carried(point.followerCount),
+                  carried(point.followingCount),
+                  carried(point.postCount),
+                  point.evidenceClass ?? "not carried",
+                ]),
+              ),
+              movement.points.length > shownPoints.length
+                ? `Showing the newest ${shownPoints.length} of ${movement.points.length} observation(s).`
+                : "",
+              `Net          followers ${signed(movement.net.followerDelta)}, following ${signed(movement.net.followingDelta)}, posts ${signed(movement.net.postDelta)}`,
+              ...movement.intervals.slice(-20).map(
+                (interval) =>
+                  `  ${display(interval.from)} → ${display(interval.to)}  ` +
+                  `followers ${signed(interval.followerDelta)}, following ${signed(interval.followingDelta)}, posts ${signed(interval.postDelta)}`,
+              ),
+            ]
+              .filter((line) => line !== "")
+              .join("\n");
     const human = [
       `Target       @${result.target.username} (${result.target.status})`,
       `Direction    ${result.direction}`,
@@ -369,6 +403,8 @@ export async function runRecent(args: ParsedArgs): Promise<number> {
           ["lost followers", countCell(result.counts.lostFollowers)],
         ],
       ),
+      "",
+      movementLines,
       "",
       result.rows.length === 0
         ? result.state === "UNAVAILABLE"

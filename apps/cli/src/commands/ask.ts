@@ -3,7 +3,8 @@ import { createInterface } from "node:readline/promises";
 import { createContext, previewMeta, type CliContext } from "../context.js";
 import { emit, errorHint, isJson, table, type ParsedArgs } from "../output.js";
 import { opAsk, type AskResult } from "../ask/execute.js";
-import { planAsk } from "../ask/parse.js";
+import { formatInputQuestion, mergeClarification } from "../ask/clarify.js";
+import { planAsk, type AskPlan } from "../ask/parse.js";
 import { guideText, welcomeText } from "../ask/guide.js";
 
 // ---------------------------------------------------------------------------
@@ -31,7 +32,10 @@ Notes:
   - A bare prompt works too: igtrack "who is @aurora.wilde?"
   - No prompt opens an interactive session (when run in a terminal).
   - Partial sentences are completed with stated assumptions, never silent
-    guesses. If the account is missing, it asks which one.
+    guesses. If the account is missing, it asks which one — answer with a
+    number, an @handle, or cancel. With --json (or no terminal) the same
+    question is returned as status NEEDS_INPUT with a structured "input"
+    field, so an agent can ask its own operator and re-send the sentence.
   - Destructive requests (removing an account) return the exact command instead
     of running it.
   - --json returns { ok, data, _meta }; every step keeps its full operation
@@ -62,6 +66,9 @@ function renderAskHuman(result: AskResult): string {
     lines.push("  (nothing to report)");
   } else {
     for (const item of result.answer) lines.push(`  - ${item}`);
+  }
+  if (result.status === "NEEDS_INPUT" && result.input !== undefined) {
+    lines.push("", "I need one answer", formatInputQuestion(result.input));
   }
 
   if (result.steps.length > 0) {
@@ -98,6 +105,73 @@ function reportError(err: unknown): void {
   if (hint !== null) stderr.write(`\nWhat to do next:\n  ${hint}\n`);
 }
 
+interface ClarifyUi {
+  write(text: string): void;
+  question(query: string): Promise<string>;
+}
+
+/**
+ * The context a plan needs. A request that names no account also wants the
+ * tracked list for its question, but an advisory request (untrack, stories)
+ * can still be asked — and answered — when the database is down, so only a
+ * database-requiring plan treats a connection failure as fatal.
+ */
+async function contextForPlan(plan: AskPlan): Promise<CliContext | null> {
+  if (!plan.needsDb && !plan.needsUsername) return null;
+  try {
+    return await createContext();
+  } catch (err) {
+    if (plan.needsDb) throw err;
+    return null;
+  }
+}
+
+/**
+ * Answer the one question the prompt surface asks ("which account?"), then run
+ * the completed sentence through the same router. Up to three readings: a
+ * typo gets another try, a cancel runs nothing, and an unreadable answer never
+ * turns into a guessed account.
+ */
+export async function clarifyLoop(
+  ui: ClarifyUi,
+  ctx: CliContext | null,
+  first: AskResult,
+  onProgress: ((message: string) => void) | undefined,
+): Promise<AskResult> {
+  let result = first;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const input = result.input;
+    if (result.status !== "NEEDS_INPUT" || input === undefined) return result;
+    ui.write(`\n${formatInputQuestion(input)}\n\n`);
+    let answer: string;
+    try {
+      answer = await ui.question("account> ");
+    } catch {
+      return result;
+    }
+    const merged = mergeClarification(result.prompt, input, answer);
+    if (merged.kind === "cancel") {
+      ui.write("Nothing was run.\n");
+      return result;
+    }
+    if (merged.kind === "unreadable") {
+      ui.write(
+        input.allowFreeText
+          ? "I could not read an account in that answer. Give a bare username such as @name.\n"
+          : "Pick one of the numbered options above.\n",
+      );
+      continue;
+    }
+    ui.write(`Using @${merged.username}. You asked: ${merged.prompt}\n`);
+    result = await opAsk(
+      ctx,
+      planAsk(merged.prompt),
+      onProgress === undefined ? {} : { onProgress },
+    );
+  }
+  return result;
+}
+
 async function runInteractive(): Promise<number> {
   const rl = createInterface({ input: stdin, output: stdout, terminal: true });
   let ctx: CliContext | null = null;
@@ -119,18 +193,25 @@ async function runInteractive(): Promise<number> {
         continue;
       }
       const plan = planAsk(prompt);
-      if (plan.needsDb && ctx === null) {
+      if ((plan.needsDb || plan.needsUsername) && ctx === null) {
         try {
-          ctx = await createContext();
+          ctx = await contextForPlan(plan);
         } catch (err) {
           reportError(err);
           continue;
         }
       }
       try {
-        const result = await opAsk(ctx, plan, {
-          onProgress: (message) => stderr.write(`  … ${message}\n`),
-        });
+        const onProgress = (message: string): void => {
+          stderr.write(`  … ${message}\n`);
+        };
+        const asked = await opAsk(ctx, plan, { onProgress });
+        const result = await clarifyLoop(
+          { write: (text) => stdout.write(text), question: (query) => rl.question(query) },
+          ctx,
+          asked,
+          onProgress,
+        );
         stdout.write(`\n${renderAskHuman(result)}\n\n`);
       } catch (err) {
         reportError(err);
@@ -147,7 +228,7 @@ async function runInteractive(): Promise<number> {
 export async function runAskPrompt(prompt: string, args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
   const plan = planAsk(prompt);
-  const ctx = plan.needsDb ? await createContext() : null;
+  const ctx = await contextForPlan(plan);
   try {
     const onProgress = json
       ? undefined
@@ -155,13 +236,29 @@ export async function runAskPrompt(prompt: string, args: ParsedArgs): Promise<nu
           stderr.write(`  … ${message}\n`);
         };
     const result = await opAsk(ctx, plan, onProgress === undefined ? {} : { onProgress });
+    // A terminal can answer the clarification in place; --json and piped input
+    // get the structured question instead, so an agent can ask its operator.
+    let answered = result;
+    if (!json && stdin.isTTY === true && result.status === "NEEDS_INPUT" && result.input !== undefined) {
+      const rl = createInterface({ input: stdin, output: stderr, terminal: true });
+      try {
+        answered = await clarifyLoop(
+          { write: (text) => stderr.write(text), question: (query) => rl.question(query) },
+          ctx,
+          result,
+          onProgress,
+        );
+      } finally {
+        rl.close();
+      }
+    }
     emit({
       json,
       meta: ctx?.meta ?? previewMeta(),
-      data: result,
-      human: renderAskHuman(result),
+      data: answered,
+      human: renderAskHuman(answered),
     });
-    return result.status === "FAILED" ? 1 : 0;
+    return answered.status === "FAILED" ? 1 : 0;
   } finally {
     await ctx?.close().catch(() => undefined);
   }

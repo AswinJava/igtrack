@@ -4,7 +4,7 @@
 > from `CAPABILITY_REGISTRY` (`packages/core/src/capabilities.ts`); a test fails if it
 > is stale. Prose cannot drift from the product because there is no prose.
 
-20 of 25 capabilities are obtainable from a lawful source; 5 have no source at all (no provider method exists, and no operator-supplied rows can stand in). Separately, 8 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
+20 of 26 capabilities are obtainable from a lawful source; 6 have no source at all (no provider method exists, and no operator-supplied rows can stand in). Separately, 9 capabilities are `DOCUMENTED_ABSENT`: the exhaustive platform reference lists no such field or edge, so their absence is a finding, not an assumption.
 
 A capability can be available **and** documented-absent at the same time, and saying so is the point of this table: follower and following rosters are `DOCUMENTED_ABSENT` for any live interface — no roster edge exists — while the synthetic fixture provider exposes rosters so the pipeline can be built and tested end to end, and the operator's own Instagram export (`import:v1`) supplies the real roster lawfully.
 
@@ -47,6 +47,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 | **Media bytes and assets** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | `mediaAssets` |
 | **Cited claims ledger and account research report** | available · `DOCUMENTED_ABSENT` | operator submissions (no platform route exists) | `claims` |
 | **Bounded public-web research acquisition** | available · `LIVE_VERIFIED` | bounded engine acquisition of operator-named public sources (no platform route exists) | `researchRuns`, `researchDocuments`, `claims` |
+| **AI-generated personality, relationship and behavioural insights** | `UNAVAILABLE` · `DOCUMENTED_ABSENT` | — | — |
 
 ## The detail
 
@@ -147,7 +148,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Owned account only; the documented IG User tags edge. Media from private accounts are excluded by the platform, and the edge is subject to Platform Rate Limits.
 - **Provider methods:** `getTags`
 - **Persists to:** `taggedMedia`, `evidence`
-- **Surfaced in:** `igtrack tags (CLI)`, `igtrack_tags (MCP tool)`, `dossier counts (taggedMedia)`, `activity timeline (TAG_OBSERVED)`
+- **Surfaced in:** `igtrack tags (CLI)`, `igtrack_tags (MCP tool)`, `igtrack tracker <target> (tagged count and evidence)`, `dossier counts (taggedMedia)`, `activity timeline (TAG_OBSERVED)`
 
 **What would unlock it.** Live verification of the tags edge under this integration's credentials; the pipeline, table, scan kind, and CLI are already in place.
 
@@ -173,7 +174,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Would require an official highlights edge.
 - **Provider methods:** —
 - **Persists to:** —
-- **Surfaced in:** `/targets/[id] (highlights tab shows UNAVAILABLE with reason)`
+- **Surfaced in:** `/targets/[id] (highlights tab shows UNAVAILABLE with reason)`, `igtrack tracker <target> (highlights KPI refused with reason)`
 
 **Why it is unavailable.** The Instagram Graph API exposes no highlights edge (the exhaustive IG User edge list has none; the stories edge returns last-24h stories only). The only known alternative is the undocumented private reels_media endpoint, which this project forbids: no private endpoints, no session use, no access-control circumvention.
 
@@ -273,7 +274,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Would require a public likes feed, which does not exist.
 - **Provider methods:** —
 - **Persists to:** —
-- **Surfaced in:** `Relationships page states UNAVAILABLE with reason; like counts on posts and comments are labeled provider metadata`
+- **Surfaced in:** `Relationships page states UNAVAILABLE with reason; like counts on posts and comments are labeled provider metadata`, `igtrack tracker <target> (accounts-liked KPI refused with reason)`
 
 **Why it is unavailable.** Instagram exposes no liker list through any supported interface: no liker edge exists on IG Media or IG Comment (the Facebook Comment likes edge is Facebook-only and must not be conflated). Anything labeled 'likes' beyond post/comment metadata would be fabricated.
 
@@ -360,3 +361,16 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Surfaced in:** `igtrack research <target> --run --question "..." (CLI)`, `igtrack_research_run (MCP tool)`, `Research runs section of igtrack research (CLI report)`
 
 **Pipeline.** A run is created first (question, focus, bounds), then at most RESEARCH_MAX_SOURCES=10 documents are planned: operator URLs first, then search-provider candidates (no provider configured means UNAVAILABLE with the exact reason — never invented sources), then the source URLs of prior claims; deduplicated, sliced to the cap. Every URL and every redirect hop passes the static gate: http(s) on port 80/443 only, no embedded credentials, Instagram/localhost/metadata hosts refused by policy, DNS results checked against private, loopback, link-local and metadata ranges; robots.txt is respected, content types are allowlisted, the body is streamed to a 512KB byte cap under a 10s wall-clock timeout. Extraction reads four fixed field families (JSON-LD, meta tags, mailto addresses, public profile links) — never page prose, so a page cannot prompt-inject its way into a claim. Each candidate passes the same closed predicate registry as operator claims before storage; duplicates are counted, never re-stored; a document fetched within 24h is REUSED unless --refresh. Every per-document outcome, including refusals and failures, is recorded on the run. Depth is fixed at 1: the engine never follows links it did not plan.
+
+### AI-generated personality, relationship and behavioural insights — `UNAVAILABLE`
+
+- **Registry id:** `AI_INSIGHTS`
+- **Live state:** `DOCUMENTED_ABSENT` — No platform field or edge returns these inferences; the exhaustive IG User/Media references contain no personality, relationship or risk attribute. The absence is a finding, not a gap in wiring: adding a provider method is not possible, and no fixture, heuristic or model call will be substituted for one.
+- **Permissions:** No permission can supply this because no provider returns it. Personality, MBTI, relationship, financial and location inferences are model output, not observations; deriving them from this ledger would present inference as evidence.
+- **Provider methods:** —
+- **Persists to:** —
+- **Surfaced in:** `igtrack activity-report <target> (AI Insights tab, always UNAVAILABLE)`, `igtrack_activity_report (MCP tool, ai_insights block)`, `igtrack tracker <target> (ai_insights block, always UNAVAILABLE)`
+
+**Why it is unavailable.** IGTrack has no AI-insight provider. Personality, MBTI, relationship, financial and location inferences are not observations; no supported source returns them, and generating them from this ledger would be fabrication. The AI Insights tab is therefore UNAVAILABLE.
+
+**Pipeline.** The fourth tab renders model-generated inferences — personality and MBTI profiles, relationship reads, risk and location guesses — over a monitored account. IGTrack keeps the tab's place in the report contract and its state, not its content: the tab is present, ordered fourth, and every field is UNAVAILABLE with this registry reason. Observed and derived analytics remain in tabs one and two, where each row carries its source, observation time and evidence hash.

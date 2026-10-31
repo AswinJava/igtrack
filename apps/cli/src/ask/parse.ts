@@ -29,6 +29,7 @@ export const ASK_INTENTS = [
   "research",
   "plan",
   "evidence",
+  "full_audit",
   "audit",
   "lookup",
   "stories",
@@ -77,6 +78,8 @@ export interface ParseOptions {
 }
 
 export const ASK_EXAMPLES = [
+  "audit user @aurora.wilde",
+  "collect everything you can about @aurora.wilde",
   "investigate @aurora.wilde",
   "what changed on @aurora.wilde in the last 7 days?",
   "who does @aurora.wilde interact with most?",
@@ -110,6 +113,7 @@ const PRIORITY: readonly AskIntent[] = [
   "track",
   "work",
   "scan",
+  "full_audit",
   "investigate",
   "reports",
   "report",
@@ -361,17 +365,28 @@ const SPECS: readonly IntentSpec[] = [
     ],
   },
   {
+    // "audit <account>" is the friendly way to ask for everything; the
+    // read-only verification audit keeps the fact-check wording instead.
+    intent: "full_audit",
+    phrases: [
+      { re: /\b(?:full|complete|deep|thorough|comprehensive) audit\b/, weight: 6 },
+      { re: /\baudit (?:the )?(?:user|account|profile|handle|target) @?[a-z0-9._]{1,30}\b/, weight: 6 },
+      { re: /\baudit @[a-z0-9._]{1,30}\b/, weight: 6 },
+      { re: /\b(?:collect|gather|get|find) (?:everything|all (?:the )?(?:information|data|details|info))\b/, weight: 5 },
+      { re: /\b(?:all|every) (?:the )?(?:information|data|details) (?:about|on|for)\b/, weight: 5 },
+      { re: /\bwhat (?:all )?(?:information|data) (?:can you|do you|could you) (?:collect|get|gather|find)\b/, weight: 5 },
+      { re: /\beverything (?:you can|possible|available)\b/, weight: 5 },
+    ],
+    keywords: [{ word: "audit", weight: 2 }],
+  },
+  {
     intent: "audit",
     phrases: [
-      { re: /\baudit\b/, weight: 4 },
-      { re: /\b(?:fact[- ]?check|double[- ]check)\b/, weight: 4 },
-      { re: /\bis (?:this|the data|it) (?:real|accurate|true)\b/, weight: 4 },
+      { re: /\b(?:fact[- ]?check|double[- ]?check)\b/, weight: 4 },
+      { re: /\bis (?:this|the data|it) (?:\w+ )?(?:real|accurate|true|correct)\b/, weight: 4 },
       { re: /\bverify\b/, weight: 3 },
     ],
-    keywords: [
-      { word: "audit", weight: 3 },
-      { word: "verify", weight: 2 },
-    ],
+    keywords: [{ word: "verify", weight: 2 }],
   },
   {
     intent: "lookup",
@@ -722,12 +737,12 @@ function sortScored(a: Scored, b: Scored): number {
 // Entities
 // ---------------------------------------------------------------------------
 
-function cleanHandle(raw: string): string | null {
+function cleanHandle(raw: string, minimum = 2): string | null {
   let value = raw.trim().toLowerCase().replace(/^@/, "");
   value = value.replace(/[.,;:!?)\]}>'"]+$/, "");
   // "vishnu_vichuz_'s posts" names the account, not a different handle.
   value = value.replace(/['’]s$/, "");
-  if (value.length < 2 || value.length > 30) return null;
+  if (value.length < minimum || value.length > 30) return null;
   if (!/^[a-z0-9][a-z0-9._]*$/.test(value)) return null;
   if (!/[a-z]/.test(value)) return null;
   if (RESERVED.has(value)) return null;
@@ -780,9 +795,9 @@ const CUE_WORDS =
 function extractHandle(prompt: string, knownTargets: readonly string[]): string | null {
   // An explicit @handle or profile URL always wins; a tracked name elsewhere in
   // the sentence must never override the account the user actually typed.
-  const at = /(?<![a-z0-9._-])@([a-z0-9._]{2,30})/i.exec(prompt);
+  const at = /(?<![a-z0-9._-])@([a-z0-9._]{1,30})/i.exec(prompt);
   if (at?.[1] !== undefined) {
-    const cleaned = cleanHandle(at[1]);
+    const cleaned = cleanHandle(at[1], 1);
     if (cleaned !== null) return cleaned;
   }
 
@@ -799,13 +814,21 @@ function extractHandle(prompt: string, knownTargets: readonly string[]): string 
   CUE_WORDS.lastIndex = 0;
   for (let cue = CUE_WORDS.exec(lower); cue !== null; cue = CUE_WORDS.exec(lower)) {
     const after = lower.slice(cue.index + cue[0].length);
+    // "audit trail" is the evidence ledger, not an account named "trail".
+    if (/^audit$/i.test(cue[0]) && /^\s*(?:trail|log)\b/i.test(after)) continue;
     const candidates = after.split(/[^a-z0-9._@]+/).filter((token) => token.length > 0);
+    // "audit user x" names the account "x": a word that explicitly introduces
+    // an account may be a one-character handle, while a stray one-letter word
+    // elsewhere in a sentence may not.
+    const introducesAccount = /^(?:user|users|username|account|accounts|profile|profiles|handle|handles|target|targets|named|called|audit|auditing|investigate|investigating|dossier|lookup)$/i.test(
+      cue[0],
+    );
     for (let i = 0; i < Math.min(candidates.length, 4); i += 1) {
       const token = candidates[i] ?? "";
       const stripped = token.replace(/^@/, "");
       if (stripped.length === 0) continue;
       if (RESERVED.has(stripped)) continue;
-      const cleaned = cleanHandle(stripped);
+      const cleaned = cleanHandle(stripped, introducesAccount ? 1 : 2);
       if (cleaned !== null) return cleaned;
     }
   }
@@ -824,7 +847,12 @@ function extractHandle(prompt: string, knownTargets: readonly string[]): string 
   // look like a username, and guessing an account is worse than asking.
   const plain = words(prompt);
   if (plain.length <= 2) {
-    for (const token of plain) {
+    for (let i = 0; i < plain.length; i += 1) {
+      const token = plain[i] ?? "";
+      // "audit trail" / "audit log" name the evidence ledger, not an account.
+      if (i > 0 && /^(?:audit|evidence)$/.test(plain[i - 1] ?? "") && /^(?:trail|log)$/.test(token)) {
+        continue;
+      }
       if (token.length < 3) continue;
       if (RESERVED.has(token)) continue;
       const cleaned = cleanHandle(token);
@@ -975,12 +1003,12 @@ const DB_FREE = new Set<AskIntent>(["guide", "capabilities", "untrack", "stories
 const ADVISORY = new Set<AskIntent>(["untrack", "stories", "public", "post"]);
 const NEEDS_HANDLE = new Set<AskIntent>([
   "track", "untrack", "investigate", "relationships", "insights", "tags",
-  "dossier", "research", "plan", "audit", "lookup", "stories", "public",
+  "dossier", "research", "plan", "full_audit", "audit", "lookup", "stories", "public",
   "report", "reports", "recent", "audience", "export",
 ]);
-const WRITE_INTENTS = new Set<AskIntent>(["track", "untrack", "scan", "work"]);
+const WRITE_INTENTS = new Set<AskIntent>(["track", "untrack", "scan", "work", "full_audit"]);
 const READ_ORDER: readonly AskIntent[] = [
-  "investigate", "report", "reports", "recent", "audience", "export", "digest", "changes",
+  "full_audit", "investigate", "report", "reports", "recent", "audience", "export", "digest", "changes",
   "relationships", "insights", "tags", "dossier", "research", "plan", "evidence",
   "audit", "lookup", "targets", "status",
 ];
@@ -1089,6 +1117,11 @@ export function planAsk(prompt: string, options: ParseOptions = {}): AskPlan {
   if (primary === "digest" && time.since === null) {
     assumptions.push("No window was given, so the digest covers the last 7 days.");
   }
+  if (primary === "full_audit") {
+    assumptions.push(
+      "A full audit collects: it runs every investigation stage the configured sources support, records what it observes with evidence, then reads back the audit. Use `igtrack audit <username>` for the read-only report.",
+    );
+  }
 
   const chosen = new Set<AskIntent>();
   const add = (intent: AskIntent): void => {
@@ -1123,6 +1156,9 @@ export function planAsk(prompt: string, options: ParseOptions = {}): AskPlan {
     chosen.delete("research");
     chosen.delete("plan");
   }
+  // A full audit already reads back the audit report; a verification step in
+  // the same sentence must not run the same read twice.
+  if (chosen.has("full_audit")) chosen.delete("audit");
   if (chosen.size === 0) add(primary);
 
   const intents = canonicalOrder([...chosen]);
@@ -1152,9 +1188,26 @@ export function planAsk(prompt: string, options: ParseOptions = {}): AskPlan {
 
 /** The one-line restatement shown to the user before any work runs. */
 export function describePlan(plan: AskPlan): string {
-  const intents = plan.intents.join(" + ");
+  const intents = plan.intents.join(" + ").replace(/_/g, " ");
   const handle = plan.username === null ? "" : ` @${plan.username}`;
   const window = plan.since === null ? "" : ` · last ${plan.since}`;
   const period = plan.period === null ? "" : ` · ${plan.period}`;
   return `${intents}${handle}${period}${window}`;
+}
+
+/**
+ * Read one answer to "which account?" — a bare name, an @handle, or a profile
+ * URL. An answer is not a sentence: "not sure" is an unreadable answer, never
+ * the account "sure". Kept beside the sentence parser so both surfaces agree
+ * on what a username is.
+ */
+export function parseUsernameAnswer(answer: string): string | null {
+  const trimmed = answer.trim();
+  if (trimmed === "") return null;
+  if (/^(?:https?:\/\/)?(?:www\.)?instagram\.com\//i.test(trimmed)) {
+    return planAsk(trimmed).username;
+  }
+  if (/\s/.test(trimmed)) return null;
+  const token = trimmed.replace(/^@/, "").replace(/[.,;:!?]+$/, "");
+  return cleanHandle(token, 1);
 }

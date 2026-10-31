@@ -10,10 +10,12 @@ import {
   CapabilityErrorKind,
   CapabilityName,
   CapabilityStatus,
+  Confidence,
   EVIDENCE_CLASS,
   EVIDENCE_CLASS_LABELS,
   INVESTIGATION_STAGE,
   INVESTIGATION_STAGE_STATUS,
+  ObservationCategory,
   RegistryCapabilityId,
   claimAgeDays,
   claimSourceDomain,
@@ -21,9 +23,22 @@ import {
   deriveCadence,
   deriveClaimRelation,
   deriveThemes,
+  ACTIVITY_ABSENCE_REASONS,
+  ACTIVITY_PERIODS,
+  activityWindow,
+  buildActivityReport,
   buildPeriodReport,
+  buildTrackerCard,
+  buildTrackerOverview,
+  buildViewerReport,
+  trackerEvidenceNote,
+  trackerRefusals,
+  trackerWindow,
+  parseViewerInput,
   computeAudienceSets,
+  enumerateActivityWindows,
   enumerateReportWindows,
+  renderActivityReportMarkdown,
   renderPeriodReportMarkdown,
   reportWindow,
   REPORT_PERIODS,
@@ -32,10 +47,17 @@ import {
   isClaimDueForReview,
   isMaterialProfileFieldChange,
   normalizeClaimValue,
+  normalizeHandleInput,
   parseAccountReference,
   validateClaimExcerpt,
   validateClaimSourceUrl,
   validateClaimValue,
+  type ActivityAbsenceReasons,
+  type ActivityPeriod,
+  type ActivityReadable,
+  type ActivityReport,
+  type ActivityTrailInput,
+  type ActivityWindow,
   type CapabilityResult,
   type ClaimPredicate,
   type ClaimRelation,
@@ -53,6 +75,15 @@ import {
   type ReportPeriod,
   type ReportWindow,
   type SynthesisTerm,
+  type TrackerCard,
+  type TrackerEvidence,
+  type TrackerOverview,
+  type ViewerAnonSnapshot,
+  type ViewerDownloads,
+  type ViewerPublicSnapshot,
+  type ViewerReport,
+  type ViewerSourceFailure,
+  type ViewerTabKey,
 } from "@igtrack/core";
 import {
   ACTIVITY_TYPES,
@@ -80,6 +111,7 @@ import {
   getTargetChangeSummary,
   getTargetDossier,
   getTargetFollowActivityCounts,
+  getTargetActivityTrail,
   getTargetReportRows,
   getTargetAudienceSnapshots,
   getTargetLedgerStart,
@@ -94,6 +126,7 @@ import {
   listClaims,
   listInsightSeries,
   listJobsForTarget,
+  listProfileSnapshots,
   listProviderMetrics,
   listQueueJobs,
   listRecentDeltas,
@@ -107,8 +140,10 @@ import {
   RELATIONSHIP_SIGNAL_WEIGHTS,
   resolveScanIntervals,
   retractClaim,
+  recordProfileSnapshot,
   schedulingWindowStart,
   transitionTargetStatus,
+  type ActivityBucketUnit,
   type ActivityType,
   type ClaimRecord,
   type Database,
@@ -132,13 +167,22 @@ import {
   type RunOutcome,
 } from "@igtrack/monitoring";
 import {
+  ARCHIVE_PROFILE_SOURCE_ID,
+  ARCHIVE_PROFILE_SOURCE_NAME,
+  AnonStoriesProvider,
   ConfigState,
+  PublicWebProvider,
+  anonViewerSnapshot,
+  publicViewerSnapshot,
   assessReadiness,
+  fetchArchivedProfileHistory,
   isBlocking,
   extractCandidates,
   handleSearchQueries,
   researchSearchProviderFromEnv,
   ResearchFetcher,
+  type ArchiveHistoryResult,
+  type ArchiveHttpResponse,
   type Readiness,
   type ResearchSearchProvider,
   type SearchResult,
@@ -395,7 +439,8 @@ export async function opTargetAdd(
   ctx: CliContext,
   input: TargetAddInput,
 ): Promise<TargetAddResult> {
-  const parsed = parseAccountReference(input.username);
+  const normalized = normalizeHandleInput(input.username);
+  const parsed = parseAccountReference(normalized ?? input.username);
   if (!parsed.ok) {
     throw new UsageError(
       `${parsed.message} \`targets add\` accepts a username, an @handle, or an instagram.com profile URL.`,
@@ -957,6 +1002,82 @@ function parseAtDate(raw: string | undefined, now: Date = new Date()): Date {
   return parsed;
 }
 
+function parseActivityPeriod(raw: string | undefined): ActivityPeriod {
+  const value = (raw ?? "weekly").trim().toLowerCase();
+  if (!(ACTIVITY_PERIODS as readonly string[]).includes(value)) {
+    throw new UsageError(
+      `--period expects one of ${ACTIVITY_PERIODS.join(", ")}, received "${raw ?? ""}".`,
+    );
+  }
+  return value as ActivityPeriod;
+}
+
+const ACTIVITY_BUCKET_UNITS: Record<ActivityPeriod, ActivityBucketUnit> = {
+  daily: "day",
+  weekly: "week",
+  monthly: "month",
+  quarterly: "quarter",
+  yearly: "year",
+};
+
+function activityMonthBounds(at: Date): { start: Date; end: Date } {
+  const start = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), 1));
+  const end = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth() + 1, 1));
+  return { start, end };
+}
+
+/**
+ * Resolve an activity-report `data_id` against the selected target. The id
+ * embeds the period and the exact UTC window start, so an id that names a
+ * different target (or a start the calendar never produces) is refused by
+ * name instead of silently falling back to "now".
+ */
+function activityWindowFromDataId(
+  dataId: string,
+  targetId: string,
+  explicitPeriod: ActivityPeriod | null,
+): ActivityWindow {
+  const prefix = `igtrack:${targetId}:`;
+  if (!dataId.startsWith(prefix)) {
+    throw new UsageError(
+      `--data-id "${dataId}" does not belong to this target. Expected an id beginning with "${prefix}".`,
+    );
+  }
+  // The window start is an ISO timestamp and contains colons of its own, so
+  // split only once: everything after the period segment is the timestamp.
+  const rest = dataId.slice(prefix.length);
+  const separator = rest.indexOf(":");
+  const periodRaw = separator > 0 ? rest.slice(0, separator) : undefined;
+  const startRaw = separator > 0 ? rest.slice(separator + 1) : undefined;
+  if (periodRaw === undefined || startRaw === undefined || startRaw === "") {
+    throw new UsageError(
+      `--data-id "${dataId}" is malformed. Expected igtrack:<target>:<period>:<ISO window start>.`,
+    );
+  }
+  if (!(ACTIVITY_PERIODS as readonly string[]).includes(periodRaw)) {
+    throw new UsageError(
+      `--data-id "${dataId}" names period "${periodRaw}", which is not one of ${ACTIVITY_PERIODS.join(", ")}.`,
+    );
+  }
+  const period = periodRaw as ActivityPeriod;
+  if (explicitPeriod !== null && explicitPeriod !== period) {
+    throw new UsageError(
+      `--data-id selects a ${period} window but --period asked for ${explicitPeriod}. Pass one or the other, or make them agree.`,
+    );
+  }
+  const start = new Date(startRaw);
+  if (Number.isNaN(start.getTime())) {
+    throw new UsageError(`--data-id "${dataId}" has an unparseable window start "${startRaw}".`);
+  }
+  const window = activityWindow(period, start);
+  if (window.start !== start.toISOString()) {
+    throw new UsageError(
+      `--data-id "${dataId}" does not start on a ${period} boundary ("${startRaw}" ≠ "${window.start}").`,
+    );
+  }
+  return window;
+}
+
 function providerCaps(ctx: CliContext): Record<string, boolean> | null {
   const provider = ctx.provider.provider;
   return provider === null ? null : (provider.capabilities() as unknown as Record<string, boolean>);
@@ -976,6 +1097,70 @@ const REPORT_SOURCE_REASONS: Partial<Record<CapabilityName, string>> = {
 function sourceReason(ctx: CliContext, name: CapabilityName): string {
   if (ctx.provider.error !== null) return `Provider is not usable: ${ctx.provider.error}`;
   return REPORT_SOURCE_REASONS[name] ?? "The configured source does not expose this data class.";
+}
+
+/** Registry reasons with the activity-report overrides, shared by both report surfaces. */
+function activityAbsenceReasons(): ActivityAbsenceReasons {
+  const registryReason = (id: RegistryCapabilityId, fallback: string): string =>
+    CAPABILITY_REGISTRY.find((entry) => entry.id === id)?.whyUnavailable ?? fallback;
+  return {
+    ...ACTIVITY_ABSENCE_REASONS,
+    likes: registryReason(RegistryCapabilityId.LIKES, ACTIVITY_ABSENCE_REASONS.likes),
+    highlights: registryReason(RegistryCapabilityId.HIGHLIGHTS, ACTIVITY_ABSENCE_REASONS.highlights),
+    interactions: registryReason(RegistryCapabilityId.INTERACTIONS, ACTIVITY_ABSENCE_REASONS.interactions),
+  };
+}
+
+interface ReportReadableCounts {
+  followDeltas: number;
+  completeFollowers: number;
+  completeFollowing: number;
+  posts: number;
+  stories: number;
+  comments: number;
+  tags: number;
+}
+
+/**
+ * Per-family readability for report surfaces: a family is readable when rows
+ * exist or the configured provider exposes the corresponding method. The two
+ * report surfaces (period report and tracker card) share this so the same
+ * window never disagrees about which answer is possible.
+ */
+function reportReadable(
+  ctx: CliContext,
+  caps: Record<string, boolean> | null,
+  counts: ReportReadableCounts,
+): {
+  follows: ActivityReadable;
+  posts: ActivityReadable;
+  stories: ActivityReadable;
+  comments: ActivityReadable;
+  tags: ActivityReadable;
+} {
+  const can = (name: CapabilityName): boolean => caps?.[name] === true;
+  const family = (name: CapabilityName, rowCount: number): ActivityReadable => {
+    const readable = rowCount > 0 || can(name);
+    return { readable, reason: readable ? null : sourceReason(ctx, name) };
+  };
+  const followsReadable =
+    counts.followDeltas > 0 ||
+    counts.completeFollowers > 0 ||
+    counts.completeFollowing > 0 ||
+    can(CapabilityName.GET_FOLLOWERS) ||
+    can(CapabilityName.GET_FOLLOWING);
+  return {
+    follows: {
+      readable: followsReadable,
+      reason: followsReadable
+        ? null
+        : `${sourceReason(ctx, CapabilityName.GET_FOLLOWERS)} ${sourceReason(ctx, CapabilityName.GET_FOLLOWING)}`.trim(),
+    },
+    posts: family(CapabilityName.GET_PUBLIC_POSTS, counts.posts),
+    stories: family(CapabilityName.GET_STORIES, counts.stories),
+    comments: family(CapabilityName.GET_PUBLIC_COMMENTS, counts.comments),
+    tags: family(CapabilityName.GET_TAGS, counts.tags),
+  };
 }
 
 export interface ReportQuery {
@@ -1205,6 +1390,417 @@ export async function opReport(ctx: CliContext, input: ReportQuery): Promise<Rep
   };
 }
 
+// ---------------------------------------------------------------------------
+// activity-report — the four-tab Activity Report over stored rows
+// ---------------------------------------------------------------------------
+
+export interface ActivityReportQuery {
+  target: string;
+  period?: string | undefined;
+  at?: string | undefined;
+  dataId?: string | undefined;
+  inventoryLimit?: number | undefined;
+}
+
+export interface ActivityReportResult {
+  target: ResolvedTarget;
+  period: ActivityPeriod;
+  window: ActivityWindow;
+  report: ActivityReport;
+  markdown: string;
+  inventoryNote: string;
+}
+
+/**
+ * Events that the activity-report timeline counts. Profile snapshots and
+ * insight points are stored observations but are not activity events in this
+ * report, so they never make a period "delivered".
+ */
+function reportableEventCount(bucket: {
+  newFollowing: number;
+  lostFollowing: number;
+  newFollowers: number;
+  lostFollowers: number;
+  posts: number;
+  stories: number;
+  comments: number;
+  tags: number;
+  mentions: number;
+}): number {
+  return (
+    bucket.newFollowing +
+    bucket.lostFollowing +
+    bucket.newFollowers +
+    bucket.lostFollowers +
+    bucket.posts +
+    bucket.stories +
+    bucket.comments +
+    bucket.tags +
+    bucket.mentions
+  );
+}
+
+export async function opActivityReport(
+  ctx: CliContext,
+  input: ActivityReportQuery,
+): Promise<ActivityReportResult> {
+  const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
+  const explicitPeriod = input.period === undefined ? null : parseActivityPeriod(input.period);
+  const window =
+    input.dataId === undefined
+      ? activityWindow(explicitPeriod ?? "weekly", parseAtDate(input.at))
+      : activityWindowFromDataId(input.dataId, resolved.id, explicitPeriod);
+  const period = window.period;
+
+  const inventoryLimit = input.inventoryLimit ?? 180;
+  if (inventoryLimit < 1 || inventoryLimit > 1040) {
+    throw new UsageError("--inventory-limit must be between 1 and 1040.");
+  }
+
+  const generatedAt = new Date();
+  const rows = await getTargetReportRows(
+    ctx.db,
+    ctx.userId,
+    resolved.id,
+    new Date(window.start),
+    new Date(window.end),
+  );
+  if (rows === null) {
+    throw new CliError("TARGET_NOT_FOUND", `No target matches "${input.target}".`, 2);
+  }
+
+  const unit = ACTIVITY_BUCKET_UNITS[period];
+  const month = activityMonthBounds(new Date(new Date(window.end).getTime() - 1));
+  const [trail, inventoryTrail] = await Promise.all([
+    getTargetActivityTrail(
+      ctx.db,
+      ctx.userId,
+      resolved.id,
+      unit,
+      new Date(window.start),
+      new Date(window.end),
+      month.start,
+      month.end,
+    ),
+    getTargetActivityTrail(
+      ctx.db,
+      ctx.userId,
+      resolved.id,
+      unit,
+      new Date(window.start),
+      generatedAt,
+      month.start,
+      month.end,
+      { includeDetails: false },
+    ),
+  ]);
+  if (trail === null || trail.details === null) {
+    throw new CliError("TARGET_NOT_FOUND", `No target matches "${input.target}".`, 2);
+  }
+
+  const ledgerStart = rows.earliestActivityAt ?? new Date(window.start);
+  const inventoryWindows = enumerateActivityWindows(period, ledgerStart, generatedAt, inventoryLimit);
+  if (!inventoryWindows.some((entry) => entry.start === window.start)) {
+    inventoryWindows.push(window);
+  }
+  const inventoryBuckets = new Map(
+    (inventoryTrail?.buckets ?? []).map((bucket) => [bucket.bucket, bucket]),
+  );
+  const inventory = inventoryWindows.map((entry) => {
+    const bucket = inventoryBuckets.get(entry.start.slice(0, 10));
+    return { window: entry, eventCount: bucket === undefined ? 0 : reportableEventCount(bucket) };
+  });
+
+  const caps = providerCaps(ctx);
+  const readable = reportReadable(ctx, caps, {
+    followDeltas: rows.followDeltas.length,
+    completeFollowers: rows.followersCoverage.complete,
+    completeFollowing: rows.followingCoverage.complete,
+    posts: rows.posts.length,
+    stories: rows.stories.length,
+    comments: rows.comments.length,
+    tags: rows.tags.length,
+  });
+
+  const rowEvidenceIds = [
+    ...rows.followDeltas.map((delta) => delta.evidenceId),
+    ...rows.posts.map((post) => post.evidenceId),
+    ...rows.stories.map((story) => story.evidenceId),
+    ...rows.comments.map((comment) => comment.evidenceId),
+    ...rows.mentions.map((mention) => mention.evidenceId),
+    ...rows.tags.map((tag) => tag.evidenceId),
+    ...trail.details.recentComments.map((comment) => comment.evidenceId),
+  ];
+  const rowSourceInfo = await getEvidenceSourceInfo(ctx.db, rowEvidenceIds);
+  const rowSourceIds = [...new Set([...rowSourceInfo.values()].map((info) => info.sourceId))].sort();
+  const evidenceClass = classifySourceIds(rowSourceIds);
+  const evidenceNote = trackerEvidenceNote(evidenceClass);
+
+  const absence = activityAbsenceReasons();
+
+  const topCommenterByBucket = new Map(
+    trail.details.topCommenterByBucket.map((row) => [
+      row.bucket,
+      { username: row.username, count: row.count },
+    ]),
+  );
+  const trailInput: ActivityTrailInput = {
+    sinceDate: trail.sinceDate,
+    completeRosterSnapshots: trail.completeRosterSnapshots,
+    buckets: trail.buckets.map((bucket) => ({
+      ...bucket,
+      topCommenter: topCommenterByBucket.get(bucket.bucket) ?? null,
+    })),
+    monthCounts: trail.details.monthCounts,
+    completeRosterBeforeMonth: trail.details.completeRosterBeforeMonth,
+    completeRosterInMonth: trail.details.completeRosterInMonth,
+    topCommenters: trail.details.topCommenters,
+    topMentioned: trail.details.topMentioned,
+    captions: trail.details.captions,
+    captionRows: trail.details.captionRows,
+    recentComments: trail.details.recentComments,
+    followingRosterSize: trail.details.followingRosterSize,
+  };
+
+  const inventoryNote =
+    `Periods are enumerated backwards from ${generatedAt.toISOString()} in UTC ${period} units. ` +
+    "DELIVERED means the period closed and at least one stored activity row falls inside it; " +
+    "EMPTY means it closed with none; IN_PROGRESS means its end is after this run. " +
+    "Profile snapshots and insight points are stored observations but not activity rows, so they never make a period delivered. " +
+    "Daily periods are marked Beta; no preview task is polled because IGTrack composes them directly.";
+
+  const report = buildActivityReport({
+    target: {
+      id: resolved.id,
+      username: rows.account.username,
+      platformId: rows.account.igId,
+      observationMode: rows.target.observationMode,
+      localName: rows.target.localName,
+    },
+    period,
+    window,
+    generatedAt: generatedAt.toISOString(),
+    evidence: {
+      sourceIds: rowSourceIds,
+      evidenceClass,
+      synthetic: evidenceClass === "SYNTHETIC",
+      note: evidenceNote,
+    },
+    readable,
+    followCoverage: {
+      followers: rows.followersCoverage,
+      following: rows.followingCoverage,
+    },
+    absence,
+    rows: {
+      followDeltas: rows.followDeltas,
+      posts: rows.posts,
+      stories: rows.stories,
+      comments: rows.comments,
+      mentions: rows.mentions,
+      tags: rows.tags,
+    },
+    trail: trailInput,
+    inventory,
+    inventoryNote,
+  });
+
+  return {
+    target: resolved,
+    period,
+    window,
+    report,
+    markdown: renderActivityReportMarkdown(report),
+    inventoryNote,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// tracker — the watchlist and its per-account card.
+//
+// Same ledger, same window arithmetic, same refusals as activity-report; the
+// difference is shape: one row per tracked account with a closed-period card,
+// instead of one account with four tabs. Read-only: it never scans or queues.
+// ---------------------------------------------------------------------------
+
+export interface TrackerQuery {
+  target?: string | undefined;
+  period?: string | undefined;
+  at?: string | undefined;
+  limit?: number | undefined;
+}
+
+export interface TrackerResult {
+  mode: "overview" | "target";
+  period: ActivityPeriod;
+  window: ActivityWindow;
+  overview: TrackerOverview | null;
+  card: TrackerCard | null;
+}
+
+const TRACKER_DEFAULT_LIMIT = 12;
+const TRACKER_MAX_LIMIT = 50;
+
+export async function opTracker(ctx: CliContext, input: TrackerQuery): Promise<TrackerResult> {
+  const period = parseActivityPeriod(input.period);
+  const limit = input.limit ?? TRACKER_DEFAULT_LIMIT;
+  if (!Number.isInteger(limit) || limit < 1 || limit > TRACKER_MAX_LIMIT) {
+    throw new UsageError(`--limit must be an integer between 1 and ${TRACKER_MAX_LIMIT}.`);
+  }
+
+  const generatedAt = new Date();
+  const explicitAt = input.at !== undefined && input.at.trim() !== "";
+  const window = trackerWindow(period, {
+    at: parseAtDate(input.at, generatedAt),
+    explicitAt,
+    now: generatedAt,
+  });
+
+  const allTargets = await listTargetsForUser(ctx.db, ctx.userId);
+  const caps = providerCaps(ctx);
+  const absence = activityAbsenceReasons();
+
+  const buildFor = async (
+    item: TargetListItem,
+  ): Promise<{ card: TrackerCard }> => {
+    const rows = await getTargetReportRows(
+      ctx.db,
+      ctx.userId,
+      item.id,
+      new Date(window.start),
+      new Date(window.end),
+    );
+    if (rows === null) {
+      throw new CliError(
+        "TARGET_NOT_FOUND",
+        `Target @${item.username} is not owned by this user.`,
+        2,
+      );
+    }
+    const readable = reportReadable(ctx, caps, {
+      followDeltas: rows.followDeltas.length,
+      completeFollowers: rows.followersCoverage.complete,
+      completeFollowing: rows.followingCoverage.complete,
+      posts: rows.posts.length,
+      stories: rows.stories.length,
+      comments: rows.comments.length,
+      tags: rows.tags.length,
+    });
+
+    const evidenceIds = [
+      ...rows.followDeltas.map((delta) => delta.evidenceId),
+      ...rows.posts.map((post) => post.evidenceId),
+      ...rows.stories.map((story) => story.evidenceId),
+      ...rows.comments.map((comment) => comment.evidenceId),
+      ...rows.mentions.map((mention) => mention.evidenceId),
+      ...rows.tags.map((tag) => tag.evidenceId),
+    ];
+    const rowSourceInfo = await getEvidenceSourceInfo(ctx.db, evidenceIds);
+    const sourceIds = [...new Set([...rowSourceInfo.values()].map((info) => info.sourceId))].sort();
+    const evidenceClass = classifySourceIds(sourceIds);
+    const evidence: TrackerEvidence = {
+      sourceIds,
+      evidenceClass,
+      synthetic: evidenceClass === "SYNTHETIC",
+      note: trackerEvidenceNote(evidenceClass),
+    };
+
+    const card = buildTrackerCard({
+      target: {
+        id: rows.target.id,
+        username: rows.account.username,
+        localName: rows.target.localName,
+        observationMode: rows.target.observationMode,
+        status: rows.target.status,
+        isPrivate: item.isPrivate,
+        trackingSince: rows.target.createdAt.toISOString(),
+        lastObservedAt: item.lastObserved?.toISOString() ?? null,
+        latestJob: {
+          status: item.latestJobStatus,
+          outcome: item.latestJobOutcome,
+          completedAt: item.latestJobCompletedAt?.toISOString() ?? null,
+          availableAt: item.latestJobAvailableAt?.toISOString() ?? null,
+        },
+      },
+      period,
+      window,
+      generatedAt: generatedAt.toISOString(),
+      evidence,
+      readable,
+      followCoverage: {
+        followers: rows.followersCoverage,
+        following: rows.followingCoverage,
+      },
+      absence,
+      rows: {
+        followDeltas: rows.followDeltas,
+        posts: rows.posts,
+        stories: rows.stories,
+        comments: rows.comments,
+        mentions: rows.mentions,
+        tags: rows.tags,
+      },
+    });
+    return { card };
+  };
+
+  if (input.target !== undefined && input.target.trim() !== "") {
+    const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
+    const item = allTargets.find((entry) => entry.id === resolved.id);
+    if (item === undefined) {
+      throw new CliError("TARGET_NOT_FOUND", `No target matches "${input.target}".`, 2);
+    }
+    const { card } = await buildFor(item);
+    return { mode: "target", period, window, overview: null, card };
+  }
+
+  const sorted = [...allTargets].sort((a, b) => {
+    const aTime = a.lastObserved?.getTime() ?? Number.NEGATIVE_INFINITY;
+    const bTime = b.lastObserved?.getTime() ?? Number.NEGATIVE_INFINITY;
+    if (aTime !== bTime) return bTime - aTime;
+    return a.username.localeCompare(b.username);
+  });
+  const displayed = sorted.slice(0, limit);
+  const cards: TrackerCard[] = [];
+  for (const item of displayed) {
+    const { card } = await buildFor(item);
+    cards.push(card);
+  }
+
+  const overviewSourceIds = [
+    ...new Set(cards.flatMap((card) => card.evidence.sourceIds)),
+  ].sort();
+  const overviewClass = classifySourceIds(overviewSourceIds);
+  const overviewEvidence: TrackerEvidence = {
+    sourceIds: overviewSourceIds,
+    evidenceClass: overviewClass,
+    synthetic: overviewClass === "SYNTHETIC",
+    note: trackerEvidenceNote(overviewClass),
+  };
+
+  const overview = buildTrackerOverview({
+    period,
+    window,
+    generatedAt: generatedAt.toISOString(),
+    totals: {
+      tracked: allTargets.length,
+      active: allTargets.filter((entry) => entry.status === "ACTIVE").length,
+      paused: allTargets.filter((entry) => entry.status === "PAUSED").length,
+      stopped: allTargets.filter((entry) => entry.status === "STOPPED").length,
+      displayed: cards.length,
+    },
+    cards,
+    evidence: overviewEvidence,
+    refusals: trackerRefusals(absence),
+    note:
+      allTargets.length === 0
+        ? "No target is tracked in this deployment. Use `igtrack targets add <username>` to start observing; the tracker never adds a target itself."
+        : `The watchlist reads stored rows only; it never scans or queues work. Each card selects the latest closed ${period} window unless --at names one. Cards are sorted by last observation (newest first), then username.`,
+  });
+
+  return { mode: "overview", period, window, overview, card: null };
+}
+
 export interface ReportIndexEntry {
   window: ReportWindow;
   state: "COVERED" | "EMPTY" | "IN_PROGRESS";
@@ -1404,6 +2000,147 @@ export interface RecentRow {
   mutualNow: boolean | null;
 }
 
+export interface CountPoint {
+  /** When the counts describe the account: an archive capture time or a direct observation time. */
+  observedAt: string;
+  sourceId: string;
+  evidenceId: string | null;
+  evidenceClass: EvidenceClass | null;
+  followerCount: number | null;
+  followingCount: number | null;
+  postCount: number | null;
+  completeness: "COMPLETE" | "PARTIAL";
+}
+
+export interface CountInterval {
+  from: string;
+  to: string;
+  /** Difference between the two points; null when either side did not carry that figure. */
+  followerDelta: number | null;
+  followingDelta: number | null;
+  postDelta: number | null;
+}
+
+/**
+ * Count-level activity derived from stored profile snapshots. This is the only
+ * recent-activity surface that works on the FIRST look at a public account:
+ * the platform exposes no roster and no follow timestamp, but archived profile
+ * captures carry exact counts at known times. A count delta is movement of a
+ * number — it is never a claim about who followed or unfollowed.
+ */
+export interface CountActivity {
+  state: "OBSERVED" | "EMPTY" | "UNAVAILABLE";
+  points: CountPoint[];
+  intervals: CountInterval[];
+  net: {
+    followerDelta: number | null;
+    followingDelta: number | null;
+    postDelta: number | null;
+  };
+  sources: string[];
+  reason: string | null;
+}
+
+function countDelta(from: number | null, to: number | null): number | null {
+  return from === null || to === null ? null : to - from;
+}
+
+function buildCountActivity(
+  snapshots: Array<{
+    observedAt: Date;
+    sourceId: string;
+    evidenceId: string | null;
+    followerCount: number | null;
+    followingCount: number | null;
+    postCount: number | null;
+    completeness: string;
+  }>,
+  since: Date,
+  until: Date,
+): CountActivity {
+  const points: CountPoint[] = snapshots
+    .filter((row) => row.observedAt.getTime() >= since.getTime() && row.observedAt.getTime() <= until.getTime())
+    .sort((a, b) => a.observedAt.getTime() - b.observedAt.getTime())
+    .map((row) => ({
+      observedAt: row.observedAt.toISOString(),
+      sourceId: row.sourceId,
+      evidenceId: row.evidenceId,
+      evidenceClass: evidenceClassForSource(row.sourceId),
+      followerCount: row.followerCount,
+      followingCount: row.followingCount,
+      postCount: row.postCount,
+      completeness: row.completeness === "PARTIAL" ? "PARTIAL" : "COMPLETE",
+    }));
+
+  const sources = [...new Set(points.map((point) => point.sourceId))];
+  if (points.length === 0) {
+    return {
+      state: "UNAVAILABLE",
+      points,
+      intervals: [],
+      net: { followerDelta: null, followingDelta: null, postDelta: null },
+      sources,
+      reason:
+        "No profile-count observation is stored in this window. A count is recorded only when a source returned an exact integer; rounded prose is never used.",
+    };
+  }
+
+  const intervals: CountInterval[] = [];
+  for (let i = 1; i < points.length; i += 1) {
+    const previous = points[i - 1];
+    const current = points[i];
+    if (previous === undefined || current === undefined) continue;
+    const followerDelta = countDelta(previous.followerCount, current.followerCount);
+    const followingDelta = countDelta(previous.followingCount, current.followingCount);
+    const postDelta = countDelta(previous.postCount, current.postCount);
+    if (followerDelta === null && followingDelta === null && postDelta === null) continue;
+    intervals.push({
+      from: previous.observedAt,
+      to: current.observedAt,
+      followerDelta,
+      followingDelta,
+      postDelta,
+    });
+  }
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  const net = {
+    followerDelta: first === undefined || last === undefined ? null : countDelta(first.followerCount, last.followerCount),
+    followingDelta: first === undefined || last === undefined ? null : countDelta(first.followingCount, last.followingCount),
+    postDelta: first === undefined || last === undefined ? null : countDelta(first.postCount, last.postCount),
+  };
+
+  if (intervals.length === 0) {
+    return {
+      state: "UNAVAILABLE",
+      points,
+      intervals,
+      net,
+      sources,
+      reason:
+        points.length === 1
+          ? "One count observation covers this window. A delta needs a second observation, so no movement is claimed."
+          : "The stored count observations do not share a figure that can be compared; no delta is claimed.",
+    };
+  }
+
+  const changed = intervals.some(
+    (interval) =>
+      (interval.followerDelta ?? 0) !== 0 ||
+      (interval.followingDelta ?? 0) !== 0 ||
+      (interval.postDelta ?? 0) !== 0,
+  );
+  return {
+    state: changed ? "OBSERVED" : "EMPTY",
+    points,
+    intervals,
+    net,
+    sources,
+    reason: null,
+  };
+}
+
 export interface RecentResult {
   target: ResolvedTarget;
   since: Date;
@@ -1413,6 +2150,8 @@ export interface RecentResult {
   rows: RecentRow[];
   limit: number;
   truncated: boolean;
+  /** Count-level movement from stored profile snapshots; works without a roster. */
+  countActivity: CountActivity;
   baseline: {
     followers: {
       baselineAt: string | null;
@@ -1463,6 +2202,14 @@ export async function opRecent(
   if (snapshots === null) {
     throw new CliError("TARGET_NOT_FOUND", `No target matches "${input.target}".`, 2);
   }
+
+  // Count-level movement is independent of the roster baseline: an archived
+  // profile capture or a direct observation carries exact counts even when no
+  // roster can be enumerated. A delta here is movement of a number, never an
+  // identity claim.
+  const owned = await getOwnedTarget(ctx.db, ctx.userId, resolved.id);
+  const profileRows =
+    owned === null ? [] : await listProfileSnapshots(ctx.db, owned.igAccountId, { limit: 500 });
 
   const baselineCandidates = [
     wantsFollowing ? snapshots.following.baselineAt : null,
@@ -1519,6 +2266,7 @@ export async function opRecent(
     snapshots.following.evidenceId,
   ]);
   const evidence = classifySourceInfo(evidenceInfo);
+  const countActivity = buildCountActivity(profileRows, since, new Date());
 
   const rows: RecentRow[] = shown.map((delta) => {
     const roster = delta.direction === "FOLLOWING" ? snapshots.following : snapshots.followers;
@@ -1571,8 +2319,19 @@ export async function opRecent(
   }
   if (state === "UNAVAILABLE") {
     notes.push(
-      "Recent activity needs a stored baseline. Rosters come from an owner export (import provider) or an authorized Graph session; a logged-out page source cannot enumerate a roster.",
+      "Recent identity activity needs a stored roster baseline. Rosters come from an owner export (import provider) or an authorized Graph session; a logged-out page source cannot enumerate a roster. " +
+        (countActivity.state === "OBSERVED"
+          ? "The count history below still shows count-level movement over the same window."
+          : ""),
     );
+  }
+  if (countActivity.state === "OBSERVED") {
+    notes.push(
+      "countActivity is derived from exact profile counts at stored observation times (public archive captures and direct observations). " +
+        "A count delta is movement of a number; it never names who followed or unfollowed, and deletions or deactivations can move a count without a follow change.",
+    );
+  } else if (countActivity.reason !== null) {
+    notes.push(`countActivity: ${countActivity.reason}`);
   }
   if (deltaRows.length > limit) {
     notes.push(
@@ -1606,6 +2365,7 @@ export async function opRecent(
     rows,
     limit,
     truncated: deltaRows.length > limit,
+    countActivity,
     baseline: {
       followers: side(snapshots.followers),
       following: side(snapshots.following),
@@ -3369,8 +4129,12 @@ export async function opLookup(
   ctx: CliContext,
   input: { username: string; provider?: InstagramProvider | undefined },
 ): Promise<LookupResult> {
-  const username = input.username.trim().replace(/^@/, "");
-  if (username === "") throw new UsageError("lookup requires a username.");
+  const username = normalizeHandleInput(input.username);
+  if (username === null) {
+    throw new UsageError(
+      "lookup requires an Instagram username, an @handle, or an instagram.com profile URL.",
+    );
+  }
   const provider = input.provider ?? ctx.provider.provider;
   if (provider === null) {
     // Configuration failed before any request could be built. The message
@@ -6287,9 +7051,93 @@ function auditEvidenceLabel(ctx: CliContext): string {
   return "LIVE — the official Instagram Graph API, scoped to the authorized account.";
 }
 
+/** The web section of an audit that skipped the phase on purpose. */
+function auditWebSkipped(maxSources: number | undefined): AuditWebReport {
+  return {
+    attempted: false,
+    sourcesAvailable: false,
+    search: {
+      provider: null,
+      state: "SEARCH_NOT_CONFIGURED",
+      queries: [],
+      perQuery: [],
+      candidateUrls: 0,
+      relevantCandidates: 0,
+      unavailableReason:
+        "skipped on purpose: the acquisition half of this full audit already ran the public-web stage",
+      note: null,
+    },
+    retrievalState: "NOT_ATTEMPTED",
+    outcomeClass: "SEARCH_UNAVAILABLE",
+    bounds: {
+      maxSources: maxSources ?? AUDIT_WEB_MAX_SOURCES,
+      maxDepth: 1,
+      enforced: "no document was planned by this read-back half",
+      documentsTruncated: 0,
+    },
+    candidates: [],
+    documents: [],
+    facts: [],
+    relations: [],
+    rejectedUrls: [],
+    totals: { planned: 0, fetched: 0, failed: 0, skipped: 0, pagesNamingHandle: 0, facts: 0, refused: 0, unattributed: 0 },
+    inferences: "None. This half read no page and asserts nothing about the open web.",
+    why:
+      "The public-web phase was skipped here on purpose: this report is the read-back half of a full audit, " +
+      "whose acquisition half already searched and read public pages. Its queries, sources and statements are " +
+      "reported in the investigation section — asking the same index twice would spend the same budget twice.",
+    notes: [],
+  };
+}
+
+/** The web section of an audit whose web phase could not start. */
+function auditWebUnavailable(message: string, maxSources: number | undefined): AuditWebReport {
+  return {
+    attempted: false,
+    sourcesAvailable: false,
+    search: {
+      provider: null,
+      state: "SEARCH_NOT_CONFIGURED",
+      queries: [],
+      perQuery: [],
+      candidateUrls: 0,
+      relevantCandidates: 0,
+      unavailableReason: message,
+      note: null,
+    },
+    retrievalState: "NOT_ATTEMPTED",
+    outcomeClass: "SEARCH_UNAVAILABLE",
+    bounds: {
+      maxSources: maxSources ?? AUDIT_WEB_MAX_SOURCES,
+      maxDepth: 1,
+      enforced: "no document was planned: the web phase could not start",
+      documentsTruncated: 0,
+    },
+    candidates: [],
+    documents: [],
+    facts: [],
+    relations: [],
+    rejectedUrls: [],
+    totals: { planned: 0, fetched: 0, failed: 0, skipped: 0, pagesNamingHandle: 0, facts: 0, refused: 0, unattributed: 0 },
+    inferences: "None. No page was read, so nothing is asserted and nothing is inferred.",
+    why: `No request was made: ${message}`,
+    notes: [],
+  };
+}
+
 export async function opAudit(
   ctx: CliContext,
-  input: { username: string; urls?: readonly string[]; maxSources?: number },
+  input: {
+    username: string;
+    urls?: readonly string[];
+    maxSources?: number;
+    /**
+     * Set false from `opFullAudit`, whose acquisition half already searched
+     * and read public pages: the report then says the phase ran elsewhere
+     * instead of asking one index twice for the same answer.
+     */
+    web?: boolean;
+  },
   // Structural subsets, exactly as `research --run` takes them: the audit's
   // web phase is exercised against a scripted transport in tests, and never
   // opens a socket the operator did not ask for.
@@ -6527,54 +7375,29 @@ export async function opAudit(
   // A broken search-provider configuration is reported as a CONFIGURATION
   // error — never as "no web sources exist" (invariant 7).
   let web: AuditWebReport;
-  try {
-    web = await opAuditWebProbe(
-      {
-        username,
-        ...(input.urls !== undefined ? { urls: input.urls } : {}),
-        ...(input.maxSources !== undefined ? { maxSources: input.maxSources } : {}),
-      },
-      deps,
-    );
-  } catch (err) {
-    if (!(err instanceof AppError)) throw err;
-    errors.push({
-      step: "web",
-      code: "CONFIGURATION_ERROR",
-      message: err.message,
-      retryable: false,
-    });
-    web = {
-      attempted: false,
-      sourcesAvailable: false,
-      search: {
-        provider: null,
-        state: "SEARCH_NOT_CONFIGURED",
-        queries: [],
-        perQuery: [],
-        candidateUrls: 0,
-        relevantCandidates: 0,
-        unavailableReason: err.message,
-        note: null,
-      },
-      retrievalState: "NOT_ATTEMPTED",
-      outcomeClass: "SEARCH_UNAVAILABLE",
-      bounds: {
-        maxSources: input.maxSources ?? AUDIT_WEB_MAX_SOURCES,
-        maxDepth: 1,
-        enforced: "no document was planned: the web phase could not start",
-        documentsTruncated: 0,
-      },
-      candidates: [],
-      documents: [],
-      facts: [],
-      relations: [],
-      rejectedUrls: [],
-      totals: { planned: 0, fetched: 0, failed: 0, skipped: 0, pagesNamingHandle: 0, facts: 0, refused: 0, unattributed: 0 },
-      inferences: "None. No page was read, so nothing is asserted and nothing is inferred.",
-      why: `No request was made: ${err.message}`,
-      notes: [],
-    };
+  const webSkipped = input.web === false;
+  if (webSkipped) {
+    web = auditWebSkipped(input.maxSources);
+  } else {
+    try {
+      web = await opAuditWebProbe(
+        {
+          username,
+          ...(input.urls !== undefined ? { urls: input.urls } : {}),
+          ...(input.maxSources !== undefined ? { maxSources: input.maxSources } : {}),
+        },
+        deps,
+      );
+    } catch (err) {
+      if (!(err instanceof AppError)) throw err;
+      errors.push({
+        step: "web",
+        code: "CONFIGURATION_ERROR",
+        message: err.message,
+        retryable: false,
+      });
+      web = auditWebUnavailable(err.message, input.maxSources);
+    }
   }
 
   // --- Phase 5: what can never be observed, what to do, and what this is not.
@@ -6642,6 +7465,10 @@ export async function opAudit(
         `The public-web phase is PARTIAL by construction: ${web.totals.failed} document(s) failed, ${web.totals.skipped} refused by policy without a request, and ${web.bounds.documentsTruncated} candidate(s) were not fetched. Incomplete coverage is reported as incomplete, never as "nothing found".`,
       );
     }
+  } else if (webSkipped) {
+    limitations.push(
+      "The public-web phase was not run by this half: the acquisition half of the full audit already searched and read public pages, and reports them with their citations. No page was read here, so nothing in this report reflects the open web by itself.",
+    );
   } else if (configState !== "CONFIGURATION_ERROR") {
     limitations.push(
       web.search.state === "SEARCH_NOT_CONFIGURED"
@@ -6740,7 +7567,7 @@ export async function opAudit(
         "a fact you judge worth keeping is filed by you, with its citation — this audit stores nothing, and the ledger refuses any predicate the registry does not allow",
     });
   }
-  if (!web.attempted && configState !== "CONFIGURATION_ERROR") {
+  if (!web.attempted && !webSkipped && configState !== "CONFIGURATION_ERROR") {
     nextSteps.push({
       action: `igtrack audit ${username} --url "https://example.org/about"`,
       because:
@@ -6795,7 +7622,9 @@ export async function opAudit(
       }; ${
         web.attempted
           ? `${web.totals.facts} public-web statement(s) across ${web.totals.fetched} page(s)`
-          : "no public-web source was read"
+          : webSkipped
+            ? "public-web discovery ran in the acquisition half of this full audit, not here"
+            : "no public-web source was read"
       }.`,
     classes: [
       {
@@ -7109,6 +7938,8 @@ function evidenceClassForSource(sourceId: string): EvidenceClass {
   if (kind === "import") return EVIDENCE_CLASS.EXPORT;
   if (kind === "graph") return EVIDENCE_CLASS.PLATFORM;
   if (kind === "public") return EVIDENCE_CLASS.WEB;
+  // An archived page is a public web record, never an operator finding.
+  if (kind === "archive") return EVIDENCE_CLASS.WEB;
   return EVIDENCE_CLASS.OPERATOR;
 }
 
@@ -7792,6 +8623,734 @@ export async function opInvestigate(
   };
 }
 
+// ---------------------------------------------------------------------------
+// full audit — the friendly "audit user x" answer: COLLECT first, then read
+// the read-only audit back over what was just recorded.
+//
+// `opAudit` alone is deliberately read-only: it probes once and reads what is
+// stored. That is the right verification posture and the wrong answer to
+// "get everything you can about this account" from a fresh deployment, where
+// nothing is stored yet. This operation joins the two halves:
+//
+//   1. Collection: `opInvestigate` runs every stage the configured sources
+//      support, persists what it observes, and reports every gap.
+//   2. Read-back: `opAudit` verifies the configuration and the stored record.
+//      Its own public-web phase is skipped because the acquisition half
+//      already searched and read pages — the same queries would spend the
+//      same budget twice.
+//
+// The surfaces ledger is the direct answer to "what information can you
+// collect": one row per surface, COLLECTED / EMPTY / UNAVAILABLE, each with
+// its count, its evidence class and the reason it is not there. It is derived
+// from the investigation this run produced, never from the capability
+// registry's promises.
+// ---------------------------------------------------------------------------
+
+/** One information surface and what this run actually collected from it. */
+export interface FullAuditSurface {
+  /** The information surface, in the operator's language. */
+  surface: string;
+  /**
+   * COLLECTED — at least one item was retrieved.
+   * EMPTY — the source answered and the answer held nothing.
+   * UNAVAILABLE — the surface could not be read; `detail` carries the reason.
+   */
+  state: "COLLECTED" | "EMPTY" | "UNAVAILABLE";
+  /** Items retrieved; null when the surface was not read. */
+  items: number | null;
+  /** What the items are — or why there are none. */
+  detail: string;
+  /** The evidence class of the items (LIVE / SYNTHETIC / WEB / OPERATOR / DERIVED), or null. */
+  evidence: string | null;
+}
+
+export interface FullAuditResult {
+  generatedAt: string;
+  /** Exactly what was passed in, before normalization. */
+  requested: string;
+  /** The normalized username every section is about. */
+  username: string;
+  referenceForm: string;
+  collection: {
+    /** Whether the collection half ran. False only when the provider cannot run. */
+    ran: boolean;
+    /** Why collection did not run; null when it did. */
+    skipReason: string | null;
+    /** The collection half's full report, when it ran. */
+    investigation: InvestigateResult | null;
+  };
+  /** The read-only audit over what is now stored. */
+  audit: AuditReport;
+  /**
+   * Recent-activity evidence for the account: the public-archive count series
+   * that was collected, and the roster-delta read-back. Count movement works
+   * on a first look; named follows need a COMPLETE roster baseline.
+   */
+  activity: {
+    windowDays: number;
+    archive: CollectHistoryResult;
+    recent: RecentResult | null;
+  } | null;
+  /** One row per information surface: collected, empty, or unavailable and why. */
+  surfaces: FullAuditSurface[];
+  /** Everything the investigation could not get, and what would change that. */
+  gaps: InvestigationGap[];
+  /** What to run next, collection steps first. */
+  nextSteps: Array<{ action: string; because: string }>;
+  notes: string[];
+}
+
+/** Build the surfaces ledger from what the investigation actually produced. */
+function fullAuditSurfaces(
+  investigation: InvestigateResult,
+  activity?: { history: CollectHistoryResult; recent: RecentResult | null },
+): FullAuditSurface[] {
+  const report = investigation.report;
+  const routeClass = investigation.identity.route?.evidenceClass ?? "NONE";
+  // One vocabulary for the ledger: the stored record's four-value class
+  // (LIVE/SYNTHETIC/MIXED/NONE) does not name the ROUTE, so a live route is
+  // expressed as the class of the source that actually answered.
+  const platformClass =
+    routeClass === "LIVE"
+      ? (investigation.investigation.sources[0]?.evidenceClass ?? EVIDENCE_CLASS.PLATFORM)
+      : routeClass === "SYNTHETIC"
+        ? EVIDENCE_CLASS.SYNTHETIC
+        : routeClass === "MIXED"
+          ? "MIXED"
+          : null;
+  const rows: FullAuditSurface[] = [];
+
+  const stageOf = (id: InvestigationStage["id"]): InvestigationStage | undefined =>
+    investigation.investigation.stages.find((s) => s.id === id);
+
+  const stateFor = (items: number, stage: InvestigationStage | undefined): FullAuditSurface["state"] =>
+    items > 0
+      ? "COLLECTED"
+      : stage !== undefined &&
+          (stage.status === INVESTIGATION_STAGE_STATUS.BLOCKED ||
+            stage.status === INVESTIGATION_STAGE_STATUS.SKIPPED)
+        ? "UNAVAILABLE"
+        : "EMPTY";
+
+  const add = (
+    surface: string,
+    items: number,
+    stage: InvestigationStage | undefined,
+    detail: string,
+    evidence: string | null,
+    // Surfaces computed from the stored rows carry their own availability
+    // (the themes/cadence/audience blocks say DERIVED or UNAVAILABLE); they
+    // have no stage to ask.
+    forcedState?: FullAuditSurface["state"],
+  ): void => {
+    const state = forcedState ?? stateFor(items, stage);
+    rows.push({
+      surface,
+      state,
+      items: state === "UNAVAILABLE" ? null : items,
+      detail:
+        state === "UNAVAILABLE" && forcedState === undefined ? (stage?.reason ?? detail) : detail,
+      evidence: state === "COLLECTED" ? evidence : null,
+    });
+  };
+
+  const identityStage = stageOf(INVESTIGATION_STAGE.IDENTITY);
+  const account = investigation.identity.account;
+  add(
+    "Account identity",
+    identityStage?.status === INVESTIGATION_STAGE_STATUS.BLOCKED ? 0 : 1,
+    identityStage,
+    identityStage?.status === INVESTIGATION_STAGE_STATUS.BLOCKED
+      ? (identityStage.reason ?? "the source did not resolve this account")
+      : [
+          `@${account.username}`,
+          account.displayName === null ? null : `name "${account.displayName}"`,
+          account.igId === null ? "no platform id" : `platform id ${account.igId}`,
+          account.isPrivate === null ? null : `private ${String(account.isPrivate)}`,
+          account.isVerified === null ? null : `verified ${String(account.isVerified)}`,
+          account.accountType === null ? null : `type ${account.accountType}`,
+        ]
+          .filter((part): part is string => part !== null)
+          .join(" · "),
+    identityStage?.status === INVESTIGATION_STAGE_STATUS.BLOCKED ? null : platformClass,
+  );
+
+  const platformStage = stageOf(INVESTIGATION_STAGE.PLATFORM);
+  const latest = investigation.platform.profile.latest;
+  add(
+    "Profile and counts",
+    investigation.platform.profile.snapshotCount,
+    platformStage,
+    latest === null
+      ? "no profile snapshot is stored: the source exposed no profile fields for this account"
+      : `${latest.followerCount ?? "null"} follower(s) · ${latest.followingCount ?? "null"} following · ` +
+        `${latest.postCount ?? "null"} post(s) as reported at ${latest.observedAt} (${latest.sourceId}); ` +
+        `${investigation.platform.profile.snapshotCount} snapshot(s) on record; "null" = the source did not return the figure, never zero`,
+    platformClass,
+  );
+
+  const contentStage = stageOf(INVESTIGATION_STAGE.CONTENT);
+  const mediaCount = investigation.content.media.length;
+  add(
+    "Posts, captions and media",
+    mediaCount,
+    mediaCount > 0 ? contentStage : platformStage,
+    mediaCount === 0
+      ? (contentStage?.reason ?? "no media row was recorded for this account")
+      : `${mediaCount} media row(s), each with its permalink/publishedAt, observedAt, counts and evidence id; ` +
+        `${investigation.platform.media?.bounded === true ? `a bounded preview (ceiling ${investigation.platform.media.previewLimit ?? "unrecorded"} rows)` : "read from a complete listing"}`,
+    platformClass,
+  );
+
+  const commentsCount = investigation.content.comments.length;
+  add(
+    "Comments on the account's posts",
+    commentsCount,
+    commentsCount > 0 ? contentStage : platformStage,
+    commentsCount === 0
+      ? (contentStage?.reason ?? "no comment row was recorded for this account")
+      : `${commentsCount} comment(s) with author, text, createdAt and evidence id`,
+    platformClass,
+  );
+
+  const mentionsCount = investigation.content.storyMentions.length;
+  add(
+    "Story mentions",
+    mentionsCount,
+    mentionsCount > 0 ? contentStage : platformStage,
+    mentionsCount === 0
+      ? "no story mention was observed (stories are visible only through a route that carries them)"
+      : `${mentionsCount} mention(s): the accounts named in this account's own stories`,
+    platformClass,
+  );
+
+  const taggedCount = investigation.content.taggedMedia.length;
+  add(
+    "Tagged media (posts of others)",
+    taggedCount,
+    taggedCount > 0 ? contentStage : platformStage,
+    taggedCount === 0
+      ? "no tagged-media row was observed (the configured route does not carry tags for this account)"
+      : `${taggedCount} media row(s) by other accounts in which this account is tagged`,
+    platformClass,
+  );
+
+  add(
+    "Topics and hashtags (derived)",
+    report.themes.terms.length + report.themes.hashtags.length,
+    undefined,
+    report.themes.state === "UNAVAILABLE"
+      ? (report.themes.reason ?? report.themes.note)
+      : `${report.themes.terms.length} term(s) and ${report.themes.hashtags.length} hashtag(s) derived from ` +
+        `${report.themes.captionRows} stored caption(s) — derived, never a platform claim`,
+    report.themes.state === "UNAVAILABLE" ? null : EVIDENCE_CLASS.DERIVED,
+    report.themes.state === "UNAVAILABLE" ? "UNAVAILABLE" : undefined,
+  );
+
+  add(
+    "Publishing cadence (derived)",
+    report.cadence.timestampRows,
+    undefined,
+    report.cadence.state === "UNAVAILABLE"
+      ? (report.cadence.reason ?? report.cadence.note)
+      : `${report.cadence.timestampRows} timestamp(s); median gap ${report.cadence.medianGapDays ?? "null"} day(s); ` +
+        `${report.cadence.firstPublishedAt ?? "null"} … ${report.cadence.lastPublishedAt ?? "null"} (published times, not observation times)`,
+    report.cadence.state === "UNAVAILABLE" ? null : EVIDENCE_CLASS.DERIVED,
+    report.cadence.state === "UNAVAILABLE" ? "UNAVAILABLE" : undefined,
+  );
+
+  const relationshipsStage = stageOf(INVESTIGATION_STAGE.RELATIONSHIPS);
+  const liveRanks = investigation.relationships.live.length;
+  const syntheticRanks = investigation.relationships.synthetic.length;
+  add(
+    "Follower, following and interaction records",
+    liveRanks + syntheticRanks,
+    relationshipsStage,
+    liveRanks + syntheticRanks === 0
+      ? (relationshipsStage?.reason ??
+        "no interaction was observed: follower/following lists exist only for the account the deployment owns")
+      : `${liveRanks} live rank(s) and ${syntheticRanks} synthetic rank(s), kept apart`,
+    liveRanks > 0 ? platformClass : syntheticRanks > 0 ? EVIDENCE_CLASS.SYNTHETIC : null,
+  );
+
+  const changesCount =
+    (report.changes.profileChanges?.count ?? 0) +
+    (report.changes.postChanges?.count ?? 0) +
+    (report.changes.followDeltas?.count ?? 0);
+  add(
+    "Changes between observations",
+    changesCount,
+    undefined,
+    report.changes.state === "UNAVAILABLE"
+      ? (report.changes.reason ?? report.changes.note)
+      : `${report.changes.windowDays}-day window: ${report.changes.profileChanges?.count ?? 0} profile change(s), ` +
+        `${report.changes.postChanges?.count ?? 0} post change(s), ${report.changes.followDeltas?.count ?? 0} follow delta(s); ` +
+        "a gap between scans records nothing — zero events is never evidence that nothing happened",
+    report.changes.state === "UNAVAILABLE" ? null : EVIDENCE_CLASS.DERIVED,
+    report.changes.state === "UNAVAILABLE" ? "UNAVAILABLE" : undefined,
+  );
+
+  if (activity !== undefined) {
+    const history = activity.history;
+    rows.push({
+      surface: "Public-archive profile captures",
+      state:
+        history.state === "OBSERVED"
+          ? "COLLECTED"
+          : history.state === "EMPTY"
+            ? "EMPTY"
+            : "UNAVAILABLE",
+      items: history.state === "UNAVAILABLE" ? null : history.archive.points.length,
+      detail:
+        history.state === "OBSERVED"
+          ? `${history.archive.capturesWithCounts} capture(s) carried exact counts of ${history.archive.capturesFound} listed in the last ${history.windowDays} day(s); ` +
+            `${history.recorded} new point(s) stored, ${history.deduplicated} already on record, ${history.archive.capturesFailed} unreadable. ` +
+            "Each point is a PUBLIC_WEB profile snapshot with observedAt = archive capture time."
+          : (history.archive.reason ?? "no public-archive capture was read"),
+      evidence: history.state === "OBSERVED" ? EVIDENCE_CLASS.WEB : null,
+    });
+
+    const countActivity = activity.recent?.countActivity ?? null;
+    if (countActivity !== null) {
+      const net = countActivity.net;
+      const delta = (value: number | null): string => (value === null ? "not carried" : `${value >= 0 ? "+" : ""}${value}`);
+      rows.push({
+        surface: "Recent count movement (derived from stored observations)",
+        state:
+          countActivity.state === "OBSERVED"
+            ? "COLLECTED"
+            : countActivity.state === "EMPTY"
+              ? "EMPTY"
+              : "UNAVAILABLE",
+        items: countActivity.state === "UNAVAILABLE" ? null : countActivity.points.length,
+        detail:
+          countActivity.state === "OBSERVED"
+            ? `${countActivity.points.length} observation(s), ${countActivity.intervals.length} comparable interval(s); ` +
+              `net followers ${delta(net.followerDelta)}, following ${delta(net.followingDelta)}, posts ${delta(net.postDelta)}. ` +
+              "A count delta is movement of a number — never a named follow or unfollow."
+            : countActivity.state === "EMPTY"
+              ? "The comparable observations in this window show no count movement — a computed zero, not missing data."
+              : (countActivity.reason ?? "no comparable count observation is stored"),
+        evidence: countActivity.state === "UNAVAILABLE" ? null : EVIDENCE_CLASS.DERIVED,
+      });
+    }
+
+    const recent = activity.recent;
+    rows.push({
+      surface: "Recent follow / unfollow identities",
+      state:
+        recent === null
+          ? "UNAVAILABLE"
+          : recent.state === "OBSERVED"
+            ? "COLLECTED"
+            : recent.state === "EMPTY"
+              ? "EMPTY"
+              : "UNAVAILABLE",
+      items: recent === null || recent.state !== "OBSERVED" ? null : recent.rows.length,
+      detail:
+        recent === null
+          ? "no owned target was resolved for this audit"
+          : recent.state === "OBSERVED"
+            ? `${recent.counts.newFollowing ?? "null"} new following, ${recent.counts.lostFollowing ?? "null"} lost following, ` +
+              `${recent.counts.newFollowers ?? "null"} new followers, ${recent.counts.lostFollowers ?? "null"} lost followers; ` +
+              "each row's time is when this ledger first recorded the edge, never the Instagram follow time"
+            : recent.state === "EMPTY"
+              ? "a COMPLETE roster baseline exists and no add or removal was recorded in this window"
+              : (recent.notes.find((note) => note.startsWith("Recent identity activity")) ??
+                "no COMPLETE roster baseline is stored for the requested side"),
+      evidence: recent !== null && recent.state === "OBSERVED" ? EVIDENCE_CLASS.DERIVED : null,
+    });
+  }
+
+  add(
+    "Audience insights (owned accounts)",
+    report.audience.points ?? 0,
+    undefined,
+    report.audience.state === "UNAVAILABLE"
+      ? (report.audience.reason ?? report.audience.note)
+      : `${report.audience.points ?? 0} insight point(s), ${report.audience.absences ?? 0} recorded absence(s)`,
+    report.audience.state === "UNAVAILABLE" ? null : EVIDENCE_CLASS.PLATFORM,
+    report.audience.state === "UNAVAILABLE" ? "UNAVAILABLE" : undefined,
+  );
+
+  const web = investigation.web;
+  const webStage = stageOf(INVESTIGATION_STAGE.WEB);
+  add(
+    "Public-web references (third-party statements)",
+    web.totals.facts,
+    web.attempted ? undefined : webStage,
+    !web.attempted
+      ? (web.searchUnavailableReason ?? webStage?.reason ?? `the public-web stage did not run: ${web.outcome}`)
+      : `${web.totals.facts} statement(s) from ${web.totals.fetched} page(s) (${web.totals.failed} failed); ` +
+        `${web.totals.stored} filed in the claims ledger; search provider ${web.searchProvider ?? "none"}`,
+    web.totals.facts > 0 ? EVIDENCE_CLASS.WEB : null,
+    web.attempted ? undefined : "UNAVAILABLE",
+  );
+
+  const activeClaims = report.claims.totals.active;
+  add(
+    "Claims already on record (operator/agent findings)",
+    activeClaims,
+    undefined,
+    activeClaims === 0
+      ? report.claims.statement
+      : `${activeClaims} active claim(s) across ${report.claims.totals.predicates} predicate(s), each with its citation`,
+    activeClaims > 0 ? EVIDENCE_CLASS.OPERATOR : null,
+  );
+
+  add(
+    "Leads and contradictions",
+    report.leads.items.length + report.leads.syntheticItems.length + report.contradictions.length,
+    undefined,
+    `${report.leads.items.length} live lead(s), ${report.leads.syntheticItems.length} synthetic lead(s), ` +
+      `${report.contradictions.length} contradiction(s) — both sides kept, no winner chosen`,
+    EVIDENCE_CLASS.DERIVED,
+  );
+
+  const observedCapabilities = report.coverage.filter((row) => row.state === "OBSERVED").length;
+  add(
+    "Capability coverage",
+    observedCapabilities,
+    undefined,
+    `${observedCapabilities} of ${report.coverage.length} registry capabilit(ies) observed; ` +
+      "every capability not listed as OBSERVED carries its reason in the gaps section",
+    EVIDENCE_CLASS.DERIVED,
+  );
+
+  return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Public-archive count history.
+//
+// The first look at a public account has no baseline: the platform exposes no
+// roster and no follow timestamp, so identity-level "who followed / unfollowed"
+// is unavailable by construction. What public archives do preserve is the
+// profile page itself — and its embedded payload carries exact counts. Reading
+// those captures gives a dated count series for the days BEFORE this deployment
+// ever saw the account.
+//
+// Every point is stored as a PARTIAL profile snapshot: counts only, never
+// diffed into profile_changes (invariant 4). The count series is derived in the
+// report from the stored points, and each point keeps its evidence row with the
+// archive capture time as `observedAt` and the retrieval time as `capturedAt`.
+// ---------------------------------------------------------------------------
+
+export interface CollectHistoryInput {
+  /** A username, an @handle, or an instagram.com profile URL. */
+  username: string;
+  /** Reuse an existing owned target instead of creating one. */
+  targetId?: string | undefined;
+  /** How far back to read captures (default 30 days, bounded 1..365). */
+  windowDays?: number | undefined;
+  /** Cap on captures read (default 12, bounded 1..40). */
+  maxCaptures?: number | undefined;
+}
+
+export interface CollectHistoryResult {
+  state: "OBSERVED" | "EMPTY" | "UNAVAILABLE";
+  username: string;
+  targetId: string;
+  windowDays: number;
+  /** Points newly recorded by this run. */
+  recorded: number;
+  /** Points the ledger already held (same account, source and capture time). */
+  deduplicated: number;
+  /** Points that could not be written; never silently dropped. */
+  recordingErrors: number;
+  archive: ArchiveHistoryResult;
+  notes: string[];
+}
+
+export async function opCollectProfileHistory(
+  ctx: CliContext,
+  input: CollectHistoryInput,
+  deps: { fetchImpl?: (url: string, init: { signal: AbortSignal }) => Promise<ArchiveHttpResponse> } = {},
+): Promise<CollectHistoryResult> {
+  const parsed = parseAccountReference(input.username);
+  if (!parsed.ok) {
+    throw new UsageError(
+      `${parsed.message} \`igtrack audit --full\` accepts a username, an @handle, or an instagram.com profile URL.`,
+    );
+  }
+  const username = parsed.reference.username;
+
+  let targetId: string;
+  if (input.targetId !== undefined) {
+    const owned = await getOwnedTarget(ctx.db, ctx.userId, input.targetId);
+    if (owned === null) {
+      throw new CliError("TARGET_NOT_FOUND", `No owned target matches "${input.targetId}".`, 2);
+    }
+    targetId = owned.id;
+  } else {
+    const created = await createTarget(ctx.db, { userId: ctx.userId, username });
+    targetId = created.target.id;
+  }
+
+  const archive = await fetchArchivedProfileHistory(username, {
+    ...(input.windowDays !== undefined ? { windowDays: input.windowDays } : {}),
+    ...(input.maxCaptures !== undefined ? { maxCaptures: input.maxCaptures } : {}),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
+
+  const notes = [...archive.notes];
+  let recorded = 0;
+  let deduplicated = 0;
+  let recordingErrors = 0;
+  const capturedAt = new Date();
+
+  for (const point of archive.points) {
+    try {
+      const result = await recordProfileSnapshot(ctx.db, {
+        profile: {
+          account: { username },
+          ...(point.followerCount !== null ? { followerCount: point.followerCount } : {}),
+          ...(point.followingCount !== null ? { followingCount: point.followingCount } : {}),
+          ...(point.postCount !== null ? { postCount: point.postCount } : {}),
+          meta: {
+            category: ObservationCategory.OBSERVED,
+            confidence: Confidence.HIGH,
+            observedAt: point.capturedAt.toISOString(),
+          },
+        },
+        evidence: {
+          observationKind: "profile_snapshot",
+          source: {
+            id: ARCHIVE_PROFILE_SOURCE_ID,
+            kind: SourceKind.PUBLIC_WEB,
+            name: ARCHIVE_PROFILE_SOURCE_NAME,
+            providerVersion: "cdx-v1",
+          },
+          sourceReference: point.captureUrl,
+          observedAt: point.capturedAt,
+          capturedAt,
+          confidence: Confidence.HIGH,
+          rawHash: point.contentSha256,
+          metadata: {
+            captureUrl: point.captureUrl,
+            originalUrl: point.originalUrl,
+            basis: "embedded-json-exact-integers",
+            archive: "public-web-archive",
+          },
+        },
+        // Counts only: the capture carries no bio/avatar field set. Marked
+        // PARTIAL so this row can never feed profile_changes (invariant 4);
+        // the count series is derived explicitly where it is reported.
+        completeness: "PARTIAL",
+      });
+      if (result.deduplicated) {
+        deduplicated += 1;
+      } else {
+        recorded += 1;
+      }
+    } catch (err) {
+      recordingErrors += 1;
+      notes.push(
+        `A count point at ${point.capturedAt.toISOString()} could not be stored` +
+          (err instanceof Error ? `: ${err.message}` : "") +
+          "; it is reported here and was not silently dropped.",
+      );
+    }
+  }
+
+  if (archive.state === "OBSERVED") {
+    notes.push(
+      `Stored ${recorded} archived count point(s) as PUBLIC_WEB profile snapshots: observedAt is the archive capture time, capturedAt is when this run retrieved it, and each point carries its own evidence row.`,
+      "The points are marked PARTIAL because a capture carries counts, not the full profile field set; they never produce profile_changes. Count movement is derived explicitly in the report.",
+    );
+  }
+
+  return {
+    state: archive.state,
+    username,
+    targetId,
+    windowDays: archive.windowDays,
+    recorded,
+    deduplicated,
+    recordingErrors,
+    archive,
+    notes,
+  };
+}
+
+export interface FullAuditInput extends InvestigateInput {
+  /** Public-archive count-history window in days (default 30, bounded 1..365). */
+  historyDays?: number | undefined;
+  /** Skip the public-archive phase entirely. */
+  history?: boolean | undefined;
+}
+
+export async function opFullAudit(
+  ctx: CliContext,
+  input: FullAuditInput,
+  deps: {
+    fetcher?: Pick<ResearchFetcher, "fetchPage">;
+    search?: ResearchSearchProvider;
+    /** Test seam for the public-archive transport. */
+    archiveFetch?: (url: string, init: { signal: AbortSignal }) => Promise<ArchiveHttpResponse>;
+  } = {},
+): Promise<FullAuditResult> {
+  const requested = input.username;
+  const parsed = parseAccountReference(requested);
+  if (!parsed.ok) {
+    throw new UsageError(
+      `${parsed.message} \`igtrack audit --full\` / the full-audit prompt accepts a username, an @handle, or an instagram.com profile URL.`,
+    );
+  }
+  const username = parsed.reference.username;
+
+  // --- Phase 1: COLLECT. Every stage the configured sources support runs and
+  // persists what it observes. A provider that cannot even be constructed is
+  // not an exception here: the read-only audit below reports the
+  // configuration, and the caller can still read the report and its exit code.
+  let investigation: InvestigateResult | null = null;
+  let collectionSkipReason: string | null = null;
+  if (ctx.provider.provider === null || ctx.provider.error !== null) {
+    collectionSkipReason =
+      `the configured provider "${ctx.provider.name}" cannot run` +
+      (ctx.provider.error === null ? "" : `: ${ctx.provider.error}`) +
+      ", so no collection stage was attempted";
+  } else {
+    investigation = await opInvestigate(ctx, { ...input, username }, deps);
+  }
+
+  // --- Phase 2: RECENT ACTIVITY. Public-archive captures give a dated count
+  // series for the days before this deployment first saw the account, and the
+  // roster-delta read-back names edges when a COMPLETE baseline exists. The
+  // archive phase runs even when the configured provider cannot, because the
+  // archive is a separate source: a broken provider must not hide history that
+  // is still readable.
+  const historyDays = Math.max(1, Math.min(input.historyDays ?? 30, 365));
+  let activity: FullAuditResult["activity"] = null;
+  const activityNotes: string[] = [];
+  if (input.history !== false) {
+    try {
+      const archive = await opCollectProfileHistory(
+        ctx,
+        {
+          username,
+          ...(investigation?.investigation.targetId !== null && investigation?.investigation.targetId !== undefined
+            ? { targetId: investigation.investigation.targetId }
+            : {}),
+          windowDays: historyDays,
+        },
+        { ...(deps.archiveFetch !== undefined ? { fetchImpl: deps.archiveFetch } : {}) },
+      );
+      const recent = await opRecent(ctx, {
+        target: archive.targetId,
+        since: `${historyDays}d`,
+      });
+      activity = { windowDays: historyDays, archive, recent };
+      activityNotes.push(...archive.notes);
+    } catch (err) {
+      activityNotes.push(
+        "The recent-activity phase failed" +
+          (err instanceof Error ? `: ${err.message}` : "") +
+          ". No count history was recorded by this run; this is a failure to look, not an absence of activity.",
+      );
+    }
+  }
+
+  // --- Phase 3: READ BACK. The audit's own web phase is skipped: the
+  // acquisition half already searched and read public pages, and querying one
+  // index twice would spend the same budget for the same answer.
+  const audit = await opAudit(
+    ctx,
+    {
+      username,
+      ...(input.urls !== undefined ? { urls: input.urls } : {}),
+      ...(input.maxSources !== undefined ? { maxSources: input.maxSources } : {}),
+      web: false,
+    },
+    { ...(deps.fetcher !== undefined ? { fetcher: deps.fetcher } : {}) },
+  );
+
+  const surfaces =
+    investigation === null
+      ? []
+      : fullAuditSurfaces(
+          investigation,
+          activity === null ? undefined : { history: activity.archive, recent: activity.recent },
+        );
+  const gaps: InvestigationGap[] = investigation === null ? [] : [...investigation.gaps];
+  if (investigation === null) {
+    gaps.push({
+      subject: "every collection stage",
+      kind: "investigation",
+      reason: collectionSkipReason ?? "the collection half did not run",
+      howToImprove: "igtrack doctor names the configuration that blocks the selected source.",
+    });
+  }
+  if (activity !== null && activity.recent !== null && activity.recent.state === "UNAVAILABLE") {
+    gaps.push({
+      subject: `named follow / unfollow activity for @${username}`,
+      kind: "investigation",
+      reason:
+        "No COMPLETE follower/following roster is on record, so no edge can be named. " +
+        "The count series shows movement of numbers, never who moved.",
+      howToImprove:
+        "Named edges need a COMPLETE roster: IGTRACK_PROVIDER=import with an export of this account, or IGTRACK_PROVIDER=graph authorized to read it. " +
+        "For a public account the archive count series is the lawful alternative and needs no further setup.",
+    });
+  }
+
+  // Collection steps first — they grow the record — then the audit's own
+  // verification and widening steps. De-duplicated by exact command so the
+  // same suggestion cannot appear twice under two headings.
+  const nextSteps: Array<{ action: string; because: string }> = [];
+  const seenActions = new Set<string>();
+  for (const step of [...(investigation?.nextSteps ?? []), ...audit.nextSteps]) {
+    if (seenActions.has(step.action)) continue;
+    seenActions.add(step.action);
+    nextSteps.push(step);
+  }
+
+  const notes: string[] = [...(investigation?.notes ?? []), ...activityNotes];
+  if (investigation !== null && investigation.web.attempted) {
+    notes.push(
+      investigation.investigation.observationMode === "OWNED"
+        ? `The public-web stage filed ${investigation.web.totals.stored} claim(s) into the evidence ledger; the audit below reads them back with their citations.`
+        : `The public-web stage extracted ${investigation.web.totals.facts} statement(s) but filed none: a DISCOVERY target's research findings are reported, never stored. Use \`igtrack claims add\` to keep one with its citation.`,
+    );
+  }
+  notes.push(
+    "This full audit wrote what it observed (that is the point of the collection half). It queued no scheduled scan beyond the one it ran, and it never edits or deletes stored rows.",
+  );
+
+  if (activity !== null && activity.archive.state === "EMPTY") {
+    nextSteps.push({
+      action: `igtrack audit ${username} --full --days 180`,
+      because:
+        "The public archive held no capture inside this window. A longer window is the only way to widen archive coverage; a quiet window is not evidence that the account was inactive.",
+    });
+  }
+  if (activity !== null && activity.archive.state === "UNAVAILABLE") {
+    nextSteps.push({
+      action: `igtrack audit ${username} --full`,
+      because:
+        "The public archive could not be read this time. Retrying later is the correct response; this failure is not evidence that no history exists.",
+    });
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    requested,
+    username,
+    referenceForm: parsed.reference.form,
+    collection: {
+      ran: investigation !== null,
+      skipReason: collectionSkipReason,
+      investigation,
+    },
+    audit,
+    activity,
+    surfaces,
+    gaps,
+    nextSteps,
+    notes,
+  };
+}
+
 /** The content section, read back from the stored record with its provenance. */
 function buildInvestigateContent(
   detail: Awaited<ReturnType<typeof getOwnedTargetDetail>>,
@@ -7917,4 +9476,172 @@ function buildInvestigateNextSteps(
   }
   void ctx;
   return steps;
+}
+
+// ---------------------------------------------------------------------------
+// opViewer — the six-tab account viewer, composed from lawful public sources.
+//
+// Database-free, like the public/anonstories inspection paths: it observes,
+// composes and returns, and writes nothing. Post/reel URLs are resolved to
+// their owner through one logged-out media page; the viewer then describes
+// that account. Every absent tab is a typed refusal, never an empty list.
+// ---------------------------------------------------------------------------
+
+export interface ViewerOperationInput {
+  input: string;
+  source?: "public" | "anonstories" | "both" | undefined;
+  tab?: ViewerTabKey | undefined;
+  mention?: string | undefined;
+  maxPosts?: number | undefined;
+  maxHighlights?: number | undefined;
+  chromePath?: string | undefined;
+}
+
+export interface ViewerOperationDeps {
+  publicProvider?: Pick<PublicWebProvider, "getDossier" | "getPublicPost"> | undefined;
+  anonProvider?: Pick<AnonStoriesProvider, "getDossier"> | undefined;
+  now?: (() => Date) | undefined;
+}
+
+function viewerSourceFailure(kind: string, err: unknown, retryable = false): ViewerSourceFailure {
+  return {
+    kind,
+    message: err instanceof Error ? err.message : String(err),
+    retryable,
+  };
+}
+
+export async function opViewer(
+  input: ViewerOperationInput,
+  deps: ViewerOperationDeps = {},
+): Promise<ViewerReport> {
+  const parsed = parseViewerInput(input.input);
+  if (parsed.kind === "unsupported") {
+    throw new CliError("USAGE", parsed.reason ?? "The viewer input is not understood.", 2);
+  }
+
+  const source = input.source ?? "both";
+  const requestedSources: ViewerDownloads[] =
+    source === "both" ? ["public", "anonstories"] : [source];
+  const maxPosts = input.maxPosts ?? 60;
+  const maxHighlights = input.maxHighlights ?? 5;
+
+  let publicProvider:
+    | Pick<PublicWebProvider, "getDossier" | "getPublicPost">
+    | undefined = deps.publicProvider;
+  let anonProvider: Pick<AnonStoriesProvider, "getDossier"> | undefined =
+    deps.anonProvider;
+
+  let username = parsed.username;
+  const additionalNotes: string[] = [];
+  if (username === null) {
+    if (parsed.postCode === undefined) {
+      throw new CliError(
+        "USAGE",
+        parsed.reason ?? "The input does not name an account.",
+        2,
+      );
+    }
+    try {
+      publicProvider ??= new PublicWebProvider({
+        ...(input.chromePath !== undefined ? { chromePath: input.chromePath } : {}),
+        maxPosts,
+      });
+      const resolved = await publicProvider.getPublicPost({
+        shortcode: parsed.postCode,
+        kind: parsed.postKind ?? "p",
+        form: "POST_URL",
+      });
+      const owner = resolved.data?.post.owner?.username;
+      if (owner === undefined) {
+        throw new CliError(
+          resolved.error?.kind ?? "VIEWER_RESOLVE_FAILED",
+          resolved.error?.message ??
+            "The post page did not name its owner, so the account behind this URL could not be resolved. Nothing was inferred.",
+          resolved.status === "UNAVAILABLE" ? 3 : 1,
+        );
+      }
+      username = owner;
+      additionalNotes.push(
+        "The account was resolved from the post URL's owner through one logged-out media-page read; that page is the only source of the owner name.",
+      );
+    } catch (err) {
+      if (err instanceof CliError) throw err;
+      throw new CliError(
+        "VIEWER_RESOLVE_FAILED",
+        `The post URL could not be resolved to an account: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        1,
+      );
+    }
+  }
+
+  const failures: { public?: ViewerSourceFailure; anonstories?: ViewerSourceFailure } = {};
+  let publicSnapshot: ViewerPublicSnapshot | undefined;
+  let anonSnapshot: ViewerAnonSnapshot | undefined;
+
+  if (requestedSources.includes("public")) {
+    try {
+      publicProvider ??= new PublicWebProvider({
+        ...(input.chromePath !== undefined ? { chromePath: input.chromePath } : {}),
+        maxPosts,
+      });
+      const result = await publicProvider.getDossier(username);
+      if (result.dossier !== undefined) {
+        publicSnapshot = publicViewerSnapshot(result.dossier);
+      } else {
+        failures.public = {
+          kind: result.error?.kind ?? "PUBLIC_WEB_FAILED",
+          message:
+            result.error?.message ??
+            result.note ??
+            "The logged-out public profile could not be read.",
+          retryable: result.error?.retryable ?? false,
+        };
+      }
+    } catch (err) {
+      failures.public = viewerSourceFailure("PROVIDER_UNAVAILABLE", err);
+    }
+  }
+
+  if (requestedSources.includes("anonstories")) {
+    try {
+      anonProvider ??= new AnonStoriesProvider({
+        ...(input.chromePath !== undefined ? { chromePath: input.chromePath } : {}),
+        maxHighlights,
+      });
+      const result = await anonProvider.getDossier(username, { maxHighlights });
+      if (result.dossier !== undefined) {
+        anonSnapshot = anonViewerSnapshot(result.dossier);
+      } else {
+        failures.anonstories = {
+          kind: result.error?.kind ?? "ANONSTORIES_FAILED",
+          message:
+            result.error?.message ??
+            result.note ??
+            "The public aggregator dossier could not be read.",
+          retryable: result.error?.retryable ?? false,
+        };
+      }
+    } catch (err) {
+      failures.anonstories = viewerSourceFailure("PROVIDER_UNAVAILABLE", err);
+    }
+  }
+
+  return buildViewerReport(
+    {
+      ...(publicSnapshot !== undefined ? { public: publicSnapshot } : {}),
+      ...(anonSnapshot !== undefined ? { anonstories: anonSnapshot } : {}),
+      failures,
+    },
+    {
+      input: { ...parsed, ...(input.tab !== undefined ? { tab: input.tab } : {}) },
+      username,
+      generatedAt: (deps.now ?? (() => new Date()))().toISOString(),
+      requestedSources,
+      ...(input.mention !== undefined ? { mention: input.mention } : {}),
+      ...(additionalNotes.length > 0 ? { additionalNotes } : {}),
+    },
+  );
 }

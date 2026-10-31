@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CAPABILITY_REGISTRY } from "@igtrack/core";
 import {
+  accountPositional,
   capabilityLines,
   display,
   errorEnvelope,
@@ -50,6 +51,15 @@ describe("argument parsing", () => {
     expect(flagBool(flags, "force")).toBe(true);
     expect(flagBool(flags, "missing")).toBe(false);
     expect(() => flagNumber(flags, "name", 1)).toThrow(UsageError);
+  });
+
+  it("reads 'igtrack audit user x' as the same account as 'audit x'", () => {
+    expect(accountPositional(["user", "x"])).toBe("x");
+    expect(accountPositional(["account", "@aurora.wilde"])).toBe("@aurora.wilde");
+    // A lone filler word is still an account name, not something to skip.
+    expect(accountPositional(["user"])).toBe("user");
+    expect(accountPositional(["@aurora.wilde"])).toBe("@aurora.wilde");
+    expect(accountPositional([])).toBeUndefined();
   });
 });
 

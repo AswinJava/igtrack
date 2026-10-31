@@ -3,17 +3,20 @@ import { VERSION as CLI_VERSION } from "./version.js";
 import { CliError, errorEnvelope, errorHint, isJson, parseArgs, type ParsedArgs } from "./output.js";
 import {
   CONFIG_HELP,
+  DOCTOR_HELP,
   runConfig,
   runDoctor,
   runSetup,
   runStatus,
   SETUP_HELP,
+  STATUS_HELP,
 } from "./commands/setup.js";
 import { AUDIT_HELP, runAudit } from "./commands/audit.js";
 import { INVESTIGATE_HELP, runInvestigate } from "./commands/investigate.js";
 import { PUBLIC_HELP, runPublic } from "./commands/public.js";
 import { POST_HELP, runPost } from "./commands/post.js";
 import { ANONSTORIES_HELP, runAnonstories } from "./commands/anonstories.js";
+import { VIEWER_HELP, runViewer } from "./commands/viewer.js";
 import { runTargets, TARGETS_HELP } from "./commands/targets.js";
 import { runScans, runWork, SCANS_HELP } from "./commands/scans.js";
 import {
@@ -33,7 +36,7 @@ import {
   runTags,
   TAGS_HELP,
 } from "./commands/read.js";
-import { runMcp } from "./mcp/server.js";
+import { MCP_HELP, runMcp } from "./mcp/server.js";
 import { ASK_HELP, runAsk, runAskPrompt, runBare, runGuide } from "./commands/ask.js";
 import {
   ALERTS_HELP,
@@ -51,6 +54,8 @@ import {
   runReport,
   runReports,
 } from "./commands/report.js";
+import { ACTIVITY_REPORT_HELP, runActivityReport } from "./commands/activity-report.js";
+import { TRACKER_HELP, runTracker } from "./commands/tracker.js";
 import {
   CLAIMS_HELP,
   PLAN_HELP,
@@ -100,7 +105,10 @@ Observe
   anonstories <username>  Login-free stories, highlight contents and story
                            mentions via a third-party aggregator; rows are
                            PUBLIC_AGGREGATOR, never a platform observation
+  viewer <input>        Six-tab viewer report: stories, posts, reels,
+                           highlights, reposts, tagged — with every refusal
   audit <username>      One evidence-honest report: config, probe, stored record
+                           --full collects first (archive history + every stage)
   work                  Run the worker now: one scheduler tick + drain the queue
   activity              What changed, newest first, with evidence ids
   relationships <t>     Accounts ranked by observed signal, with provenance
@@ -112,6 +120,8 @@ Observe
   mention <commentId>   Read one mentioned comment by id, persisting nothing
 
 Reports and exports
+  tracker [target]      Watchlist with each account's latest closed-period card
+  activity-report <target>  Four-tab Activity Report over stored rows
   report <target>       One period composed from stored rows (Markdown; --out)
   reports <target>      Recent periods and whether stored rows exist
   audience <target>     Mutuals and one-way follows over COMPLETE rosters
@@ -193,9 +203,23 @@ async function dispatch(args: ParsedArgs): Promise<number> {
         return 0;
       }
       return runAnonstories(args);
+    case "viewer":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${VIEWER_HELP}\n`);
+        return 0;
+      }
+      return runViewer(args);
     case "status":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${STATUS_HELP}\n`);
+        return 0;
+      }
       return runStatus(args);
     case "doctor":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${DOCTOR_HELP}\n`);
+        return 0;
+      }
       return runDoctor(args);
     case "targets":
       if (wantsHelp(args) || args.positionals[0] === "help") {
@@ -271,6 +295,18 @@ async function dispatch(args: ParsedArgs): Promise<number> {
         return 0;
       }
       return runInsights(args);
+    case "tracker":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${TRACKER_HELP}\n`);
+        return 0;
+      }
+      return runTracker(args);
+    case "activity-report":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${ACTIVITY_REPORT_HELP}\n`);
+        return 0;
+      }
+      return runActivityReport(args);
     case "report":
       if (wantsHelp(args)) {
         process.stdout.write(`${REPORT_HELP}\n`);
@@ -338,6 +374,10 @@ async function dispatch(args: ParsedArgs): Promise<number> {
       }
       return runCapabilities(args);
     case "mcp":
+      if (wantsHelp(args)) {
+        process.stdout.write(`${MCP_HELP}\n`);
+        return 0;
+      }
       // No context is built here: the server resolves it lazily on first call
       // so a client can connect even while the database is down.
       await runMcp();

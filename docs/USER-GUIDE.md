@@ -53,6 +53,7 @@ would get in the terminal.
 | Ask | What runs |
 | --- | --- |
 | "investigate @name" / "who is @name?" / "what do we know about @name?" | Full investigation, one dossier |
+| "audit user @name" / "collect everything you can about @name" | A collecting full audit: archive count history and every supported stage, then the read-only report |
 | "what changed on @name in the last 7 days?" | Recorded change events, with evidence ids |
 | "who does @name interact with most?" / "top 10 connections" | Relationship ranking |
 | "show me the insights for @name" | Recorded metrics, with absences named |
@@ -73,6 +74,12 @@ Time windows ("today", "last week", "since 2026-01-01", "24h"), limits
 ("top 5"), evidence ids and public URLs are picked out of the sentence
 automatically.
 
+If a sentence names no account, IGTrack asks which one instead of guessing:
+the tracked accounts are listed as numbered options, and you can answer with a
+number, an `@handle`, or `cancel`. With `--json` (or an AI agent) the same
+question arrives as status `NEEDS_INPUT` with a structured `input` field, so
+the agent asks you and re-sends the completed sentence.
+
 ### Reports, audience and exports as commands
 
 If you prefer exact commands:
@@ -80,6 +87,9 @@ If you prefer exact commands:
 ```bash
 pnpm igtrack report @name --period weekly            # the current week; --at picks another date
 pnpm igtrack reports @name                           # which weeks/months have stored data
+pnpm igtrack tracker                               # watchlist, latest closed period
+pnpm igtrack tracker @name --period monthly --at 2026-08-15  # one account's period card
+pnpm igtrack activity-report @name --period monthly --at 2026-08-15  # four-tab Activity Report
 pnpm igtrack audience @name                          # mutuals, follows-you-not-back, vice versa
 pnpm igtrack recent @name --direction following      # newly followed / unfollowed since the baseline
 pnpm igtrack export @name --kind posts --format csv --out posts.csv
@@ -95,6 +105,24 @@ start on Monday and all boundaries are UTC. An empty week is a gap in the
 record, not a quiet account. The Markdown never prints the time it was
 composed, so `--at` on the same ledger reproduces the same document later;
 the JSON payload still carries `generatedAt`.
+
+`tracker` is the watchlist: one card per tracked account with new followings,
+unfollows, posts, stories, comments, tags and mentions for the latest **closed**
+period, and a detail card (rosters, commenters, comments, posts, hashtags,
+next-scan state) when you name an account. It reads the same stored rows as
+`activity-report`, so the counts agree; it never scans or writes. `--at`
+selects a window exactly and may show the current one, marked `IN_PROGRESS`.
+Unmeasured metrics are never zero: a follow count shows a number only when a
+COMPLETE roster comparison measured it, and everything else carries its reason.
+
+`activity-report` is the four-tab Activity Report over stored rows: Activity
+Analytics, Ties & Trails, Stories & Highlights and AI Insights, with `daily`,
+`weekly`, `monthly`, `quarterly` (SEASON) and `yearly` periods. `--data-id` reopens an
+exact period listed in the inventory. The output still never zero-fills:
+likes given, liker identities, interaction history, highlights and AI
+inferences have no lawful source here, so they are `null` with
+`UNAVAILABLE` and the capability-registry reason. `--json` carries the full
+structure; the Markdown carries the same four tabs.
 
 Every exported observation ends with its provenance: `evidence_id`,
 `evidence_observed_at`, `source_id` and `synthetic`. If an evidence id cannot
@@ -121,6 +149,40 @@ roster exists, with the source's reason. A side with no baseline reports `null`
 counts, not zeros; `present now` and `mutual now` stay `null` when the roster
 that would answer them is absent. Edges older than the baseline cannot be
 dated and are never called recent.
+
+`recent` also returns `countActivity`: the dated follower / following / post
+counts stored for the account, the delta between consecutive observations, and
+a net figure. Counts are exact integers from the source; a count delta is
+movement of a number and never names who moved. It is `UNAVAILABLE` when fewer
+than two comparable observations exist, with that reason — never a zero.
+
+### The first look: `audit --full`
+
+`recent` needs a baseline, so the first look at an account would otherwise
+answer only "nothing is stored yet". The prompt `audit user @name` runs this
+collecting audit too. `igtrack audit @name --full` adds a
+collection phase that reads the public web archive's captures of the account's
+profile page:
+
+```bash
+pnpm igtrack audit @name --full                 # last 30 days of archive captures
+pnpm igtrack audit @name --full --days 180      # widen the window (1..365)
+pnpm igtrack audit @name --full --json          # the full JSON envelope
+```
+
+Each archived capture carries a timestamp and the exact counts the page held at
+that moment. They are stored as `PUBLIC_WEB` profile snapshots with
+`observedAt` = capture time, marked `PARTIAL` (counts only) so they never
+produce a profile change. The read-back then derives the count series and its
+deltas for the days **before** this deployment ever saw the account.
+
+What this is not: a roster. An archived capture proves the count moved, never
+who followed or unfollowed. Named edges still require a COMPLETE roster (an
+owner export or an authorized Graph session); the audit reports that gap with
+its reason instead of filling it. Archive coverage is per-account and uneven,
+so an empty window is a gap in the record, not a quiet account, and an
+unreachable archive is `UNAVAILABLE` — a failure to look, never "no history".
+Running the same audit again deduplicates captures already on record.
 
 `alerts` is the digest's events as alert records. `--out <dir>` writes each
 one to its own file named by the event id and never overwrites an existing
@@ -163,7 +225,7 @@ Rules that never change:
 - **Read stories or logged-out pages as part of `ask`.** Those use separate
   transports with different evidence classes; the answer names the command
   (`igtrack anonstories <name>` / `igtrack public <name>` /
-  `igtrack post <post URL>`).
+  `igtrack post <post URL>` / `igtrack viewer <name> --source both`).
 - **Fetch data the platform does not expose.** Follower/liker rosters of other
   accounts, other accounts' highlights, and media bytes are refused with a
   reason. `igtrack capabilities` prints the whole registry.

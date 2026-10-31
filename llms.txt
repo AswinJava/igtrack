@@ -1,7 +1,7 @@
 # IGTrack
 
 > Evidence-first Instagram observation engine. Self-hosted, JSON-first CLI plus a
-> stdio MCP server with 38 tools. Every stored value carries its source, time,
+> stdio MCP server with 42 tools. Every stored value carries its source, time,
 > confidence and SHA-256 hash; anything the platform does not expose is reported
 > UNAVAILABLE with a reason instead of zero.
 

@@ -1,6 +1,7 @@
 import { CLAIM_REVIEW_HORIZON_DAYS } from "@igtrack/core";
 import { createContext } from "../context.js";
 import {
+  accountPositional,
   display,
   emit,
   flagNumber,
@@ -10,7 +11,7 @@ import {
   UsageError,
   type ParsedArgs,
 } from "../output.js";
-import { AUDIT_WEB_MAX_SOURCES, opAudit, type AuditReport } from "../tools.js";
+import { AUDIT_WEB_MAX_SOURCES, opAudit, opFullAudit, type AuditReport, type FullAuditResult } from "../tools.js";
 
 // ---------------------------------------------------------------------------
 // audit — one command that answers "what is known about this account, from
@@ -22,7 +23,7 @@ import { AUDIT_WEB_MAX_SOURCES, opAudit, type AuditReport } from "../tools.js";
 // object the --json envelope carries, so the two renderings cannot disagree.
 // ---------------------------------------------------------------------------
 
-export const AUDIT_HELP = `igtrack audit <username|@handle|profile-url> [--url URL[,URL…]] [--max-sources N] [--json]
+export const AUDIT_HELP = `igtrack audit <username|@handle|profile-url> [--url URL[,URL…]] [--max-sources N] [--full [--days N]] [--json]
 
 One report about ONE account: what the configured source says right now, what
 this deployment has already recorded, what the public web states about the
@@ -60,6 +61,16 @@ Phases (in order, all read-only — no target is registered, no row is written):
      never shown as proof that no public evidence exists.
      With neither --url nor a search provider the phase reports UNAVAILABLE with
      the exact reason; it never invents sources.
+
+\`--full\` turns the command into a COLLECTING audit: before the read-only report
+it records a public-archive count series (exact follower/following/post counts
+from archived profile captures, observedAt = archive capture time) and runs
+every investigation stage the configured source supports. Count movement over
+the past days then needs no prior baseline. Named follows and unfollows still
+need a COMPLETE follower/following roster (an owner export or an authorized
+Graph session); on a first look at a public account those identities stay
+UNAVAILABLE with the reason, while the count series reports what moved.
+--days bounds the archive window (default 30, max 365).
 
 The audit queues no scan, writes no row and registers no target. A probe that
 finds nothing says "this source holds no rows for the account" — it is NEVER
@@ -563,9 +574,140 @@ export function renderAuditHuman(report: AuditReport): string {
   return sections.join("\n");
 }
 
+const deltaText = (value: number | null): string =>
+  value === null ? "not carried" : `${value >= 0 ? "+" : ""}${value}`;
+
+/** The collecting audit's human screen, derived from the same report object. */
+export function renderFullAuditHuman(result: FullAuditResult): string {
+  const sections: string[] = [
+    `Full audit @${result.username}  (requested "${result.requested}" · ${result.referenceForm.toLowerCase()})`,
+    `Generated  ${result.generatedAt}`,
+    "",
+    "Collection ledger (one row per information surface — collected, empty, or unavailable with the reason)",
+    table(
+      ["surface", "state", "items", "evidence", "detail"],
+      result.surfaces.map((row) => [
+        row.surface,
+        row.state,
+        row.items === null ? "-" : String(row.items),
+        display(row.evidence),
+        row.detail.replace(/\s+/g, " ").slice(0, 200),
+      ]),
+    ),
+  ];
+
+  const activity = result.activity;
+  sections.push("", "Recent activity");
+  if (activity === null) {
+    sections.push("  The recent-activity phase did not run (see notes).");
+  } else {
+    const archive = activity.archive;
+    sections.push(
+      table(
+        ["field", "value"],
+        [
+          ["window", `${activity.windowDays} day(s)`],
+          ["archive state", archive.state],
+          [
+            "archive captures",
+            `${archive.archive.capturesWithCounts} with exact counts of ${archive.archive.capturesFound} listed · ` +
+              `${archive.archive.capturesWithoutCounts} without counts · ${archive.archive.capturesFailed} unreadable`,
+          ],
+          [
+            "points stored",
+            `${archive.recorded} new · ${archive.deduplicated} already on record · ${archive.recordingErrors} failed to store`,
+          ],
+        ],
+      ),
+    );
+    if (archive.archive.reason !== null) sections.push(`  ${archive.archive.reason}`);
+
+    const counts = activity.recent?.countActivity ?? null;
+    if (counts !== null && counts.points.length > 0) {
+      sections.push(
+        "",
+        `Count movement (${counts.state}) — exact integers at observation times; a delta is movement of a number, never a named follow`,
+        table(
+          ["observed at", "source", "followers", "following", "posts", "kind"],
+          counts.points.map((point) => [
+            point.observedAt,
+            point.sourceId,
+            display(point.followerCount),
+            display(point.followingCount),
+            display(point.postCount),
+            point.completeness,
+          ]),
+        ),
+      );
+      if (counts.intervals.length > 0) {
+        sections.push(
+          "",
+          "Intervals (consecutive observations that share a figure)",
+          table(
+            ["from", "to", "followers", "following", "posts"],
+            counts.intervals.map((interval) => [
+              interval.from,
+              interval.to,
+              deltaText(interval.followerDelta),
+              deltaText(interval.followingDelta),
+              deltaText(interval.postDelta),
+            ]),
+          ),
+          `  net over the window: followers ${deltaText(counts.net.followerDelta)} · following ${deltaText(counts.net.followingDelta)} · posts ${deltaText(counts.net.postDelta)}`,
+        );
+      } else if (counts.reason !== null) {
+        sections.push(`  ${counts.reason}`);
+      }
+    } else if (counts !== null && counts.reason !== null) {
+      sections.push("", `Count movement (${counts.state}): ${counts.reason}`);
+    }
+
+    const recent = activity.recent;
+    if (recent !== null) {
+      sections.push(
+        "",
+        `Named follows / unfollows (${recent.state})`,
+        ...(recent.state === "OBSERVED"
+          ? [
+              `  new following ${display(recent.counts.newFollowing)} · lost following ${display(recent.counts.lostFollowing)} · ` +
+                `new followers ${display(recent.counts.newFollowers)} · lost followers ${display(recent.counts.lostFollowers)}`,
+              table(
+                ["first seen", "change", "account"],
+                recent.rows.slice(0, 25).map((row) => [
+                  row.firstSeenAt,
+                  row.change.replace(/_/g, " ").toLowerCase(),
+                  `@${row.username}`,
+                ]),
+              ),
+            ]
+          : [
+              `  ${recent.notes.find((note) => note.startsWith("Recent identity activity")) ?? "no COMPLETE roster baseline is stored"}`,
+            ]),
+      );
+    }
+  }
+
+  if (result.gaps.length > 0) {
+    sections.push(
+      "",
+      `Gaps (${result.gaps.length}) — each with what would close it`,
+      ...result.gaps.map((gap) => `  · ${gap.subject}: ${gap.reason} — ${gap.howToImprove}`),
+    );
+  }
+  if (result.nextSteps.length > 0) {
+    sections.push(
+      "",
+      "Next steps",
+      ...result.nextSteps.flatMap((step) => [`  ${step.action}`, `      because ${step.because}`]),
+    );
+  }
+  sections.push("", "Verification audit (read-only read-back of what is now stored)", renderAuditHuman(result.audit));
+  return sections.join("\n");
+}
+
 export async function runAudit(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
-  const username = args.positionals[0];
+  const username = accountPositional(args.positionals);
   if (username === undefined) {
     throw new UsageError(
       "Usage: igtrack audit <username|@handle|profile-url>  (igtrack audit --help)",
@@ -586,8 +728,21 @@ export async function runAudit(args: ParsedArgs): Promise<number> {
     args.flags["max-sources"] === undefined
       ? undefined
       : flagNumber(args.flags, "max-sources", AUDIT_WEB_MAX_SOURCES);
+  const full = args.flags["full"] === true;
+  const days =
+    args.flags["days"] === undefined ? undefined : flagNumber(args.flags, "days", 30);
   const ctx = await createContext();
   try {
+    if (full) {
+      const result = await opFullAudit(ctx, {
+        username,
+        ...(urls.length > 0 ? { urls } : {}),
+        ...(maxSources !== undefined ? { maxSources } : {}),
+        ...(days !== undefined ? { historyDays: days } : {}),
+      });
+      emit({ json, meta: ctx.meta, data: result, human: renderFullAuditHuman(result) });
+      return auditExitCode(result.audit);
+    }
     const report = await opAudit(ctx, {
       username,
       ...(urls.length > 0 ? { urls } : {}),

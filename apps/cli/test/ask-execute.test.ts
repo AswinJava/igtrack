@@ -72,6 +72,13 @@ describe("opAsk without a database", () => {
     expect(result.status).toBe("NEEDS_INPUT");
     expect(result.steps[0]?.status).toBe("SKIPPED");
     expect(result.answer.join(" ")).toMatch(/need an account/i);
+    // The question is structured, so an agent can ask its operator and answer.
+    expect(result.input).toMatchObject({
+      kind: "USERNAME",
+      allowFreeText: true,
+      options: [],
+    });
+    expect(result.input?.question).toMatch(/account/i);
   });
 
   it("fails with DB_UNAVAILABLE when the request genuinely needs the database", async () => {

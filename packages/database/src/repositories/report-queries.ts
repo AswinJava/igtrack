@@ -279,11 +279,13 @@ export async function getTargetReportRows(
       username: string;
       post_db_id: string;
       body: string;
+      like_count: number | null;
       evidence_id: string | null;
     }>(
       db,
       sql`
-        SELECT pc.id, pc.commented_at, author.username, pc.post_db_id, pc.body, pc.evidence_id
+        SELECT pc.id, pc.commented_at, author.username, pc.post_db_id, pc.body,
+               pc.like_count, pc.evidence_id
         FROM post_comments pc
         JOIN posts p ON p.id = pc.post_db_id
         JOIN ig_accounts author ON author.id = pc.author_account_id
@@ -428,6 +430,7 @@ export async function getTargetReportRows(
       authorUsername: r.username,
       postId: r.post_db_id,
       body: r.body,
+      likeCount: toNumber(r.like_count),
       evidenceId: r.evidence_id,
     })),
     mentions: mentionRows.map((r) => ({

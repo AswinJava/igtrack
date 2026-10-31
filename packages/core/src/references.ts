@@ -85,6 +85,39 @@ export function parseAccountReference(raw: string): AccountReferenceParse {
   return { ok: true, reference: { username, form: isHandle ? "HANDLE" : "USERNAME" } };
 }
 
+/**
+ * Search/add normalization, applied at the request boundary: URL-decode,
+ * strip one leading "@", remove embedded whitespace,
+ * extract the username from an instagram.com profile URL, and lowercase
+ * (Instagram usernames are case-insensitive). Returns null when nothing
+ * usable remains. It never guesses a segment from a multi-segment URL —
+ * `parseAccountReference` refuses those with a reason instead.
+ */
+export function normalizeHandleInput(raw: string): string | null {
+  let value = raw.trim();
+  if (value === "") return null;
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    // Malformed escape: keep the literal text and let validation refuse it.
+  }
+  value = value.trim();
+
+  const urlUsername = value.match(
+    /^(?:https?:\/\/)?(?:www\.|m\.)?instagram\.com\/([^/?#\s]+)\/*$/i,
+  )?.[1];
+  if (urlUsername !== undefined) {
+    value = urlUsername;
+  } else if (/^https?:\/\//i.test(value) || /^(www\.|m\.)?instagram\.com(\/|$)/i.test(value.toLowerCase())) {
+    const parsed = parseAccountReference(value);
+    return parsed.ok ? parsed.reference.username.toLowerCase() : null;
+  }
+
+  value = value.replace(/^@/, "").replace(/\s+/g, "");
+  value = value.toLowerCase();
+  return USERNAME_RE.test(value) ? value : null;
+}
+
 // ---------------------------------------------------------------------------
 // Post references — a post link is the other input beside a profile.
 //

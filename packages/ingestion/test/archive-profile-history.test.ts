@@ -1,0 +1,250 @@
+import { gzipSync } from "node:zlib";
+import { describe, expect, it } from "vitest";
+import {
+  ARCHIVE_PROFILE_SOURCE_ID,
+  fetchArchivedProfileHistory,
+  type ArchiveHttpResponse,
+} from "../src/public/archive-profile-history.js";
+
+// ---------------------------------------------------------------------------
+// Reading a public archive's captures of one profile page.
+//
+// These pin the three things that quietly go wrong in archive reading:
+//   * a capture that cannot be read is a FAILURE TO LOOK — it must never be
+//     folded into "no history";
+//   * a rounded "12.3K followers" in prose is not a count — only exact
+//     integers from the embedded payload are recorded;
+//   * a login wall that happens to be listed as a profile capture must not
+//     become a point about the account.
+// The transport is injected, so no test touches the network.
+// ---------------------------------------------------------------------------
+
+const USERNAME = "small.account";
+const NOW = new Date("2026-10-30T00:00:00.000Z");
+
+function response(
+  body: string | Uint8Array,
+  init: { status?: number; contentLength?: string | null } = {},
+): ArchiveHttpResponse {
+  const bytes =
+    typeof body === "string" ? new TextEncoder().encode(body) : body;
+  return {
+    status: init.status ?? 200,
+    headers: {
+      get: (name: string) =>
+        name.toLowerCase() === "content-length"
+          ? (init.contentLength ?? String(bytes.byteLength))
+          : null,
+    },
+    arrayBuffer: async () => {
+      const copy = new Uint8Array(bytes);
+      return copy.buffer as ArrayBuffer;
+    },
+  };
+}
+
+function page(username: string, counts: { followers: number; following: number; posts: number }): string {
+  return (
+    `<html><head><script>window.__data={"username":"${username}",` +
+    `"follower_count":${counts.followers},"following_count":${counts.following},` +
+    `"media_count":${counts.posts}}</script></head></html>`
+  );
+}
+
+const CDX_URL_MARKER = "web.archive.org/cdx/search/cdx";
+
+function transport(plan: { cdx: string; captures: Record<string, ArchiveHttpResponse | Error> }): {
+  fetchImpl: (url: string, init: { signal: AbortSignal }) => Promise<ArchiveHttpResponse>;
+  seen: string[];
+} {
+  const seen: string[] = [];
+  return {
+    seen,
+    fetchImpl: async (url) => {
+      seen.push(url);
+      if (url.includes(CDX_URL_MARKER)) return response(plan.cdx);
+      const match = plan.captures[url];
+      if (match === undefined) throw new Error(`unexpected URL: ${url}`);
+      if (match instanceof Error) throw match;
+      return match;
+    },
+  };
+}
+
+function cdx(rows: Array<[string, string]>): string {
+  return JSON.stringify([["timestamp", "original"], ...rows]);
+}
+
+describe("archived profile count history", () => {
+  it("reads exact counts from captures and returns them oldest-first", async () => {
+    const later = "https://web.archive.org/web/20261020120000id_/https://www.instagram.com/small.account/";
+    const earlier = "https://web.archive.org/web/20261001120000id_/https://www.instagram.com/small.account/";
+    const plan = transport({
+      cdx: cdx([
+        ["20261020120000", "https://www.instagram.com/small.account/"],
+        ["20261001120000", "https://www.instagram.com/small.account/"],
+      ]),
+      captures: {
+        [later]: response(page(USERNAME, { followers: 280, following: 310, posts: 41 })),
+        [earlier]: response(page(USERNAME, { followers: 265, following: 300, posts: 38 })),
+      },
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, {
+      now: NOW,
+      windowDays: 40,
+      fetchImpl: plan.fetchImpl,
+    });
+
+    expect(result.state).toBe("OBSERVED");
+    expect(result.capturesFound).toBe(2);
+    expect(result.capturesWithCounts).toBe(2);
+    expect(result.points.map((p) => p.capturedAt.toISOString())).toEqual([
+      "2026-10-01T12:00:00.000Z",
+      "2026-10-20T12:00:00.000Z",
+    ]);
+    expect(result.points.map((p) => p.followerCount)).toEqual([265, 280]);
+    expect(result.points.map((p) => p.followingCount)).toEqual([300, 310]);
+    expect(result.points.map((p) => p.postCount)).toEqual([38, 41]);
+    // Every point carries the hash of the decoded page for its evidence row.
+    for (const point of result.points) expect(point.contentSha256).toMatch(/^[0-9a-f]{64}$/);
+    // The index query is bounded by the requested window and asks only the
+    // archive host for a JSON listing of exact capture rows.
+    expect(plan.seen[0]).toContain("from=20260920");
+    expect(plan.seen[0]).toContain("to=20261030");
+    expect(result.reason).toBeNull();
+  });
+
+  it("decodes a gzip-compressed capture body", async () => {
+    const capture = "https://web.archive.org/web/20261010120000id_/https://www.instagram.com/small.account/";
+    const compressed = new Uint8Array(
+      gzipSync(Buffer.from(page(USERNAME, { followers: 270, following: 305, posts: 40 }))),
+    );
+    const plan = transport({
+      cdx: cdx([["20261010120000", "https://www.instagram.com/small.account/"]]),
+      captures: { [capture]: response(compressed, { contentLength: String(compressed.byteLength) }) },
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+    expect(result.state).toBe("OBSERVED");
+    expect(result.points[0]?.followerCount).toBe(270);
+  });
+
+  it("reports a capture without exact counts as skipped, never as a point", async () => {
+    const capture = "https://web.archive.org/web/20261010120000id_/https://www.instagram.com/small.account/";
+    const rounded =
+      `<html><head><link rel="canonical" href="https://www.instagram.com/small.account/"></head>` +
+      `<body>small.account — 12.3K followers, 1,204 following</body></html>`;
+    const plan = transport({
+      cdx: cdx([["20261010120000", "https://www.instagram.com/small.account/"]]),
+      captures: { [capture]: response(rounded) },
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+
+    expect(result.state).toBe("EMPTY");
+    expect(result.points).toEqual([]);
+    expect(result.capturesWithoutCounts).toBe(1);
+    expect(result.capturesWithCounts).toBe(0);
+    // The rounded prose is refused by name, so a reader knows why.
+    expect(result.reason).toContain("none carried an exact count");
+    expect(result.notes.join(" ")).toContain("rounded prose");
+  });
+
+  it("treats a login wall as an unreadable capture, not as evidence about the account", async () => {
+    const capture = "https://web.archive.org/web/20261010120000id_/https://www.instagram.com/small.account/";
+    const walled = `<html><body>Log in to Instagram to see this profile</body></html>`;
+    const plan = transport({
+      cdx: cdx([["20261010120000", "https://www.instagram.com/small.account/"]]),
+      captures: { [capture]: response(walled) },
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(result.capturesFailed).toBe(1);
+    expect(result.points).toEqual([]);
+    expect(result.reason).toContain("none could be read");
+    expect(result.notes.join(" ")).toContain("login wall");
+  });
+
+  it("skips a capture above the byte cap and says so", async () => {
+    const capture = "https://web.archive.org/web/20261010120000id_/https://www.instagram.com/small.account/";
+    const plan = transport({
+      cdx: cdx([["20261010120000", "https://www.instagram.com/small.account/"]]),
+      captures: { [capture]: response("x", { contentLength: "104857600" }) },
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, {
+      now: NOW,
+      fetchImpl: plan.fetchImpl,
+      maxBytes: 1024,
+    });
+
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(result.capturesFailed).toBe(1);
+    expect(result.notes.join(" ")).toContain("above the 1024-byte cap");
+  });
+
+  it("an unreachable index is UNAVAILABLE, never EMPTY", async () => {
+    const plan = transport({ cdx: "", captures: {} });
+    const failing = async () => {
+      throw new Error("getaddrinfo ENOTFOUND web.archive.org");
+    };
+
+    const result = await fetchArchivedProfileHistory(USERNAME, {
+      now: NOW,
+      fetchImpl: (url, init) => (url.includes(CDX_URL_MARKER) ? failing() : plan.fetchImpl(url, init)),
+    });
+
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(result.reason).toContain("failure to look");
+    expect(result.points).toEqual([]);
+  });
+
+  it("an index with no captures is EMPTY with an archive-coverage reason", async () => {
+    const plan = transport({ cdx: "[]", captures: {} });
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+
+    expect(result.state).toBe("EMPTY");
+    expect(result.capturesFound).toBe(0);
+    expect(result.reason).toContain("absence of archive coverage");
+    expect(result.reason).not.toContain("inactive");
+  });
+
+  it("filters captures that are not the profile page", async () => {
+    const plan = transport({
+      cdx: cdx([
+        ["20261001120000", "https://www.instagram.com/small.account/reels/"],
+        ["20261002120000", "https://www.instagram.com/someone.else/"],
+      ]),
+      captures: {},
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+
+    expect(result.state).toBe("EMPTY");
+    expect(result.capturesFound).toBe(0);
+    expect(plan.seen).toHaveLength(1); // the index query only — no capture was read
+  });
+
+  it("rejects an invalid username before any request is made", async () => {
+    let called = false;
+    const result = await fetchArchivedProfileHistory("not a username", {
+      now: NOW,
+      fetchImpl: async () => {
+        called = true;
+        return response("[]");
+      },
+    });
+
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(called).toBe(false);
+    expect(result.points).toEqual([]);
+    expect(result.reason).toContain("not a valid Instagram username");
+  });
+
+  it("names its source id so evidence rows stay distinguishable", () => {
+    expect(ARCHIVE_PROFILE_SOURCE_ID).toBe("archive:wayback:v1");
+  });
+});

@@ -216,6 +216,20 @@ export function flagNumber(
   return parsed;
 }
 
+const ACCOUNT_FILLER = new Set(["user", "account", "profile", "handle", "target"]);
+
+/**
+ * "audit user x" is the same request as "audit x": a leading filler word is
+ * skipped only when a real positional follows it, so a lone "user" or "target"
+ * still names that account. Mirrors what the prompt parser accepts.
+ */
+export function accountPositional(positionals: readonly string[]): string | undefined {
+  const first = positionals[0];
+  if (first === undefined) return undefined;
+  const second = positionals[1];
+  return second !== undefined && ACCOUNT_FILLER.has(first.toLowerCase()) ? second : first;
+}
+
 // ---------------------------------------------------------------------------
 // Human rendering
 // ---------------------------------------------------------------------------

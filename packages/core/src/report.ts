@@ -184,6 +184,8 @@ export interface ReportComment {
   postId: string;
   /** The comment text exactly as the source returned it. */
   body: string;
+  /** Like count as stored, when the source listing carried one; null means none was returned. */
+  likeCount?: number | null;
   evidenceId: string | null;
 }
 

@@ -37,6 +37,7 @@ export const RegistryCapabilityId = {
   MEDIA: "MEDIA",
   ACCOUNT_RESEARCH: "ACCOUNT_RESEARCH",
   WEB_RESEARCH: "WEB_RESEARCH",
+  AI_INSIGHTS: "AI_INSIGHTS",
 } as const;
 
 export type RegistryCapabilityId =
@@ -225,6 +226,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     ui: [
       "igtrack tags (CLI)",
       "igtrack_tags (MCP tool)",
+      "igtrack tracker <target> (tagged count and evidence)",
       "dossier counts (taggedMedia)",
       "activity timeline (TAG_OBSERVED)",
     ],
@@ -263,7 +265,10 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: [],
     permissions: "Would require an official highlights edge.",
     persistence: [],
-    ui: ["/targets/[id] (highlights tab shows UNAVAILABLE with reason)"],
+    ui: [
+      "/targets/[id] (highlights tab shows UNAVAILABLE with reason)",
+      "igtrack tracker <target> (highlights KPI refused with reason)",
+    ],
     howItWorks:
       "There is no provider method, table, pipeline, or UI beyond the honest unavailable state — by decision, not oversight.",
     whyUnavailable:
@@ -387,7 +392,10 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: [],
     permissions: "Would require a public likes feed, which does not exist.",
     persistence: [],
-    ui: ["Relationships page states UNAVAILABLE with reason; like counts on posts and comments are labeled provider metadata"],
+    ui: [
+      "Relationships page states UNAVAILABLE with reason; like counts on posts and comments are labeled provider metadata",
+      "igtrack tracker <target> (accounts-liked KPI refused with reason)",
+    ],
     howItWorks:
       "There is no writer and no reader for like actors: per-post and per-comment like_count is provider-supplied metadata shown as such, never observed like activity.",
     whyUnavailable:
@@ -510,5 +518,26 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     liveState: "LIVE_VERIFIED",
     liveEvidence:
       "Live-verified on the keyless default path: `igtrack audit <handle>` with IGTRACK_RESEARCH_SEARCH_PROVIDER=auto and no API key answers SEARCH_SUCCEEDED across the fixed four-query budget (quoted form, profile-URL form, @-mention form, bare form), returns candidates that deduplicate to canonical URLs, and reports retrieval as COMPLETED_PARTIAL when a page times out — the timeout is named (TIMEOUT), never rendered as zero. Structured values from pages that never name the handle are discarded by the relevance gate, so a poor index yields PAGES_IRRELEVANT and never a confident claim; every candidate carries its ranking reason and disposition, every refusal is a policy skip rather than a failed fetch, and no secret appears in either rendering. On a control handle with real web presence the same pipeline fetched four of four pages naming the handle and produced 41 registry-accepted facts with outcome EVIDENCE_EXTRACTED, proving the extractor and gate yield evidence when a source states it. The keyed Brave leg is implemented and pinned by mocked-transport tests (mapping, 401/429/500, key redaction) but has not been observed live in this environment: set IGTRACK_RESEARCH_SEARCH_PROVIDER=brave and IGTRACK_RESEARCH_SEARCH_API_KEY to verify it. Without either, search answers UNAVAILABLE with the exact reason rather than failing open. Search states (SEARCH_NOT_CONFIGURED/SEARCH_SUCCEEDED/SEARCH_NO_RESULTS/SEARCH_FAILED), retrieval states (NOT_ATTEMPTED/COMPLETED/COMPLETED_PARTIAL/FAILED) and the seven outcome classes (SEARCH_UNAVAILABLE…EVIDENCE_EXTRACTED) are pinned in apps/cli/test/audit.test.ts; the query strategy in packages/ingestion/test/research-queries.test.ts; provider selection (unset=none, auto=Brave-with-key else keyless, unknown=configuration error) in packages/ingestion/test/research-search.test.ts.",
+  },
+  {
+    id: "AI_INSIGHTS",
+    label: "AI-generated personality, relationship and behavioural insights",
+    providerMethods: [],
+    permissions:
+      "No permission can supply this because no provider returns it. Personality, MBTI, relationship, financial and location inferences are model output, not observations; deriving them from this ledger would present inference as evidence.",
+    persistence: [],
+    ui: [
+      "igtrack activity-report <target> (AI Insights tab, always UNAVAILABLE)",
+      "igtrack_activity_report (MCP tool, ai_insights block)",
+      "igtrack tracker <target> (ai_insights block, always UNAVAILABLE)",
+    ],
+    howItWorks:
+      "The fourth tab renders model-generated inferences — personality and MBTI profiles, relationship reads, risk and location guesses — over a monitored account. IGTrack keeps the tab's place in the report contract and its state, not its content: the tab is present, ordered fourth, and every field is UNAVAILABLE with this registry reason. Observed and derived analytics remain in tabs one and two, where each row carries its source, observation time and evidence hash.",
+    whyUnavailable:
+      "IGTrack has no AI-insight provider. Personality, MBTI, relationship, financial and location inferences are not observations; no supported source returns them, and generating them from this ledger would be fabrication. The AI Insights tab is therefore UNAVAILABLE.",
+    unlock: null,
+    liveState: "DOCUMENTED_ABSENT",
+    liveEvidence:
+      "No platform field or edge returns these inferences; the exhaustive IG User/Media references contain no personality, relationship or risk attribute. The absence is a finding, not a gap in wiring: adding a provider method is not possible, and no fixture, heuristic or model call will be substituted for one.",
   },
 ];

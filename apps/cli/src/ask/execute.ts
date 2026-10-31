@@ -9,6 +9,7 @@ import {
   opDossier,
   opEvidence,
   opExport,
+  opFullAudit,
   opInsights,
   opInvestigate,
   opLookup,
@@ -25,6 +26,7 @@ import {
   opTargetList,
   opWork,
 } from "../tools.js";
+import type { AskInput, AskInputOption } from "./clarify.js";
 import { ASK_EXAMPLES, describePlan, planAsk, type AskIntent, type AskPlan } from "./parse.js";
 
 // ---------------------------------------------------------------------------
@@ -60,6 +62,12 @@ export interface AskResult {
     confidence: AskPlan["confidence"];
   };
   status: AskStatus;
+  /**
+   * Present when status is NEEDS_INPUT: the question, its answerable options
+   * and whether free text is accepted. A terminal reads the answer; an agent
+   * asks its operator and re-sends the sentence with the account appended.
+   */
+  input?: AskInput;
   steps: AskStep[];
   answer: string[];
   next: string[];
@@ -152,6 +160,8 @@ function progressText(intent: AskIntent, plan: AskPlan): string {
       return "Running the scheduler once and draining the job queue.";
     case "audit":
       return `Auditing${handle} — config, probe, stored record and public web.`;
+    case "full_audit":
+      return `Collecting everything readable about${handle} — archive counts, platform stages, stored record — then reading the audit back. This can take a minute.`;
     default:
       return `Reading ${intent}${handle}…`;
   }
@@ -402,6 +412,22 @@ async function runIntent(
           ".";
       }
       answer.push(summary);
+      const movement = result.countActivity;
+      const signed = (value: number | null): string =>
+        value === null ? "not carried" : `${value >= 0 ? "+" : ""}${value}`;
+      if (movement.state === "OBSERVED") {
+        answer.push(
+          `Count movement across ${movement.points.length} stored profile observation(s): ` +
+            `followers ${signed(movement.net.followerDelta)}, following ${signed(movement.net.followingDelta)}, ` +
+            `posts ${signed(movement.net.postDelta)} — a count delta is movement of a number, never a named follow.`,
+        );
+      } else if (movement.state === "EMPTY") {
+        answer.push(
+          `Count movement: none across ${movement.points.length} comparable observation(s) — a computed zero, not missing data.`,
+        );
+      } else {
+        answer.push(`Count movement is unavailable: ${movement.reason ?? "no comparable observation is stored"}.`);
+      }
       for (const row of result.rows.slice(0, 10)) {
         answer.push(
           `${row.firstSeenAt} — ${row.change.replace(/_/g, " ").toLowerCase()} @${row.username}` +
@@ -645,6 +671,70 @@ async function runIntent(
       return stepResult(intent, summary, result);
     }
 
+    case "full_audit": {
+      const username = requireUsername(plan);
+      const result = await opFullAudit(ctx, {
+        username,
+        ...(plan.urls.length > 0 ? { urls: plan.urls } : {}),
+      });
+      const collected = result.surfaces.filter((row) => row.state === "COLLECTED").length;
+      const unavailable = result.surfaces.filter((row) => row.state === "UNAVAILABLE").length;
+      const summary =
+        `Full audit of @${result.username}: ${collected} surface(s) collected, ` +
+        `${result.surfaces.filter((row) => row.state === "EMPTY").length} empty, ${unavailable} unavailable.`;
+      answer.push(summary);
+
+      const activity = result.activity;
+      const alreadyReported = new Set<string>();
+      if (activity !== null) {
+        const counts = activity.recent?.countActivity ?? null;
+        alreadyReported.add("Recent count movement (derived from stored observations)");
+        if (counts !== null && counts.state === "OBSERVED") {
+          const delta = (value: number | null): string =>
+            value === null ? "not carried" : `${value >= 0 ? "+" : ""}${value}`;
+          answer.push(
+            `Recent count movement (${activity.windowDays}-day window, exact counts at observation times): ` +
+              `followers ${delta(counts.net.followerDelta)}, following ${delta(counts.net.followingDelta)}, ` +
+              `posts ${delta(counts.net.postDelta)}. This is movement of numbers, not named follows.`,
+          );
+        } else if (counts !== null) {
+          answer.push(`Count movement: ${counts.state}${counts.reason === null ? "" : ` — ${counts.reason}`}`);
+        }
+        const recent = activity.recent;
+        if (recent !== null && recent.state === "OBSERVED") {
+          answer.push(
+            `Named edges: ${recent.counts.newFollowing ?? "null"} new following, ` +
+              `${recent.counts.lostFollowing ?? "null"} lost following, ` +
+              `${recent.counts.newFollowers ?? "null"} new followers, ` +
+              `${recent.counts.lostFollowers ?? "null"} lost followers.`,
+          );
+        } else if (recent !== null) {
+          answer.push(
+            recent.state === "EMPTY"
+              ? "Named follows/unfollows: EMPTY — a COMPLETE roster baseline exists and no add or removal was recorded in this window."
+              : `Named follows/unfollows: ${recent.state} — ` +
+                (recent.notes.find((note) => note.startsWith("Recent identity activity")) ??
+                  "no COMPLETE roster baseline is stored."),
+          );
+        }
+      }
+
+      for (const row of result.surfaces.filter((surface) => surface.state === "UNAVAILABLE").slice(0, 4)) {
+        if (alreadyReported.has(row.surface)) continue;
+        answer.push(`${row.surface}: ${row.detail}`);
+      }
+      for (const gap of result.gaps.slice(0, 2)) {
+        answer.push(
+          `Gap — ${gap.subject}: ${gap.reason} ` +
+            `(${gap.howToImprove === null ? "no documented route yet" : gap.howToImprove})`,
+        );
+      }
+      for (const nextStep of result.nextSteps.slice(0, 2)) {
+        answer.push(`Suggested next: ${nextStep.action} (${nextStep.because})`);
+      }
+      return stepResult(intent, summary, result);
+    }
+
     case "audit": {
       const username = requireUsername(plan);
       const result = await opAudit(ctx, {
@@ -794,6 +884,11 @@ function needsInput(
   } else {
     answer.push(`Which account do you mean? You track: ${names.slice(0, 12).map((name) => `@${name}`).join(", ")}.`);
   }
+  const options: AskInputOption[] = targets.slice(0, 12).map((target) => ({
+    value: target.username,
+    label: `@${target.username}`,
+    detail: `${target.observationMode} · last observed ${isoDate(target.lastObserved)}`,
+  }));
   return {
     prompt: plan.prompt,
     understanding: {
@@ -806,6 +901,15 @@ function needsInput(
       confidence: plan.confidence,
     },
     status: "NEEDS_INPUT",
+    input: {
+      kind: "USERNAME",
+      question:
+        options.length === 0
+          ? "Which Instagram account should I work on?"
+          : "Which account do you mean?",
+      options,
+      allowFreeText: true,
+    },
     steps: [
       {
         intent: plan.primary,

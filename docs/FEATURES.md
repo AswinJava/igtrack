@@ -59,9 +59,11 @@ plain-language tour. `igtrack help <command>` prints that command's contract.
 | `igtrack public <handle>` | Read a logged-out public profile page in local headless Chrome. |
 | `igtrack post <post URL>` | Read one public post/reel/tv page from its permalink. |
 | `igtrack anonstories <handle>` | Login-free stories, highlights and story mentions via a third-party aggregator. |
+| `igtrack viewer <input>` | One account across six tabs — stories, posts, reels, highlights, reposts, tagged. `--tab`, `--source public\|anonstories\|both`, `--mention`, `--max-posts`, `--max-highlights`, `--json`, `--out`. Reposts and tagged media are typed `UNAVAILABLE` with the capability reason; media rows carry source URLs, never proxied bytes. |
 | `igtrack lookup <handle>` | Probe another public professional account through the documented Business Discovery edge. |
 | `igtrack mention <commentId>` | Read one comment that mentions the owned account, by id. |
 | `igtrack audit <handle>` | The read-only investigation report: config, probe, stored record, public web, refusals. `--url`, `--max-sources`, `--json`. |
+| `igtrack audit <handle> --full [--days N]` | The collecting audit: runs every stage, then reads public-web-archive profile captures into a dated count series for the days before this deployment first saw the account, and reads back the roster-delta activity. Counts only — a named follow still needs a COMPLETE roster. |
 
 ### Investigation and reports
 
@@ -69,6 +71,8 @@ plain-language tour. `igtrack help <command>` prints that command's contract.
 |---|---|
 | `igtrack investigate <handle>` | The primary workflow: every supported stage, one dossier. `--url`, `--no-web`, `--force`, `--json`. |
 | `igtrack report <target> --period weekly\|monthly\|quarterly\|yearly` | Compose one calendar period from stored rows. `--at <date>`, `--format md`, `--out`. |
+| `igtrack tracker [target]` | Watchlist of tracked accounts, one card each, for the latest **closed** period (weekly by default): new followings, unfollows, posts, stories, comments, tags, mentions. With a target it adds rosters, top commenters, recent comments, posts, hashtags, next-scan state and refusals. `--period`, `--at` (selects exactly, may be open), `--limit`, `--format md\|json`, `--out`. Read-only. |
+| `igtrack activity-report <target>` | The four-tab Activity Report over stored rows. `--period daily\|weekly\|monthly\|quarterly\|yearly`, `--at`, `--data-id`, `--tab analytics\|trails\|stories\|insights`, `--limit`, `--inventory-limit`, `--format md\|json`, `--out`. Read-only. |
 | `igtrack reports <target>` | Which periods have stored data. |
 | `igtrack audience <target>` | Mutuals and one-way follows over COMPLETE rosters only. |
 | `igtrack recent <target>` | First-seen follow changes since the stored baseline. `--direction`. |
@@ -96,7 +100,7 @@ plain-language tour. `igtrack help <command>` prints that command's contract.
 
 ## MCP tools
 
-38 tools, all backed by the same operations layer as the CLI.
+42 tools, all backed by the same operations layer as the CLI.
 
 **Orientation** — `igtrack_ask`, `igtrack_status`, `igtrack_capabilities`,
 `igtrack_doctor`, `igtrack_plan`
@@ -109,11 +113,12 @@ plain-language tour. `igtrack help <command>` prints that command's contract.
 `igtrack_evidence`, `igtrack_evidence_chain`, `igtrack_tags`, `igtrack_insights`
 
 **Read-through** — `igtrack_public`, `igtrack_post`, `igtrack_anonstories`,
-`igtrack_lookup`, `igtrack_mention_read`, `igtrack_audit`
+`igtrack_viewer`, `igtrack_lookup`, `igtrack_mention_read`, `igtrack_audit`
 
-**Investigation and periods** — `igtrack_investigate`, `igtrack_report`,
-`igtrack_reports`, `igtrack_audience`, `igtrack_recent`, `igtrack_export`,
-`igtrack_digest`, `igtrack_alerts`
+**Investigation and periods** — `igtrack_investigate`, `igtrack_full_audit`,
+`igtrack_report`, `igtrack_reports`, `igtrack_activity_report`, `igtrack_tracker`,
+`igtrack_audience`, `igtrack_recent`, `igtrack_export`, `igtrack_digest`,
+`igtrack_alerts`
 
 **Claims and research** — `igtrack_claims_list`, `igtrack_claim_add`,
 `igtrack_claim_retract`, `igtrack_research`, `igtrack_research_run`
@@ -173,6 +178,40 @@ exclusive end.
 A report never scans, queues or writes, so the same window renders the same
 document later. `--at` selects the period containing a date. `reports` indexes
 which periods can be composed.
+
+`activity-report` implements the four-tab Activity Report over the same stored
+rows. It has four tabs in fixed order — Activity Analytics, Ties & Trails,
+Stories & Highlights, AI Insights — five period types (DAILY, WEEK, MONTH,
+SEASON, YEAR), an inventory of every period with a badge and a
+delivered/not-delivered state, a timeline whose periods can be opened with
+`--data-id`, and totals with a separate `month_new`. Column names, ordered tab
+list, badges and period data ids follow the pinned output contract.
+
+It never manufactures the parts that are not observations. Stars, likes and
+liker identities, highlights, interaction history and AI-generated personality
+or relationship inferences are present in their tabs as `null` with
+`UNAVAILABLE` and the capability-registry reason — never as zero or as invented
+text. Download is a CLI command that writes the stored rows with provenance, not
+a server-generated file URL. A follow count is `DERIVED` only when two COMPLETE
+following rosters were compared; a month with no COMPLETE roster pair shows
+`null`, because a zero month would claim "nothing changed" when nothing was
+measured. Historical reports are end-scoped: roster size, captions and recent
+comments are read as of the window's end, so the same `--at` renders the same
+document later.
+
+`tracker` is the watchlist view over the same ledger. Without a target it lists
+every owned account, sorted by last observation, each with a card for the latest
+**closed** period — the current week is not reported as if it were complete.
+`--at` selects the containing window exactly, including an open one, which is
+marked `IN_PROGRESS` rather than delivered. With a target the same card adds the
+follow/unfollow rosters, top commenters, recent comments, posts, hashtags,
+next-scan state and the explicit refusal list. Watchlist and detail are projected
+from one builder, so their shared counts cannot disagree, and a card's counts
+match `activity-report` for the same window. Follow metrics stay `UNAVAILABLE`
+with the coverage-gap reason unless a COMPLETE roster comparison measured them;
+listed families are the only ones with a lawful source. Accounts liked,
+highlights, verified followings, AI insights, cross-platform identities, places
+and email delivery are refused with their registry reasons.
 
 `audience` uses the latest COMPLETE follower and following snapshots only. A
 PARTIAL snapshot would make every unread member look like a non-follower, so it

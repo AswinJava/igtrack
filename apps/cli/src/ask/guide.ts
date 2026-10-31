@@ -74,6 +74,7 @@ THREE WAYS TO USE IT
 
 WHAT YOU CAN ASK
   Investigation     "investigate @name", "who is @name?", "tell me everything about @name"
+  Everything        "audit user @name", "collect everything you can about @name"
   Changes           "what changed on @name in the last 7 days?", "what's new?"
   Relationships     "who does @name interact with most?", "top 10 connections"
   Content           "which posts is @name tagged in?", "show recent activity"
@@ -84,6 +85,10 @@ WHAT YOU CAN ASK
   Limits            "what can't you do?", "is this legal?"
   Next step         "what should I do next for @name?"
 
+  Leave the account out and it asks which one: answer by number, with an
+  @handle, or "cancel". An agent receives the same question as structured
+  "input" and asks its operator instead of guessing.
+
 COMMANDS
   setup                    Prepare .env, Postgres, migrations and demo data
   status                   Provider, targets, queue and source health
@@ -91,7 +96,7 @@ COMMANDS
   investigate <username>   The full workflow: every stage, one dossier
   public <username>        Logged-out public-page read (needs local Chrome)
   anonstories <username>   Login-free stories/highlights (third-party relay)
-  audit <username>         One evidence-honest report, read-only
+  audit <username>         One evidence-honest report; --full collects first
   activity                 What changed, newest first, with evidence ids
   relationships <target>   Accounts ranked by observed signal
   dossier <target>         Everything stored about one account, and its gaps

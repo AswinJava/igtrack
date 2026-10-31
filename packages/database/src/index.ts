@@ -23,6 +23,7 @@ export * from "./repositories/source-health.js";
 export * from "./repositories/capability-metrics.js";
 export * from "./repositories/app-queries.js";
 export * from "./repositories/report-queries.js";
+export * from "./repositories/activity-report-queries.js";
 export * from "./jobs/backoff.js";
 export * from "./jobs/queue.js";
 export * from "./jobs/schedule.js";

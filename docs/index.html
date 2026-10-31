@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IGTrack — evidence-first Instagram analytics you can prove</title>
-<meta name="description" content="Self-hosted Instagram analytics with an append-only evidence ledger. Every number traces to an observation; anything the platform does not expose is reported UNAVAILABLE with a reason. JSON CLI and a 38-tool MCP server.">
+<meta name="description" content="Self-hosted Instagram analytics with an append-only evidence ledger. Every number traces to an observation; anything the platform does not expose is reported UNAVAILABLE with a reason. JSON CLI and a 41-tool MCP server.">
 <link rel="canonical" href="https://aswinjava.github.io/igtrack/">
 <meta name="theme-color" content="#0b0f14">
 
@@ -226,7 +226,7 @@ footer{padding:44px 0 60px;color:var(--dim);font-size:13.5px}
         <div class="card feat"><div class="ico">◐</div><h3>Partial scans never diff</h3><p>Completeness is recorded per scan. A truncated read can inform, but it can never produce a false claim.</p></div>
         <div class="card feat"><div class="ico">⟳</div><h3>Resumable workers</h3><p>Leases, heartbeats and checkpoints on a Postgres queue — a restart resumes the scan instead of losing it.</p></div>
         <div class="card feat"><div class="ico">▦</div><h3>Period reports</h3><p>Weekly, monthly and quarterly reports where every section is OBSERVED, DERIVED, EMPTY or UNAVAILABLE.</p></div>
-        <div class="card feat"><div class="ico">⌘</div><h3>38-tool MCP server</h3><p>The CLI and the MCP server call the same operations layer. Your agent gets identical results, not a second API.</p></div>
+        <div class="card feat"><div class="ico">⌘</div><h3>41-tool MCP server</h3><p>The CLI and the MCP server call the same operations layer. Your agent gets identical results, not a second API.</p></div>
       </div>
     </div>
   </section>
@@ -249,13 +249,13 @@ footer{padding:44px 0 60px;color:var(--dim);font-size:13.5px}
         <h2>Speak agent, natively</h2>
         <p class="sub" style="margin-bottom:22px">One operations layer, two surfaces. The CLI is JSON-first; the MCP server exposes the same operations over stdio with no drift between them.</p>
         <ul class="checks">
-          <li><strong>38 MCP tools</strong> for observation, derivation, reporting and research.</li>
-          <li><strong>25 declared capabilities</strong>, each with its state, supplier and reason when the answer is no.</li>
+          <li><strong>42 MCP tools</strong> for observation, derivation, reporting and research.</li>
+          <li><strong>26 declared capabilities</strong>, each with its state, supplier and reason when the answer is no.</li>
           <li><strong>Claims ledger</strong> with a closed predicate registry, source URL, excerpt and hash.</li>
           <li><strong>No telemetry.</strong> Self-hosted, your database, your history.</li>
         </ul>
       </div>
-      <div class="snippet">$ igtrack ask "what changed on aurora.wilde<br>&nbsp;&nbsp;in the last 7 days?"<br><br>$ igtrack status<br><span class="m">provider · targets · queue · source health</span><br><br>$ igtrack capabilities<br><span class="m">25 capabilities, 38 MCP tools</span></div>
+      <div class="snippet">$ igtrack ask "what changed on aurora.wilde<br>&nbsp;&nbsp;in the last 7 days?"<br><br>$ igtrack status<br><span class="m">provider · targets · queue · source health</span><br><br>$ igtrack capabilities<br><span class="m">26 capabilities, 42 MCP tools</span></div>
     </div>
   </section>
 </main>

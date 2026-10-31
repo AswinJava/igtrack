@@ -1,4 +1,4 @@
-import { display, emit, flagNumber, flagString, isJson, table, UsageError, type ParsedArgs } from "../output.js";
+import { accountPositional, display, emit, flagNumber, flagString, isJson, table, UsageError, type ParsedArgs } from "../output.js";
 import { createContext } from "../context.js";
 import { opInvestigate, type InvestigateResult } from "../tools.js";
 
@@ -49,7 +49,7 @@ Examples:
 
 export async function runInvestigate(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
-  const username = args.positionals[0];
+  const username = accountPositional(args.positionals);
   if (username === undefined) {
     throw new UsageError(
       "Usage: igtrack investigate <username|@handle|profile-url>  (igtrack investigate --help)",

@@ -400,6 +400,23 @@ export function renderDoctorHuman(report: DoctorReport): string {
   ].join("\n");
 }
 
+export const DOCTOR_HELP = `igtrack doctor [--json]
+
+Diagnose this deployment without touching the network: provider usability,
+database reachability and applied migrations, configuration readiness (variable
+names and fixes, never values), scheduler state, source-health rows and
+findings. Exits 3 only when the deployment cannot run — an unusable provider or
+a required variable that is missing, still the pasted placeholder, or invalid.
+Advisory findings keep exit 0 so a health check never breaks a script.`;
+
+export const STATUS_HELP = `igtrack status [--json]
+
+Show the current state of this deployment: the owner, the active provider and
+whether it is usable, every tracked target with status, latest follower and
+following counts (null with a reason when unavailable — never 0), last
+observation and scan outcome, the job queue by state, and per-capability source
+health. Database-only: no network request is made and nothing is refreshed.`;
+
 export async function runDoctor(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
   const ctx = await createContext();
