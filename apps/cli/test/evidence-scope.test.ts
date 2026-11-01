@@ -120,8 +120,8 @@ describe.skipIf(!databaseUp)("evidence ledger scoping", () => {
   });
 
   it("refuses a second positional rather than quietly ignoring it", async () => {
-    await expect(runEvidence({ positionals: ["aurora.wilde", "extra"], flags: {} })).rejects.toThrow(
-      UsageError,
-    );
+    await expect(
+      runEvidence({ command: "evidence", positionals: ["aurora.wilde", "extra"], flags: {} }),
+    ).rejects.toThrow(UsageError);
   });
 });
