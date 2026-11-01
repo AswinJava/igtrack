@@ -4,12 +4,17 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 3
+    # Majors now leave their group and claim a PR each, so a batch needs room
+    # for the two grouped PRs plus one per breaking update. At the old limit of
+    # 3 a monthly run could silently drop majors instead of surfacing them.
+    open-pull-requests-limit: 6
     groups:
       dev-dependencies:
         dependency-type: development
+        update-types: [minor, patch]
       production-dependencies:
         dependency-type: production
+        update-types: [minor, patch]
     commit-message:
       prefix: deps
 
