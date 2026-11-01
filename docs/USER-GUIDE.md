@@ -144,8 +144,12 @@ no paywall and no async run. The first COMPLETE roster on the chosen side is the
 baseline; every stored add or removal since then is listed with the time this
 ledger **first saw it** — Instagram exposes no follow timestamp, so that time is
 never presented as the follow time. The answer is `OBSERVED` with rows, `EMPTY`
-when a baseline exists and nothing moved, or `UNAVAILABLE` when no COMPLETE
-roster exists, with the source's reason. A side with no baseline reports `null`
+when a baseline exists and no add or removal was recorded in the window, or
+`UNAVAILABLE` when no COMPLETE roster exists, with the source's reason. `EMPTY`
+says which of two facts it is in its own note: a COMPLETE roster re-read inside
+the window with nothing changed is a computed no-change, while no re-read inside
+the window only means nothing was observed between the older reads — never an
+observed no-change. A side with no baseline reports `null`
 counts, not zeros; `present now` and `mutual now` stay `null` when the roster
 that would answer them is absent. Edges older than the baseline cannot be
 dated and are never called recent.

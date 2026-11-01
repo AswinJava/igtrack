@@ -11,6 +11,7 @@ import {
   flagString,
   parseArgs,
   parseSince,
+  strictFlagBool,
   table,
   UsageError,
 } from "../src/output.js";
@@ -36,6 +37,35 @@ describe("argument parsing", () => {
     const parsed = parseArgs(["work", "--json", "--max"]);
     expect(parsed.flags["json"]).toBe(true);
     expect(parsed.flags["max"]).toBe(true);
+  });
+
+  // A switch must never eat the token after it. `igtrack scans run --force
+  // @user` used to read "@user" as the value of --force, which left the command
+  // with no target — and "no target" means every active target.
+  it("keeps a positional after a switch where the operator put it", () => {
+    const parsed = parseArgs(["scans", "run", "--force", "@aurora.wilde"]);
+    expect(parsed.command).toBe("scans");
+    expect(parsed.positionals).toEqual(["run", "@aurora.wilde"]);
+    expect(parsed.flags["force"]).toBe(true);
+
+    const frontJson = parseArgs(["--json", "status"]);
+    expect(frontJson.command).toBe("status");
+    expect(frontJson.flags["json"]).toBe(true);
+
+    const typed = parseArgs(["scans", "run", "@a", "--kind=PROFILE"]);
+    expect(typed.positionals).toEqual(["run", "@a"]);
+    expect(typed.flags["kind"]).toBe("PROFILE");
+
+    expect(parseArgs(["evidence", "--help", "x"]).flags["help"]).toBe(true);
+    expect(parseArgs(["evidence", "--help", "x"]).positionals).toEqual(["x"]);
+    expect(parseArgs(["-h", "status"]).command).toBe("status");
+  });
+
+  it("refuses a value typed onto a switch instead of guessing it", () => {
+    expect(strictFlagBool({ force: true }, "force")).toBe(true);
+    expect(strictFlagBool({}, "force")).toBe(false);
+    expect(strictFlagBool({ force: "false" }, "force")).toBe(false);
+    expect(() => strictFlagBool({ force: "@aurora.wilde" }, "force")).toThrow(UsageError);
   });
 
   it("defaults to help with no arguments", () => {

@@ -309,6 +309,21 @@ describe("planAsk: a plan never contains the opposite of the request", () => {
     }
   });
 
+  it("says out loud when an add named in the same sentence is dropped", () => {
+    // One prompt carries one handle, so the add cannot ride along with the
+    // removal — but a write the operator named out loud is never lost in
+    // silence. The plan has to say which half it dropped and how to get it.
+    const plan = planAsk("stop tracking @aurora.wilde and start tracking @dune.harbor");
+    expect(plan.intents).not.toContain("track");
+    expect(plan.assumptions.join(" ")).toMatch(/only the removal runs/);
+
+    // Beside a read there is no opposite to resolve, so the add either runs or
+    // is announced; a plan that quietly forgot it is the defect.
+    const list = planAsk("show the tracked accounts and start tracking @dune.harbor");
+    const announced = list.assumptions.some((note) => /send the add as its own prompt/.test(note));
+    expect(list.intents.includes("track") || announced, JSON.stringify(list)).toBe(true);
+  });
+
   it("a question about the tracked list is the list, not the add", () => {
     for (const prompt of [
       "which accounts are tracked?",

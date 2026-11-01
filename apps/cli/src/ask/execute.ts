@@ -422,7 +422,12 @@ async function runIntent(
       if (result.sets.notFollowingBack.length > 0) {
         answer.push(`Not following back: ${result.sets.notFollowingBack.slice(0, 10).map((n) => `@${n}`).join(", ")}`);
       }
-      for (const note of result.notes.slice(0, 2)) answer.push(note);
+      // The incomplete summary quotes notes[0] verbatim; repeating it below
+      // turns one refusal into two lines that read as two findings.
+      for (const note of result.notes.slice(0, 2)) {
+        if (summary.includes(note)) continue;
+        answer.push(note);
+      }
       return stepResult(intent, summary, result);
     }
 
@@ -442,9 +447,15 @@ async function runIntent(
           `Recent follow activity for @${result.target.username} is unavailable: ` +
           `no COMPLETE ${direction === "followers" ? "follower" : "following"} roster is on record, so there is no baseline to diff.`;
       } else if (result.state === "EMPTY") {
+        // An empty recent-window answer is two different facts, and opRecent
+        // owns the wording that separates "re-read and nothing moved" from
+        // "nothing was read inside the window". Restating it here is how one
+        // surface ends up claiming a no-change the ledger never observed.
         summary =
-          `No ${direction === "followers" ? "follower" : "follow"} change was recorded for @${result.target.username} ` +
-          `since ${result.since.toISOString()} — the baseline exists and nothing moved.`;
+          `Recent ${direction === "followers" ? "follower" : "follow"} activity for ` +
+          `@${result.target.username} since ${result.since.toISOString()}: ` +
+          (result.notes.find((note) => /add or removal/i.test(note)) ??
+            "no add or removal was recorded in this window");
       } else {
         summary = recentActivitySentence(
           result.target.username,
@@ -476,7 +487,13 @@ async function runIntent(
         );
       }
       if (result.truncated) answer.push(`Showing the newest ${result.limit} row(s); raise the limit for the rest.`);
-      for (const note of result.notes.slice(0, 3)) answer.push(note);
+      // The EMPTY summary above quotes one note verbatim, because opRecent owns
+      // the wording. Printing that note again in the list reads as two facts
+      // where there is one sentence.
+      for (const note of result.notes.slice(0, 3)) {
+        if (summary.includes(note)) continue;
+        answer.push(note);
+      }
       return stepResult(intent, summary, result);
     }
 

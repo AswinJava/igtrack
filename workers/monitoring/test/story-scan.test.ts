@@ -351,6 +351,23 @@ describe.runIf(dbAvailable)("worker STORY_SCAN", () => {
     expect((ev[0]?.metadata as { completion?: string })?.completion).toBe("PARTIAL");
   });
 
+  it("PARTIAL with zero stories is partial, never an observed absence (ST4b)", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const src = storySource({
+      status: CapabilityStatus.PARTIAL,
+      stories: [],
+      note: "Story tray truncated before any item",
+    });
+
+    // COMPLETED_EMPTY means "the whole tray was read and nothing was in it".
+    // A truncated read that happened to store nothing cannot claim that, or the
+    // product would turn "we did not finish looking" into evidence that the
+    // account has no active story.
+    expect(await runStoryScan(handle.db, job, src)).toBe("succeeded-partial");
+    expect(await storyRows(targetId)).toHaveLength(0);
+  });
+
   it("malformed story fixture → non-retryable SCHEMA_MISMATCH, no rows (ST5)", async () => {
     const { targetId, source } = await makeFixtureTarget({ broken: true });
     const job = await makeJob(targetId);

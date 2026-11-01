@@ -1169,11 +1169,29 @@ export function planAsk(prompt: string, options: ParseOptions = {}): AskPlan {
   // "tracking" inside it). They are opposites, and a plan holding both adds back
   // the account the operator just asked to remove — so the specific action wins
   // and its opposite is dropped, the way a repeated read is dropped above.
-  if (chosen.has("untrack")) chosen.delete("track");
+  // When the dropped half was itself asked for out loud, that is said in the
+  // plan: one prompt carries one handle, and a write the operator named is
+  // never lost in silence.
+  const trackWasAsked = scored.some((item) => item.intent === "track" && item.explicit);
+  if (chosen.has("untrack")) {
+    if (trackWasAsked && chosen.has("track")) {
+      assumptions.push(
+        "This sentence asked to both remove and add a target. One prompt carries one account, so only the removal runs — send the add as its own prompt with its own @handle.",
+      );
+    }
+    chosen.delete("track");
+  }
   // "what am I tracking?" is a question about the list, and the word inside it
   // also scores as the add. A sentence whose main ask is the list never asked
   // for a new target, so the write is dropped rather than run after the read.
-  if (primary === "targets") chosen.delete("track");
+  if (primary === "targets") {
+    if (trackWasAsked && chosen.has("track")) {
+      assumptions.push(
+        "This sentence asked for the tracked list and for an add. The list is what was answered — send the add as its own prompt with its own @handle.",
+      );
+    }
+    chosen.delete("track");
+  }
   if (chosen.size === 0) add(primary);
 
   const intents = canonicalOrder([...chosen]);

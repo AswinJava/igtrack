@@ -1,16 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { parsePostReference } from "@igtrack/core";
-import { AnonStoriesProvider, PublicWebProvider } from "@igtrack/ingestion";
 import { createContext, previewMeta, type CliContext } from "../context.js";
 import { VERSION } from "../version.js";
 import { CliError, envelope, registryMeta, storedRowMeta, type OutputMeta, type StoredEvidenceClass } from "../output.js";
 import { planAsk } from "../ask/parse.js";
 import { askDryRun, opAsk } from "../ask/execute.js";
 import {
+  liveReadMeta,
   opActivity,
   opAlerts,
+  opAnonstoriesDossier,
   opAudit,
   opAudience,
   opCapabilities,
@@ -29,6 +29,8 @@ import {
   opLookup,
   opMentionedCommentProbe,
   opPlan,
+  opPublicDossier,
+  opPublicPost,
   opRecent,
   opRelationships,
   opReport,
@@ -48,6 +50,7 @@ import {
   opWork,
   PLAN_GOALS,
   SCAN_KINDS,
+  viewerMeta,
 } from "../tools.js";
 
 // ---------------------------------------------------------------------------
@@ -194,39 +197,10 @@ function withMeta(ctx: CliContext, data: unknown): { ok: true; data: unknown; _m
   return { ok: true, data, _meta: mcpMeta(ctx.meta) };
 }
 
-// The three login-free observation tools read providers directly and never
-// touch the database, so their envelope carries provider meta instead of the
-// context meta (which would misstate the source as the configured provider).
-function withProviderMeta(
-  provider: "public" | "anonstories" | "viewer",
-  sourceId: string,
-  note: string,
-  data: unknown,
-): { ok: true; data: unknown; _meta: unknown } {
-  return {
-    ok: true,
-    data,
-    _meta: {
-      provider,
-      sourceId,
-      synthetic: false,
-      production: process.env.NODE_ENV === "production",
-      studio: "mcp",
-      generatedAt: new Date().toISOString(),
-      note,
-    },
-  };
-}
-
-function providerUnavailable(name: string, err: unknown): CliError {
-  return new CliError(
-    "PROVIDER_UNAVAILABLE",
-    `The ${name} provider is not usable: ${
-      err instanceof Error ? err.message : String(err)
-    } Nothing was requested.`,
-    3,
-  );
-}
+// The login-free observation tools answer without a database context, so they
+// return the operations layer's live-read meta (envelope(data, liveReadMeta(...)))
+// rather than withMeta(): context meta would misstate the source as whichever
+// provider happens to be configured.
 
 function withStoredMeta(
   ctx: CliContext,
@@ -243,13 +217,20 @@ function withStoredMeta(
  * that invented `tab` on a tab-less tool got the unfiltered report back with
  * `isError: false` and no way to know its request was ignored. `.strict()`
  * turns that into the typed refusal every other surface in this product gives.
+ *
+ * A tool that declares no arguments at all needs the same treatment: the SDK
+ * skips input validation entirely when `inputSchema` is absent, so
+ * `igtrack_status` with an invented `target` answered the unfiltered deployment
+ * as though the filter had applied. An explicit empty strict object makes the
+ * "this tool takes nothing" contract enforceable instead of merely unstated.
  */
 function strictToolConfig(config: unknown): unknown {
   if (typeof config !== "object" || config === null) return config;
   const shape = (config as { inputSchema?: unknown }).inputSchema;
-  if (shape === undefined || typeof (shape as { parse?: unknown }).parse === "function") {
-    return config;
+  if (shape === undefined) {
+    return { ...config, inputSchema: z.object({}).strict() };
   }
+  if (typeof (shape as { parse?: unknown }).parse === "function") return config;
   return { ...config, inputSchema: z.object(shape as z.ZodRawShape).strict() };
 }
 
@@ -422,7 +403,7 @@ export function buildServer(): McpServer {
     },
     async (args) =>
       guarded(async () =>
-        withContext(async (ctx) => withMeta(ctx, await opTargetRemove(ctx, args.target))),
+        withContext(async (ctx) => withMeta(ctx, await opTargetRemove(ctx, args))),
       ),
   );
 
@@ -1022,29 +1003,12 @@ export function buildServer(): McpServer {
     },
     async (args) =>
       guarded(async () => {
-        let provider: PublicWebProvider;
-        try {
-          provider = new PublicWebProvider({
-            ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
-            ...(args.maxPosts !== undefined ? { maxPosts: args.maxPosts } : {}),
-          });
-        } catch (err) {
-          throw providerUnavailable("public", err);
-        }
-        const result = await provider.getDossier(args.username);
-        if (result.dossier === undefined) {
-          throw new CliError(
-            result.error?.kind ?? "PUBLIC_WEB_FAILED",
-            result.error?.message ?? result.note ?? "The public dossier could not be built.",
-            1,
-          );
-        }
-        return withProviderMeta(
-          "public",
-          "public:web:v1",
-          "Live observation of Instagram's logged-out public page in a local headless browser. Not an official Graph API response.",
-          result.dossier,
-        );
+        const dossier = await opPublicDossier({
+          username: args.username,
+          ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
+          ...(args.maxPosts !== undefined ? { maxPosts: args.maxPosts } : {}),
+        });
+        return envelope(dossier, liveReadMeta("public-page", "mcp"));
       }),
   );
 
@@ -1067,30 +1031,11 @@ export function buildServer(): McpServer {
     },
     async (args) =>
       guarded(async () => {
-        const parsed = parsePostReference(args.url);
-        if (!parsed.ok) throw new CliError("USAGE", parsed.message, 2);
-        let provider: PublicWebProvider;
-        try {
-          provider = new PublicWebProvider({
-            ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
-          });
-        } catch (err) {
-          throw providerUnavailable("public", err);
-        }
-        const result = await provider.getPublicPost(parsed.reference);
-        if (result.data === undefined) {
-          throw new CliError(
-            result.error?.kind ?? "PUBLIC_WEB_FAILED",
-            result.error?.message ?? result.note ?? "The post could not be read.",
-            result.status === "UNAVAILABLE" ? 3 : 1,
-          );
-        }
-        return withProviderMeta(
-          "public",
-          "public:web:v1",
-          "Live observation of Instagram's logged-out public media page in a local headless browser. Not an official Graph API response.",
-          result.data,
-        );
+        const post = await opPublicPost({
+          url: args.url,
+          ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
+        });
+        return envelope(post, liveReadMeta("public-post", "mcp"));
       }),
   );
 
@@ -1118,31 +1063,12 @@ export function buildServer(): McpServer {
     },
     async (args) =>
       guarded(async () => {
-        let provider: AnonStoriesProvider;
-        try {
-          provider = new AnonStoriesProvider({
-            ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
-            ...(args.maxHighlights !== undefined ? { maxHighlights: args.maxHighlights } : {}),
-          });
-        } catch (err) {
-          throw providerUnavailable("anonstories", err);
-        }
-        const result = await provider.getDossier(args.username, {
+        const dossier = await opAnonstoriesDossier({
+          username: args.username,
+          ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
           ...(args.maxHighlights !== undefined ? { maxHighlights: args.maxHighlights } : {}),
         });
-        if (result.dossier === undefined) {
-          throw new CliError(
-            result.error?.kind ?? "ANONSTORIES_FAILED",
-            result.error?.message ?? result.note ?? "The aggregator dossier could not be built.",
-            1,
-          );
-        }
-        return withProviderMeta(
-          "anonstories",
-          "anonstories:v1",
-          "Live reading of a third-party public aggregator (anonstories.com) through a local browser. PUBLIC_AGGREGATOR — not an Instagram page and not an official Graph API response.",
-          result.dossier,
-        );
+        return envelope(dossier, liveReadMeta("anonstories", "mcp"));
       }),
   );
 
@@ -1200,14 +1126,7 @@ export function buildServer(): McpServer {
           ...(args.maxHighlights !== undefined ? { maxHighlights: args.maxHighlights } : {}),
           ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
         });
-        return withProviderMeta(
-          "viewer",
-          report.profile.sources.length === 0
-            ? "viewer:v1"
-            : `viewer:${report.profile.sources.join("+")}`,
-          "Read-only six-tab composition of the requested public sources. Unavailable tabs carry their registry reason; counts are observed rows.",
-          report,
-        );
+        return envelope(report, viewerMeta(report, "mcp"));
       }),
   );
 

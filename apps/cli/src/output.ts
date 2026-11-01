@@ -161,6 +161,41 @@ export interface ParsedArgs {
   flags: Record<string, string | boolean>;
 }
 
+/**
+ * Flags that are switches, never options with a value.
+ *
+ * Without this list the parser reads the token after `--name` as that flag's
+ * value, so `igtrack scans run --force @user` made `--force` eat the target and
+ * left none — and "no target" means every active target. A write silently
+ * widened is far worse than a write refused, so a switch is resolved by name,
+ * here, before any command sees the argv.
+ *
+ * Add new switches to this set. `--name=value` works for every flag either way,
+ * which is how a switch is forced to carry a value on purpose.
+ */
+export const BOOLEAN_SWITCH_FLAGS: ReadonlySet<string> = new Set([
+  "available",
+  "dry-run",
+  "force",
+  "full",
+  "help",
+  "include-retracted",
+  "json",
+  "local",
+  "no-scheduler",
+  "no-seed",
+  "no-web",
+  "no-archive",
+  "observed",
+  "refresh",
+  "run",
+  "version",
+  "yes",
+]);
+
+/** Single-letter switches. */
+export const BOOLEAN_SWITCH_SHORTS: ReadonlySet<string> = new Set(["h", "v"]);
+
 export function parseArgs(argv: readonly string[]): ParsedArgs {
   const positionals: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -178,6 +213,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         flags[body.slice(0, eq)] = body.slice(eq + 1);
         continue;
       }
+      if (BOOLEAN_SWITCH_FLAGS.has(body)) {
+        flags[body] = true;
+        continue;
+      }
       const next = argv[i + 1];
       if (next !== undefined && !next.startsWith("-")) {
         flags[body] = next;
@@ -189,6 +228,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     }
     if (token.startsWith("-") && token.length === 2) {
       const short = token.slice(1);
+      if (BOOLEAN_SWITCH_SHORTS.has(short)) {
+        flags[short] = true;
+        continue;
+      }
       const next = argv[i + 1];
       if (next !== undefined && !next.startsWith("-")) {
         flags[short] = next;
@@ -224,11 +267,11 @@ export function flagBool(
 const BOOLEAN_WORDS = new Set(["true", "false", "1", "0", "yes", "no"]);
 
 /**
- * `flagBool` for a flag whose whole meaning is "do not do the thing". The parser
- * reads the token after a flag as its value, so `igtrack ask --dry-run "track
- * @x"` turns the promise into a string the request never sees — and the
- * operation runs anyway. A swallowed value is an error, never a silently
- * dropped refusal.
+ * `flagBool` for a switch whose wrong value must stop the command rather than
+ * quietly mean the opposite. `parseArgs` already refuses to let a switch eat the
+ * next token, so the only way here is `--name=something`; a value that is not a
+ * boolean word is a typo, and a typo that re-enables a write is not a judgement
+ * the parser gets to make silently.
  */
 export function strictFlagBool(
   flags: Record<string, string | boolean>,
@@ -239,7 +282,7 @@ export function strictFlagBool(
   if (value === true) return true;
   if (!BOOLEAN_WORDS.has(value.toLowerCase())) {
     throw new UsageError(
-      `--${name} is a switch, not an option with a value. Put it after the request, as in igtrack ask "…" --${name}.`,
+      `--${name} is a switch: it takes no value. Write --${name} alone, or --${name}=true / --${name}=false.`,
     );
   }
   return flagBool(flags, name);

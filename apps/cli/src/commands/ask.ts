@@ -2,7 +2,7 @@ import { stdin, stderr, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { createContext, previewMeta, type CliContext } from "../context.js";
 import { emit, errorHint, isJson, strictFlagBool, table, type ParsedArgs } from "../output.js";
-import { askDryRun, opAsk, type AskResult } from "../ask/execute.js";
+import { askDryRun, opAsk, type AskResult, type AskStatus } from "../ask/execute.js";
 import { formatInputQuestion, mergeClarification } from "../ask/clarify.js";
 import { planAsk, type AskPlan } from "../ask/parse.js";
 import { guideText, welcomeText } from "../ask/guide.js";
@@ -45,8 +45,20 @@ Notes:
   - --json returns { ok, data, _meta }; every step keeps its full operation
     result, so an agent can quote evidence ids and never fill gaps with guesses.
 
-Exit codes: 0 answered (including a clarification), 1 every requested operation
-failed, 2 usage, 3 configuration or connectivity.`;
+Exit codes: 0 answered (including a clarification), 1 the answer is incomplete —
+every requested operation failed, or at least one of them did — 2 usage,
+3 configuration or connectivity.`;
+
+/**
+ * The exit code for an answered request.
+ *
+ * One outcome, one code: a PARTIAL answer did contain an answer, but a step the
+ * sentence asked for failed, and a pipeline that reads exit 0 as "the request
+ * was carried out" would swallow that. NEEDS_INPUT is a question, not a failure.
+ */
+export function askExitCode(status: AskStatus): number {
+  return status === "FAILED" || status === "PARTIAL" ? 1 : 0;
+}
 
 function renderAskHuman(result: AskResult): string {
   if (result.understanding.intents.length === 1 && result.understanding.intents[0] === "guide") {
@@ -303,16 +315,17 @@ export async function runAskPrompt(prompt: string, args: ParsedArgs): Promise<nu
       data: answered,
       human: renderAskHuman(answered),
     });
-    return answered.status === "FAILED" ? 1 : 0;
+    return askExitCode(answered.status);
   } finally {
     await ctx?.close().catch(() => undefined);
   }
 }
 
 export async function runAsk(args: ParsedArgs): Promise<number> {
-  // Validate the switch even with no sentence attached: `igtrack ask --dry-run
-  // "…"` reads the sentence as the flag's value, and a refusal that quietly
-  // becomes a guide is a refusal nobody meant to drop.
+  // Validate the switch even with no sentence attached: `--dry-run=maybe` is a
+  // typo, and a refusal that quietly becomes a guide is a refusal nobody meant
+  // to drop. The bare `--dry-run "…"` trap is gone — a switch no longer eats the
+  // token after it — so flag order is a style choice, not a hazard.
   strictFlagBool(args.flags, "dry-run");
   const prompt = args.positionals.join(" ").trim();
   if (prompt !== "") return runAskPrompt(prompt, args);

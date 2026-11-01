@@ -6,8 +6,10 @@
 //   - http(s) only, no embedded credentials, ports limited to 80/443
 //   - hostname policy (Instagram-family refused before any DNS work)
 //   - DNS resolution checked against private / loopback / link-local /
-//     metadata ranges, IPv4 and IPv6
-//   - robots.txt respected (our UA and *), cached per host per fetcher
+//     metadata ranges, IPv4 and IPv6, and asked again immediately before each
+//     request (a re-check, not socket pinning: platform fetch resolves itself)
+//   - robots.txt respected (our UA and *); a real answer is cached per host per
+//     fetcher, a failed read is asked again AND reported as unverified
 //   - redirects followed manually; EVERY hop re-runs the full gate
 //   - content types limited to HTML/XHTML/plain text
 //   - byte cap and wall-clock timeout enforced while streaming
@@ -26,6 +28,7 @@ import {
   RESEARCH_MAX_REDIRECTS,
   researchHostPolicy,
 } from "@igtrack/core";
+import { ResponseTooLargeError, readBoundedBytes } from "../http/bounded-response.js";
 
 export const RESEARCH_USER_AGENT = "IGTrack-Research/0.1 (+self-hosted; operator-authority)";
 
@@ -51,7 +54,14 @@ export interface FetchSuccess {
   byteSize: number;
   fetchedAt: Date;
   redirectsFollowed: number;
+  /**
+   * Did robots.txt actually answer? A transport failure or a 5xx is NOT a
+   * robots clearance: RFC 9309 lets a client read the page anyway, but the run
+   * may not report that as a checked permission, so `robotsNote` carries what
+   * happened and the surfaces say it out loud.
+   */
   robotsChecked: boolean;
+  robotsNote?: string | null;
 }
 
 export interface FetchFailure {
@@ -229,14 +239,29 @@ interface RobotsRules {
   disallows: string[];
 }
 
+/**
+ * RFC 9309 product-token matching, kept deliberately conservative.
+ *
+ * A group applies to us when its token is `*`, equals our product token, or is
+ * a prefix of it (so `User-agent: igtrack` covers `IGTrack-Research`, the way
+ * crawlers expect `bot` to cover `bot-killer`). Every applying group's
+ * `Disallow` values are collected and the most restrictive wins — a group
+ * naming some other bot never applies to us, and a page we need not fetch is
+ * worth less than a permission we did not have.
+ */
+function groupAppliesTo(value: string, productToken: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed === "*") return true;
+  const token = trimmed.toLowerCase().replace(/[^a-z0-9_-]/g, "");
+  if (token === "") return false;
+  return token === productToken || productToken.startsWith(token);
+}
+
 function parseRobots(text: string, userAgent: string): RobotsRules {
-  const uaToken = userAgent.split("/")[0]?.toLowerCase() ?? "";
-  const lines = text.split(/\r?\n/);
-  let applicable: string[] | null = null; // null = no matching group seen yet
-  let inStarGroup = false;
+  const productToken = (userAgent.split("/")[0] ?? "").toLowerCase().replace(/[^a-z0-9_-]/g, "");
   const disallows: string[] = [];
-  let currentApplies = false;
-  for (const rawLine of lines) {
+  let currentGroupApplies = false;
+  for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/#.*$/, "").trim();
     if (line === "") continue;
     const idx = line.indexOf(":");
@@ -244,24 +269,11 @@ function parseRobots(text: string, userAgent: string): RobotsRules {
     const field = line.slice(0, idx).trim().toLowerCase();
     const value = line.slice(idx + 1).trim();
     if (field === "user-agent") {
-      // A new group starts when a UA line follows rules (simplified RFC9309 grouping).
-      if (applicable !== null && !currentApplies) {
-        // keep scanning; group boundaries below handle it
-      }
-      const isOurs =
-        value === "*"
-          ? (inStarGroup = true, true)
-          : value.toLowerCase().includes(uaToken) || uaToken.includes(value.toLowerCase().replace(/^\*/, ""));
-      if (value === "*") {
-        currentApplies = true;
-      } else {
-        currentApplies = isOurs;
-      }
-      applicable = applicable ?? [];
+      currentGroupApplies = groupAppliesTo(value, productToken);
       continue;
     }
-    if (field === "disallow") {
-      if (currentApplies && value !== "") disallows.push(value);
+    if (field === "disallow" && currentGroupApplies && value !== "") {
+      disallows.push(value);
     }
     // Allow lines are deliberately not modeled: the engine is a research
     // client, not a crawler — the most restrictive rule wins, and a site
@@ -270,9 +282,49 @@ function parseRobots(text: string, userAgent: string): RobotsRules {
   return { disallows };
 }
 
-function robotsAllows(rules: RobotsRules | null, path: string): boolean {
-  if (rules === null) return true; // no robots fetched → allow (public page)
-  return !rules.disallows.some((prefix) => path.startsWith(prefix));
+const ROBOTS_DIRECTIVE_LINE = /^(user-agent|allow|disallow|sitemap|crawl-delay|host)\s*:/i;
+
+/** Does this body carry at least one robots-shaped line? */
+function hasRobotsDirectives(text: string): boolean {
+  return text
+    .split(/\r?\n/)
+    .some((line) => ROBOTS_DIRECTIVE_LINE.test(line.replace(/#.*$/, "").trim()));
+}
+
+/**
+ * Is this HTTP 200 answer to /robots.txt something other than a robots file?
+ *
+ * Captive portals and wafer walls answer every path with an HTML login page.
+ * Only a body that carries no robots line *and* looks like markup is refused as
+ * "not an answer" — a real robots file served as `text/html` still counts,
+ * because under-blocking a site's own disallow is the worse mistake.
+ */
+function isNotARobotsFile(contentType: string, body: string): boolean {
+  if (body.trim() === "") return false;
+  if (hasRobotsDirectives(body)) return false;
+  const base = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  return base.includes("html") || /^\s*</.test(body);
+}
+
+/**
+ * What the robots read answered. `absent` and `rules` are permissions the site
+ * actually gave (no file, or a file that does not disallow this path);
+ * `unverified` is the case where the read itself failed — the fetch may still
+ * proceed under RFC 9309, but nothing may claim the site was checked.
+ */
+type RobotsOutcome =
+  | { state: "rules"; rules: RobotsRules }
+  | { state: "absent"; note: null }
+  | { state: "unverified"; note: string };
+
+function robotsAllows(outcome: RobotsOutcome, path: string): boolean {
+  if (outcome.state !== "rules") return true;
+  return !outcome.rules.disallows.some((prefix) => path.startsWith(prefix));
+}
+
+/** Host of a URL, for the byte-cap label only — never for a decision. */
+function hostnameOf(rawUrl: string): string {
+  return new URL(rawUrl).hostname;
 }
 
 // --- The fetcher ---------------------------------------------------------------
@@ -283,7 +335,7 @@ export class ResearchFetcher {
   private readonly maxRedirects: number;
   private readonly userAgent: string;
   private readonly pinLookup: ((hostname: string) => Promise<string>) | undefined;
-  private readonly robotsCache = new Map<string, RobotsRules | null>();
+  private readonly robotsCache = new Map<string, RobotsOutcome>();
 
   constructor(options: FetcherOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? RESEARCH_FETCH_TIMEOUT_MS;
@@ -297,7 +349,25 @@ export class ResearchFetcher {
   private async checkDestination(rawUrl: string): Promise<UrlGateDecision> {
     const gated = gateResearchUrl(rawUrl);
     if (!gated.allowed) return gated;
-    const host = gated.url.hostname;
+    const checked = await this.checkHostResolution(gated.url.hostname);
+    if (!checked.allowed) {
+      return { allowed: false, kind: checked.kind, reason: checked.reason };
+    }
+    return gated;
+  }
+
+  /**
+   * Resolve `host` and require EVERY answer to be a public web address.
+   *
+   * The platform's fetch opens the socket with its own resolution, so the
+   * validated answer is not bound to the connection. Asking again immediately
+   * before each request narrows a rebinding race (TTL 0, hostile resolver) to
+   * the handshake itself and refuses the moment a private answer appears; it is
+   * a re-check, not socket pinning, and is described as the former everywhere.
+   */
+  private async checkHostResolution(
+    host: string,
+  ): Promise<{ allowed: true } | { allowed: false; kind: FetchFailureKind; reason: string }> {
     let addresses: string[];
     if (this.pinLookup !== undefined) {
       try {
@@ -325,27 +395,57 @@ export class ResearchFetcher {
     if (!checked.safe) {
       return { allowed: false, kind: "BLOCKED_BY_POLICY", reason: checked.reason };
     }
-    return gated;
+    return { allowed: true };
   }
 
-  private async fetchRobots(url: URL): Promise<RobotsRules | null> {
+  private async fetchRobots(url: URL): Promise<RobotsOutcome> {
     const cached = this.robotsCache.get(url.origin);
     if (cached !== undefined) return cached;
-    let rules: RobotsRules | null = null;
+    let outcome: RobotsOutcome;
     try {
       const robotsUrl = `${url.origin}/robots.txt`;
       const response = await this.rawGet(robotsUrl, 16 * 1024, 5_000);
-      if (response !== null && response.status === 200) {
-        rules = parseRobots(response.body, this.userAgent);
+      if (response.status === 200) {
+        // A 200 is only an answer if it is a robots file. Captive portals and
+        // wafer walls answer every path with HTML; calling that "checked, and it
+        // allows this" would be a permission nobody granted.
+        if (isNotARobotsFile(response.contentType, response.body)) {
+          outcome = {
+            state: "unverified",
+            note: `${url.origin}/robots.txt answered HTTP 200 with a page that is not a robots.txt file`,
+          };
+        } else {
+          outcome = { state: "rules", rules: parseRobots(response.body, this.userAgent) };
+        }
+      } else if (response.status === 404 || response.status === 410) {
+        // The site answered and said there is no file: that is a permission,
+        // not a failure to ask.
+        outcome = { state: "absent", note: null };
+      } else if (response.status >= 300 && response.status < 400) {
+        outcome = {
+          state: "unverified",
+          note:
+            `${url.origin}/robots.txt redirected to ${response.location ?? "an unnamed target"}, ` +
+            "which this read does not follow",
+        };
+      } else {
+        outcome = {
+          state: "unverified",
+          note: `${url.origin}/robots.txt answered HTTP ${response.status}`,
+        };
       }
-    } catch {
-      // robots.txt unreachable → treated as "no rules", which is RFC9309's
-      // own default. A fetch-level refusal (SSRF etc.) already blocked the
-      // page itself if the host were unsafe.
-      rules = null;
+    } catch (err) {
+      outcome = {
+        state: "unverified",
+        note: `${url.origin}/robots.txt could not be read: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      };
     }
-    this.robotsCache.set(url.origin, rules);
-    return rules;
+    // Only a real answer is cached. A read that failed must be asked again on
+    // the next document, or one transient error would speak for the whole run.
+    if (outcome.state !== "unverified") this.robotsCache.set(url.origin, outcome);
+    return outcome;
   }
 
   /** One hop, no robots, no redirect following. */
@@ -353,10 +453,7 @@ export class ResearchFetcher {
     rawUrl: string,
     byteCap: number,
     timeoutMs: number,
-  ): Promise<
-    | { status: number; contentType: string; body: string; bytes: number; location: string | null }
-    | null
-  > {
+  ): Promise<{ status: number; contentType: string; body: string; bytes: number; location: string | null }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -370,39 +467,26 @@ export class ResearchFetcher {
         },
       });
       const status = response.status;
+      const contentType = response.headers.get("content-type") ?? "";
+      // A hop this client does not read — a redirect, or an error status — still
+      // has to hand the socket back, or every robots 404 leaks a connection.
       if (status >= 300 && status < 400) {
+        await response.body?.cancel().catch(() => undefined);
         return { status, contentType: "", body: "", bytes: 0, location: response.headers.get("location") };
       }
-      const contentType = response.headers.get("content-type") ?? "";
-      // Error statuses: consume nothing, report honestly.
       if (status >= 400) {
+        await response.body?.cancel().catch(() => undefined);
         return { status, contentType, body: "", bytes: 0, location: null };
       }
       // Stream with a hard byte cap: never trust content-length alone.
-      const reader = response.body?.getReader();
-      if (reader === undefined) {
-        return { status, contentType, body: "", bytes: 0, location: null };
-      }
-      const chunks: Uint8Array[] = [];
-      let total = 0;
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value === undefined) continue;
-        total += value.byteLength;
-        if (total > byteCap) {
-          await reader.cancel().catch(() => undefined);
-          throw new ByteCapError(rawUrl);
-        }
-        chunks.push(value);
-      }
-      const merged = new Uint8Array(total);
-      let offset = 0;
-      for (const chunk of chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      return { status, contentType, body: new TextDecoder("utf-8", { fatal: false }).decode(merged), bytes: total, location: null };
+      const bytes = await readBoundedBytes(response, byteCap, `page at ${hostnameOf(rawUrl)}`);
+      return {
+        status,
+        contentType,
+        body: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
+        bytes: bytes.byteLength,
+        location: null,
+      };
     } finally {
       clearTimeout(timer);
     }
@@ -433,9 +517,21 @@ export class ResearchFetcher {
       }
       let response: Awaited<ReturnType<ResearchFetcher["rawGet"]>>;
       try {
+        // Ask the resolver once more, as close to the socket as this platform
+        // allows, before the request goes out.
+        const revalidated = await this.checkHostResolution(url.hostname);
+        if (!revalidated.allowed) {
+          return {
+            ok: false,
+            kind: revalidated.kind,
+            reason: revalidated.reason,
+            httpStatus: null,
+            finalUrl: current,
+          };
+        }
         response = await this.rawGet(url.toString(), this.maxBytes, this.timeoutMs);
       } catch (err) {
-        if (err instanceof ByteCapError) {
+        if (err instanceof ResponseTooLargeError) {
           return {
             ok: false,
             kind: "TOO_LARGE",
@@ -454,9 +550,6 @@ export class ResearchFetcher {
           httpStatus: null,
           finalUrl: current,
         };
-      }
-      if (response === null) {
-        return { ok: false, kind: "NETWORK_ERROR", reason: "fetch returned no response.", httpStatus: null, finalUrl: current };
       }
       if (response.status >= 300 && response.status < 400) {
         redirects += 1;
@@ -510,15 +603,9 @@ export class ResearchFetcher {
         byteSize: response.bytes,
         fetchedAt: new Date(),
         redirectsFollowed: redirects,
-        robotsChecked: true,
+        robotsChecked: robots.state !== "unverified",
+        robotsNote: robots.state === "unverified" ? robots.note : null,
       };
     }
-  }
-}
-
-class ByteCapError extends Error {
-  constructor(url: string) {
-    super(`byte cap exceeded for ${url}`);
-    this.name = "ByteCapError";
   }
 }

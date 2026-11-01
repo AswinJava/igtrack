@@ -112,7 +112,15 @@ function stubSource(config: {
           { kind: CapabilityErrorKind.PROVIDER_ERROR, message: "stub boom", retryable: true },
         );
       }
-      const { available } = await import("@igtrack/core");
+      const { available, partial } = await import("@igtrack/core");
+      if ((config.postsStatus ?? CapabilityStatus.AVAILABLE) === CapabilityStatus.PARTIAL) {
+        return partial(config.posts ?? [], {
+          observedAt: OBSERVED_AT,
+          source: sourceRef,
+          confidence: Confidence.MEDIUM,
+          note: "Media listing truncated by source",
+        });
+      }
       return available(config.posts ?? [], {
         observedAt: OBSERVED_AT,
         source: sourceRef,
@@ -289,6 +297,20 @@ describe.runIf(dbAvailable)("worker POSTS_SCAN", () => {
     const job = await makeJob(targetId);
     const result = await runPostScan(handle.db, job, stubSource({ posts: [] }));
     expect(result).toBe("succeeded-empty");
+  });
+
+  it("PARTIAL listing with no post stored → succeeded-partial (P7b)", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    // Same rule as the roster scans: an unfinished media listing that happened
+    // to persist nothing is a partial read, not the positive observation that
+    // the account has no posts.
+    const result = await runPostScan(
+      handle.db,
+      job,
+      stubSource({ posts: [], postsStatus: CapabilityStatus.PARTIAL }),
+    );
+    expect(result).toBe("succeeded-partial");
   });
 
   it("a second scan for a target with no new posts writes no duplicates (P8)", async () => {

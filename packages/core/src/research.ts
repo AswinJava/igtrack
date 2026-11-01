@@ -82,7 +82,7 @@ export const RESEARCH_SOURCE_POLICIES: Record<ResearchSourceType, ResearchSource
       "Documented facts about the target from a page the operator named (official site, org page, portfolio, public bio).",
     requiresCredentials: false,
     restrictions:
-      "Public http(s) only; SSRF-guarded (no private/loopback/link-local/metadata destinations, every redirect re-validated); robots.txt respected; Instagram/Facebook hosts refused outright (platform data is not web research); content types limited to HTML/XHTML/plain text; per-document timeout, size and redirect caps.",
+      "Public http(s) only; SSRF-guarded (no private/loopback/link-local/metadata destinations, the resolution is asked again before every request and every redirect is re-validated — a re-check, not socket pinning); robots.txt respected, and a robots.txt that could not be read is reported as unverified instead of as clearance; Instagram/Facebook hosts refused outright (platform data is not web research); content types limited to HTML/XHTML/plain text; per-document timeout, size and redirect caps.",
     retention:
       "Document metadata (URL, title, content hash, byte size, retrieval time, outcome) is stored; page bodies are NOT stored — only short excerpts (≤500 chars) travel with individual claims.",
     attribution:

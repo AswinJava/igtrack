@@ -1,5 +1,5 @@
 import { writeFileSync } from "node:fs";
-import { PublicWebProvider, type PublicWebDossier } from "@igtrack/ingestion";
+import { type PublicWebDossier } from "@igtrack/ingestion";
 import {
   CliError,
   display,
@@ -11,9 +11,9 @@ import {
   resolveOptionalUserPath,
   table,
   UsageError,
-  type OutputMeta,
   type ParsedArgs,
 } from "../output.js";
+import { liveReadMeta, opPublicDossier } from "../tools.js";
 
 // ---------------------------------------------------------------------------
 // `igtrack public <username>` — the logged-out public-page dossier.
@@ -42,20 +42,6 @@ Options
 Limits (reported as UNAVAILABLE, never zero-filled): follower/following
 rosters, comment lists, likers, tagged-media listings, highlight contents,
 stories and insights require a logged-in session or owner authorization.`;
-
-function providerMeta(note?: string): OutputMeta {
-  return {
-    provider: "public",
-    sourceId: "public:web:v1",
-    synthetic: false,
-    production: process.env.NODE_ENV === "production",
-    studio: "cli",
-    generatedAt: new Date().toISOString(),
-    note:
-      note ??
-      "Live observation of Instagram's logged-out public pages, rendered in a local headless browser. Not an official Graph API response.",
-  };
-}
 
 function firstLine(value: string | undefined, max = 160): string {
   if (value === undefined) return "unavailable";
@@ -186,32 +172,14 @@ export async function runPublic(args: ParsedArgs): Promise<number> {
   const chromePath = flagString(args.flags, "chrome");
   const maxPosts = flagNumber(args.flags, "max-posts", 60);
 
-  let provider: PublicWebProvider;
-  try {
-    provider = new PublicWebProvider({
-      ...(chromePath !== undefined ? { chromePath } : {}),
-      maxPosts,
-    });
-  } catch (err) {
-    throw new CliError(
-      "PROVIDER_UNAVAILABLE",
-      `The public provider is not usable: ${
-        err instanceof Error ? err.message : String(err)
-      } Nothing was requested.`,
-      3,
-    );
-  }
-
-  const result = await provider.getDossier(username);
-  if (result.dossier === undefined) {
-    throw new CliError(
-      result.error?.kind ?? "PUBLIC_WEB_FAILED",
-      result.error?.message ?? result.note ?? "The public dossier could not be built.",
-      1,
-    );
-  }
-  const dossier = result.dossier;
-  const meta = providerMeta(
+  const dossier = await opPublicDossier({
+    username,
+    ...(chromePath !== undefined ? { chromePath } : {}),
+    maxPosts,
+  });
+  const meta = liveReadMeta(
+    "public-page",
+    "cli",
     out !== undefined
       ? `Dossier written to ${out}. Live logged-out public-page observation; not an official Graph API response.`
       : undefined,
@@ -219,7 +187,11 @@ export async function runPublic(args: ParsedArgs): Promise<number> {
 
   if (out !== undefined) {
     try {
-      writeFileSync(out, `${JSON.stringify(envelope(dossier, providerMeta()), null, 2)}\n`, "utf8");
+      writeFileSync(
+        out,
+        `${JSON.stringify(envelope(dossier, liveReadMeta("public-page", "cli")), null, 2)}\n`,
+        "utf8",
+      );
     } catch (err) {
       throw new CliError(
         "WRITE_FAILED",

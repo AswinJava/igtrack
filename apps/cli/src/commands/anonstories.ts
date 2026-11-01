@@ -1,5 +1,5 @@
 import { writeFileSync } from "node:fs";
-import { AnonStoriesProvider, type AnonStoriesDossier } from "@igtrack/ingestion";
+import { type AnonStoriesDossier } from "@igtrack/ingestion";
 import {
   CliError,
   display,
@@ -11,9 +11,9 @@ import {
   resolveOptionalUserPath,
   table,
   UsageError,
-  type OutputMeta,
   type ParsedArgs,
 } from "../output.js";
+import { liveReadMeta, opAnonstoriesDossier } from "../tools.js";
 
 // ---------------------------------------------------------------------------
 // `igtrack anonstories <username>` — the login-free aggregator dossier.
@@ -48,20 +48,6 @@ third-party relay, not a platform observation. UNAVAILABLE classes (rosters,
 posts, comments, tags, insights) stay UNAVAILABLE with their reasons, private
 profiles are refused rather than guessed, and a rate-limited or queued answer
 is reported as such instead of as an empty result.`;
-
-function providerMeta(note?: string): OutputMeta {
-  return {
-    provider: "anonstories",
-    sourceId: "anonstories:v1",
-    synthetic: false,
-    production: process.env.NODE_ENV === "production",
-    studio: "cli",
-    generatedAt: new Date().toISOString(),
-    note:
-      note ??
-      "Live reading of a third-party public aggregator (anonstories.com) through a local browser. PUBLIC_AGGREGATOR — not an Instagram page and not an official Graph API response.",
-  };
-}
 
 function firstLine(value: string | undefined, max = 60): string {
   if (value === undefined) return "—";
@@ -213,32 +199,14 @@ export async function runAnonstories(args: ParsedArgs): Promise<number> {
   const chromePath = flagString(args.flags, "chrome");
   const maxHighlights = flagNumber(args.flags, "max-highlights", 5);
 
-  let provider: AnonStoriesProvider;
-  try {
-    provider = new AnonStoriesProvider({
-      ...(chromePath !== undefined ? { chromePath } : {}),
-      maxHighlights,
-    });
-  } catch (err) {
-    throw new CliError(
-      "PROVIDER_UNAVAILABLE",
-      `The anonstories provider is not usable: ${
-        err instanceof Error ? err.message : String(err)
-      } Nothing was requested.`,
-      3,
-    );
-  }
-
-  const result = await provider.getDossier(username, { maxHighlights });
-  if (result.dossier === undefined) {
-    throw new CliError(
-      result.error?.kind ?? "ANONSTORIES_FAILED",
-      result.error?.message ?? result.note ?? "The aggregator dossier could not be built.",
-      1,
-    );
-  }
-  const dossier = result.dossier;
-  const meta = providerMeta(
+  const dossier = await opAnonstoriesDossier({
+    username,
+    ...(chromePath !== undefined ? { chromePath } : {}),
+    maxHighlights,
+  });
+  const meta = liveReadMeta(
+    "anonstories",
+    "cli",
     out !== undefined
       ? `Dossier written to ${out}. Live third-party aggregator read; PUBLIC_AGGREGATOR, not a platform observation.`
       : undefined,
@@ -246,7 +214,11 @@ export async function runAnonstories(args: ParsedArgs): Promise<number> {
 
   if (out !== undefined) {
     try {
-      writeFileSync(out, `${JSON.stringify(envelope(dossier, providerMeta()), null, 2)}\n`, "utf8");
+      writeFileSync(
+        out,
+        `${JSON.stringify(envelope(dossier, liveReadMeta("anonstories", "cli")), null, 2)}\n`,
+        "utf8",
+      );
     } catch (err) {
       throw new CliError(
         "WRITE_FAILED",

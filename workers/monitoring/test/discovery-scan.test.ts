@@ -20,6 +20,7 @@ import {
   getTargetDossier,
   listProfileSnapshots,
   listPosts,
+  listProfileChanges,
   markCapabilityUnavailable,
   monitoringJobs as jobsTable,
   schedulingWindowStart,
@@ -40,7 +41,8 @@ import {
 // ---------------------------------------------------------------------------
 // DISCOVERY_SCAN — the recording half of the documented Business Discovery
 // route. The claims this suite pins:
-//   * the profile is recorded as a COMPLETE, diffable snapshot;
+//   * the profile is recorded COMPLETE, and diffable, only when the capture
+//     carried the route's documented count set;
 //   * the media preview is stored with its ceiling IN THE EVIDENCE, and the
 //     scan can only ever report COMPLETED_PARTIAL because that listing cannot
 //     page;
@@ -53,6 +55,7 @@ import {
 const dbAvailable = await probeDatabase(TEST_DATABASE_URL);
 
 const DISCOVERY_USERNAME = "dune.harbor";
+const FIELDSET_USERNAME = "discovery.fieldset.probe";
 
 function fixtureSource(): ExecutionSource {
   const fixturesDir = join(process.cwd(), "packages", "ingestion", "fixtures", "v1");
@@ -64,10 +67,25 @@ function fixtureSource(): ExecutionSource {
 }
 
 function stubSource(
-  config: { status?: CapabilityStatus; cap?: boolean; limit?: number } = {},
+  config: {
+    status?: CapabilityStatus;
+    cap?: boolean;
+    limit?: number;
+    /** Which of the route's documented counts this capture returned (default: followers only). */
+    counts?: { follower?: number; following?: number; posts?: number };
+    /** Observation time carried into the snapshot's natural key. */
+    at?: string;
+    /** Identity this capture returns — a shared id would fold two probes into one account. */
+    username?: string;
+    igId?: string;
+  } = {},
 ): ExecutionSource {
   const sourceId = "stub:discovery";
   const sourceRef = { sourceId, kind: SourceKind.FIXTURE };
+  const observedAt = config.at ?? "2026-08-27T14:00:00.000Z";
+  const counts = config.counts ?? { follower: 42 };
+  const username = config.username ?? DISCOVERY_USERNAME;
+  const igId = config.igId ?? "17841400000000002";
   const provider: InstagramProvider = {
     sourceId,
     capabilities: () => ({
@@ -127,9 +145,11 @@ function stubSource(
       const { available } = await import("@igtrack/core");
       return available(
         {
-          account: { username: DISCOVERY_USERNAME, igId: "17841400000000002" },
+          account: { username, igId },
           displayName: "Dune Harbor Studio",
-          followerCount: 42,
+          ...(counts.follower !== undefined ? { followerCount: counts.follower } : {}),
+          ...(counts.following !== undefined ? { followingCount: counts.following } : {}),
+          ...(counts.posts !== undefined ? { postCount: counts.posts } : {}),
           recentMedia: [
             {
               postId: "stub-post-1",
@@ -137,7 +157,7 @@ function stubSource(
               meta: {
                 category: "OBSERVED",
                 confidence: "HIGH",
-                observedAt: "2026-08-27T14:00:00.000Z",
+                observedAt,
               },
             },
           ],
@@ -145,11 +165,11 @@ function stubSource(
           meta: {
             category: "OBSERVED",
             confidence: "HIGH",
-            observedAt: "2026-08-27T14:00:00.000Z",
+            observedAt,
           },
         },
         {
-          observedAt: "2026-08-27T14:00:00.000Z",
+          observedAt,
           source: sourceRef,
           confidence: "HIGH",
         },
@@ -222,6 +242,49 @@ describe.runIf(dbAvailable)("worker DISCOVERY_SCAN", () => {
     const posts = await listPosts(handle.db, targetId);
     expect(posts.map((p) => p.postId).sort()).toEqual(["dune-post-1", "dune-post-2"]);
     await completeJob(handle.db, job.id, "worker-discovery");
+  });
+
+  it("a capture that withheld a documented count is stored, but never diffed (D10)", async () => {
+    // "The route's field set is the whole set" is a claim about the route, not
+    // about this response. A second capture that returned no following count was
+    // previously recorded COMPLETE, so the diff turned the withheld number into
+    // `followingCount 7 -> null` — a change the platform never reported.
+    const targetId = await makeTarget("DISCOVERY", FIELDSET_USERNAME);
+    const target = await getTarget(handle.db, targetId);
+
+    const first = await makeJob(targetId);
+    expect(
+      await runDiscoveryScan(
+        handle.db,
+        first,
+        stubSource({
+          username: FIELDSET_USERNAME,
+          igId: "17841400000000777",
+          counts: { follower: 42, following: 7, posts: 3 },
+          at: "2026-08-27T14:00:00.000Z",
+        }),
+      ),
+    ).toBe("succeeded");
+    await completeJob(handle.db, first.id, "worker-discovery");
+
+    const second = await makeJob(targetId);
+    expect(
+      await runDiscoveryScan(
+        handle.db,
+        second,
+        stubSource({
+          username: FIELDSET_USERNAME,
+          igId: "17841400000000777",
+          counts: { follower: 42, posts: 3 },
+          at: "2026-08-28T14:00:00.000Z",
+        }),
+      ),
+    ).toBe("succeeded-partial");
+    await completeJob(handle.db, second.id, "worker-discovery");
+
+    const snaps = await listProfileSnapshots(handle.db, target!.igAccountId, {});
+    expect(snaps.map((snap) => snap.completeness)).toEqual(["PARTIAL", "COMPLETE"]);
+    expect(await listProfileChanges(handle.db, target!.igAccountId, {})).toEqual([]);
   });
 
   it("keeps published time and first-observed time apart, and the ceiling in the evidence (D2)", async () => {

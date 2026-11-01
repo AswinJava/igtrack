@@ -384,7 +384,7 @@ describe.skipIf(!databaseUp)("audit command", () => {
       expect(auditExitCode(report)).toBe(4);
     } finally {
       // Leave the suite's target list as the other tests found it.
-      await opTargetRemove(ctx, neverScanned);
+      await opTargetRemove(ctx, { target: neverScanned, confirm: true });
     }
   }, 30_000);
 

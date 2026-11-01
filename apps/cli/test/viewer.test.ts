@@ -1,151 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { CapabilityStatus, Confidence, SourceKind } from "@igtrack/core";
-import type {
-  AnonStoriesDossier,
-  AnonStoriesDossierResult,
-  PublicSinglePost,
-  PublicWebDossier,
-  PublicWebDossierResult,
-  PublicWebProvider,
-  AnonStoriesProvider,
-} from "@igtrack/ingestion";
+import { CapabilityStatus } from "@igtrack/core";
+import type { PublicWebProvider } from "@igtrack/ingestion";
 import { opViewer } from "../src/tools.js";
 import { renderViewerHuman } from "../src/commands/viewer.js";
+import {
+  OBSERVED,
+  fakeAnon,
+  fakePublic,
+  publicDossier,
+  publicSinglePost,
+} from "./live-read-fakes.js";
 
 // Behavior tests for the viewer operation and its human surface, with the two
 // providers injected: no browser and no network.
-
-const OBSERVED = "2026-10-31T11:00:00.000Z";
-
-function publicDossier(overrides: Partial<PublicWebDossier> = {}): PublicWebDossier {
-  return {
-    requestedAt: OBSERVED,
-    observedAt: OBSERVED,
-    username: "aurora.wilde",
-    source: {
-      sourceId: "public:web:v1",
-      kind: SourceKind.PUBLIC_WEB,
-      profileUrl: "https://www.instagram.com/aurora.wilde/",
-      retrieval: "injected-transport",
-    },
-    profile: {
-      username: "aurora.wilde",
-      fullName: "Aurora Wilde",
-      biography: "Public account",
-      biographyMentions: [],
-      pronouns: [],
-      bioLinks: [],
-      highlights: [{ id: "highlight:1", title: "Trips" }],
-      postCount: 12,
-      isPrivate: false,
-      isVerified: false,
-      observedAt: OBSERVED,
-    },
-    posts: [
-      {
-        shortcode: "AAA111",
-        observedAt: OBSERVED,
-        likeCount: 10,
-        commentCount: 2,
-        mediaType: "image",
-        detailStatus: "ENRICHED",
-        discoveredFrom: ["profile_timeline"],
-        coauthors: [],
-        taggedUsers: [],
-        sponsorUsers: [],
-        media: { displayUrl: "https://example.invalid/a.jpg" },
-        listingFallbackFields: [],
-        sourceUrl: "https://www.instagram.com/p/AAA111/",
-      },
-    ],
-    counts: {
-      postsDeclared: 12,
-      postsDiscovered: 1,
-      postsEnriched: 1,
-      postsListingOnly: 0,
-    },
-    coverage: [],
-    gaps: [],
-    notes: ["public note"],
-    ...overrides,
-  };
-}
-
-function anonDossier(overrides: Partial<AnonStoriesDossier> = {}): AnonStoriesDossier {
-  return {
-    requestedAt: OBSERVED,
-    observedAt: OBSERVED,
-    username: "aurora.wilde",
-    source: {
-      sourceId: "anonstories:v1",
-      kind: SourceKind.PUBLIC_AGGREGATOR,
-      origin: "https://anonstories.invalid",
-      retrieval: "injected-transport",
-    },
-    account: { username: "aurora.wilde", fullName: "Aurora Wilde", isPrivate: false },
-    stories: [
-      {
-        storyId: "story-1",
-        mediaType: "image",
-        mediaUrl: "https://example.invalid/s1.jpg",
-        mentions: [],
-      },
-    ],
-    droppedStoryItems: 0,
-    highlights: [
-      {
-        id: "1",
-        title: "Trips",
-        status: "READ",
-        itemCount: 1,
-        droppedItems: 0,
-        items: [{ storyId: "h1-1", mediaType: "image", mediaUrl: "https://example.invalid/h1.jpg", mentions: [] }],
-      },
-    ],
-    mentions: [],
-    counts: {
-      activeStories: 1,
-      highlights: 1,
-      highlightContentsRead: 1,
-      highlightItems: 1,
-      mentionedAccounts: 0,
-    },
-    coverage: [],
-    gaps: [],
-    notes: ["anon note"],
-    ...overrides,
-  };
-}
-
-function publicOk(dossier: PublicWebDossier = publicDossier()): PublicWebDossierResult {
-  return { status: CapabilityStatus.AVAILABLE, dossier, observedAt: OBSERVED };
-}
-
-function anonOk(dossier: AnonStoriesDossier = anonDossier()): AnonStoriesDossierResult {
-  return { status: CapabilityStatus.AVAILABLE, dossier, observedAt: OBSERVED };
-}
-
-function fakePublic(
-  dossier: PublicWebDossier = publicDossier(),
-  single?: PublicSinglePost,
-): Pick<PublicWebProvider, "getDossier" | "getPublicPost"> {
-  return {
-    getDossier: async () => publicOk(dossier),
-    getPublicPost: async (reference) => ({
-      status: CapabilityStatus.AVAILABLE,
-      observedAt: OBSERVED,
-      source: { sourceId: "public:web:v1", kind: SourceKind.PUBLIC_WEB },
-      confidence: Confidence.HIGH,
-      ...(single !== undefined ? { data: single } : {}),
-    }),
-  };
-}
-
-function fakeAnon(
-  dossier: AnonStoriesDossier = anonDossier(),
-): Pick<AnonStoriesProvider, "getDossier"> {
-  return { getDossier: async () => anonOk(dossier) };
-}
 
 describe("opViewer", () => {
   it("composes the six tabs from both sources and keeps declared counts separate", async () => {
@@ -255,24 +122,9 @@ describe("opViewer", () => {
   });
 
   it("resolves a post URL to its owner through one media-page read", async () => {
-    const single: PublicSinglePost = {
-      requestedAt: OBSERVED,
-      observedAt: OBSERVED,
-      shortcode: "AAA111",
-      kind: "p",
-      source: {
-        sourceId: "public:web:v1",
-        kind: SourceKind.PUBLIC_WEB,
-        postUrl: "https://www.instagram.com/p/AAA111/",
-        retrieval: "injected-transport",
-      },
-      post: {
-        ...publicDossier().posts[0]!,
-        owner: { username: "aurora.wilde" },
-      },
-      comments: { status: "UNAVAILABLE", reason: "not on the logged-out page" },
-      notes: [],
-    };
+    const single = publicSinglePost({
+      post: { ...publicDossier().posts[0]!, owner: { username: "aurora.wilde" } },
+    });
     const report = await opViewer(
       { input: "https://www.instagram.com/p/AAA111/", source: "public" },
       { publicProvider: fakePublic(publicDossier(), single) },

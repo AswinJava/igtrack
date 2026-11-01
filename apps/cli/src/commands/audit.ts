@@ -7,6 +7,7 @@ import {
   flagNumber,
   flagString,
   isJson,
+  strictFlagBool,
   table,
   UsageError,
   type ParsedArgs,
@@ -23,7 +24,7 @@ import { AUDIT_WEB_MAX_SOURCES, opAudit, opFullAudit, type AuditReport, type Ful
 // object the --json envelope carries, so the two renderings cannot disagree.
 // ---------------------------------------------------------------------------
 
-export const AUDIT_HELP = `igtrack audit <username|@handle|profile-url> [--url URL[,URL…]] [--max-sources N] [--full [--days N]] [--json]
+export const AUDIT_HELP = `igtrack audit <username|@handle|profile-url> [--url URL[,URL…]] [--max-sources N] [--full [--days N] [--no-web] [--no-archive] [--refresh] [--force] [--max-jobs N]] [--json]
 
 One report about ONE account: what the configured source says right now, what
 this deployment has already recorded, what the public web states about the
@@ -70,7 +71,13 @@ the past days then needs no prior baseline. Named follows and unfollows still
 need a COMPLETE follower/following roster (an owner export or an authorized
 Graph session); on a first look at a public account those identities stay
 UNAVAILABLE with the reason, while the count series reports what moved.
---days bounds the archive window (default 30, max 365).
+--days bounds the archive window (default 30, max 365). The collecting run takes
+the same knobs the MCP full-audit tool does — \`--no-web\` skips the public-web
+stage, \`--no-archive\` skips the archive phase, \`--refresh\` ignores the 24h
+document freshness window, \`--force\` re-reads the platform now instead of
+waiting for the per-target scan cadence, and \`--max-jobs N\` caps the jobs that
+stage executes. Nothing here is reached without asking: a metered route stays
+behind its own opt-in.
 
 The audit queues no scan, writes no row and registers no target. A probe that
 finds nothing says "this source holds no rows for the account" — it is NEVER
@@ -737,17 +744,26 @@ export async function runAudit(args: ParsedArgs): Promise<number> {
     args.flags["max-sources"] === undefined
       ? undefined
       : flagNumber(args.flags, "max-sources", AUDIT_WEB_MAX_SOURCES);
-  const full = args.flags["full"] === true;
+  const full = strictFlagBool(args.flags, "full");
   const days =
     args.flags["days"] === undefined ? undefined : flagNumber(args.flags, "days", 30);
   const ctx = await createContext();
   try {
     if (full) {
+      // The same knobs the MCP full-audit tool accepts, so the two surfaces of
+      // one operation cannot drift into two different capabilities.
       const result = await opFullAudit(ctx, {
         username,
         ...(urls.length > 0 ? { urls } : {}),
         ...(maxSources !== undefined ? { maxSources } : {}),
         ...(days !== undefined ? { historyDays: days } : {}),
+        ...(strictFlagBool(args.flags, "no-web") ? { web: false } : {}),
+        ...(strictFlagBool(args.flags, "refresh") ? { refresh: true } : {}),
+        ...(strictFlagBool(args.flags, "force") ? { force: true } : {}),
+        ...(strictFlagBool(args.flags, "no-archive") ? { history: false } : {}),
+        ...(args.flags["max-jobs"] === undefined
+          ? {}
+          : { maxJobs: flagNumber(args.flags, "max-jobs", 25) }),
       });
       emit({ json, meta: ctx.meta, data: result, human: renderFullAuditHuman(result) });
       return auditExitCode(result.audit);

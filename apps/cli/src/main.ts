@@ -7,10 +7,11 @@ import {
   errorHint,
   isJson,
   parseArgs,
+  UsageError,
   type OutputMeta,
   type ParsedArgs,
 } from "./output.js";
-import { COMMAND_HELP, HELP } from "./help-registry.js";
+import { COMMAND_HELP, HELP, unknownFlags } from "./help-registry.js";
 import { runConfig, runDoctor, runSetup, runStatus } from "./commands/setup.js";
 import { runAudit } from "./commands/audit.js";
 import { runInvestigate } from "./commands/investigate.js";
@@ -51,14 +52,15 @@ import { runClaims, runPlan, runResearch } from "./commands/intel.js";
 //
 // Contract for every command: it either prints one JSON envelope with an
 // `ok: true|false` discriminant (--json) or a human table, and it exits 0 on
-// success. Exit codes: 0 ok, 1 runtime failure, 2 usage/selection error,
-// 3 configuration or connectivity error.
+// success. Exit codes: 0 ok, 1 runtime failure, 2 usage/selection or
+// not-found error, 3 configuration or connectivity error, 4 a read that
+// completed and found nothing (never the same answer as 0).
 // ---------------------------------------------------------------------------
 
 const VERSION = CLI_VERSION;
 
 /** Verbs whose subcommand contract is also reachable as `<command> help`. */
-const SUBCOMMANDED = new Set(["targets", "scans", "claims"]);
+const SUBCOMMANDED = new Set(["targets", "scans", "claims", "evidence"]);
 
 /**
  * `_meta` for a read of static CLI metadata. `provider: "none"` is deliberate:
@@ -115,37 +117,51 @@ function printHelp(topic: string, flags: Record<string, string | boolean>): numb
   return 0;
 }
 
-function runHelpTopic(args: ParsedArgs): number {
-  const topic = args.positionals[0];
-  if (topic === undefined) {
-    if (isJson(args.flags)) {
-      process.stdout.write(
-        `${JSON.stringify(
-          envelope(
-            { commands: Object.keys(COMMAND_HELP), help: HELP },
-            staticMeta("static CLI metadata: no provider was constructed, no source was contacted"),
-          ),
-          null,
-          2,
-        )}\n`,
-      );
-      return 0;
-    }
-    process.stdout.write(`${HELP}\n`);
+function printGeneralHelp(flags: Record<string, string | boolean>): number {
+  if (isJson(flags)) {
+    process.stdout.write(
+      `${JSON.stringify(
+        envelope(
+          { commands: Object.keys(COMMAND_HELP), help: HELP },
+          staticMeta("static CLI metadata: no provider was constructed, no source was contacted"),
+        ),
+        null,
+        2,
+      )}\n`,
+    );
     return 0;
   }
+  process.stdout.write(`${HELP}\n`);
+  return 0;
+}
+
+function runHelpTopic(args: ParsedArgs): number {
+  const topic = args.positionals[0];
+  if (topic === undefined) return printGeneralHelp(args.flags);
   // `igtrack help activity-report` and `igtrack help igtrack activity-report`
   // are the same question; hyphens, underscores and casing are how people type
   // a command name, not a different command.
   const tokens = args.positionals.map((token) => token.trim().toLowerCase()).filter((t) => t !== "");
   if (tokens[0] === "igtrack") tokens.shift();
-  const key = (tokens[0] ?? "").replace(/^igtrack\s+/, "").replace(/_/g, "-");
+  const key = (tokens[0] ?? "").replace(/_/g, "-");
   return printHelp(key, args.flags);
 }
 
 async function dispatch(args: ParsedArgs): Promise<number> {
   const helpTopic = helpTopicRequested(args);
   if (helpTopic !== undefined) return printHelp(helpTopic, args.flags);
+
+  // A flag the command has no contract for is refused before anything runs,
+  // rather than read as nothing: an answer that silently ignored the caller's
+  // request looks exactly like an answer that fulfilled it.
+  const rejected = unknownFlags(args.command, args.flags);
+  if (rejected.length > 0) {
+    const names = rejected.map((name) => (name.length === 1 ? `-${name}` : `--${name}`)).join(", ");
+    throw new UsageError(
+      `igtrack ${args.command} does not accept ${names}. ` +
+        `Run \`igtrack ${args.command} --help\` for the flags it reads.`,
+    );
+  }
 
   switch (args.command) {
     case "ask":
@@ -245,10 +261,15 @@ async function dispatch(args: ParsedArgs): Promise<number> {
       return 0;
     default: {
       // `igtrack scan --help` must never run the words as a prompt: a help
-      // request is a read, and a bare verb can otherwise queue real scans.
+      // request is a read, and a bare verb can otherwise queue real scans. A
+      // bare mistyped verb is then answered exactly as `igtrack help <typo>`
+      // answers it (registry refusal, exit 2); a sentence that also asked for
+      // help wanted the tour, and gets it through the `--json` envelope rather
+      // than as prose that breaks the one-shape contract.
       if (wantsHelp(args)) {
-        process.stdout.write(`${HELP}\n`);
-        return 0;
+        return args.positionals.length === 0
+          ? printHelp(args.command, args.flags)
+          : printGeneralHelp(args.flags);
       }
       // Not a command: treat the whole line as a plain-English prompt. This is
       // what makes `igtrack who is @someone` and a mistyped command both work.
@@ -271,7 +292,10 @@ async function main(): Promise<void> {
   }
   const args = parseArgs(argv);
   if (args.flags["version"] === true || args.flags["v"] === true) {
-    process.stdout.write(`${VERSION}\n`);
+    // One answer, one shape: the `version` command renders both the prose and
+    // the `--json` envelope, so `igtrack --version --json` cannot print a bare
+    // string the caller's JSON parser then chokes on.
+    process.exitCode = await dispatch({ command: "version", positionals: [], flags: args.flags });
     return;
   }
   // The CLI and the worker are plain Node processes, so the CLI loads .env

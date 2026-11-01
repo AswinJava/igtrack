@@ -412,7 +412,10 @@ export async function runProfileScan(
     capability: "getProfile",
   });
 
-  return "succeeded";
+  // The snapshot row already records completeness; the job outcome must say the
+  // same thing, or a PARTIAL profile reads back as a finished scan and the
+  // surfaces that count COMPLETED_PARTIAL jobs understate what was incomplete.
+  return result.status === CapabilityStatus.PARTIAL ? "succeeded-partial" : "succeeded";
 }
 
 // ---------------------------------------------------------------------------
@@ -422,7 +425,9 @@ export async function runProfileScan(
 // same route as the `lookup` probe, but on a DISCOVERY target it RECORDS what
 // the edge returned. Two facts the storage must never blur:
 //   * the profile fields are the documented field set — recorded COMPLETE and
-//     diffable, exactly like an owned profile snapshot;
+//     diffable only when this capture actually carried that set, exactly like
+//     an owned profile snapshot; a capture that withheld a count is stored but
+//     never diffed;
 //   * the media edge is a bounded, non-pageable preview — the route's ceiling
 //     is written into every media row's evidence, and the scan can only ever
 //     report COMPLETED_PARTIAL. Nothing here may be rendered as "the account's
@@ -505,6 +510,16 @@ export async function runDiscoveryScan(
     route: "business_discovery",
     jobId: job.id,
   };
+  // Invariant 4 decides completeness, not the route's documentation. The
+  // documented field set is COMPLETE only when THIS capture carried it: a
+  // PARTIAL capability answer, or one that withheld a count, is stored as a
+  // record but never diffed. Diffing it is how "the route stayed quiet" turns
+  // into a fabricated `followerCount 18420 -> null` change.
+  const profileComplete =
+    result.status === CapabilityStatus.AVAILABLE &&
+    found.followerCount !== undefined &&
+    found.followingCount !== undefined &&
+    found.postCount !== undefined;
 
   await recordProfileSnapshot(db, {
     profile: {
@@ -535,11 +550,11 @@ export async function runDiscoveryScan(
           : {}),
       },
       found,
-      { capabilityStatus: result.status, ...discovery },
+      { capabilityStatus: result.status, profileFieldComplete: profileComplete, ...discovery },
     ),
-    // The documented profile field set is the whole set for this route, so the
-    // snapshot is COMPLETE and diffable — the media preview is the bounded part.
-    completeness: "COMPLETE",
+    // The media preview is the bounded half of this observation; the profile
+    // half is diffable only when the documented counts all arrived (see above).
+    completeness: profileComplete ? "COMPLETE" : "PARTIAL",
   });
 
   const previewLimit = found.recentMediaLimit;
@@ -582,8 +597,9 @@ export async function runDiscoveryScan(
   });
 
   // Bounded preview = the media half of this observation is knowingly
-  // incomplete, and the job row says so.
-  return previewLimit !== undefined ? "succeeded-partial" : "succeeded";
+  // incomplete; an unfinished documented field set = the profile half is.
+  // Either way the job row says so.
+  return previewLimit !== undefined || !profileComplete ? "succeeded-partial" : "succeeded";
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,12 +1128,18 @@ export async function runStoryScan(
     capability: "getStories",
   });
 
+  // Completeness outranks emptiness: a PARTIAL tray that yielded zero stories
+  // did not observe an absence, it failed to finish looking. Reporting
+  // COMPLETED_EMPTY here would let "we could not read the whole tray" surface
+  // as the positive observation that no story exists.
+  if (completion === "PARTIAL") return "succeeded-partial";
+
   if (stories.length === 0) {
     // AVAILABLE + zero stories is an honest positive observation of absence —
     // never conflated with UNAVAILABLE.
     return "succeeded-empty";
   }
-  return completion === "PARTIAL" ? "succeeded-partial" : "succeeded";
+  return "succeeded";
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,8 +1721,12 @@ export async function runPostScan(
     });
   }
 
+  // Completeness outranks emptiness, as in the roster and story scans: an
+  // incomplete read that stored no post did not observe an empty account, and
+  // COMPLETED_EMPTY would read back as "nothing was present to read".
+  if (truncated) return "succeeded-partial";
   if (postsObserved === 0) return "succeeded-empty";
-  return truncated ? "succeeded-partial" : "succeeded";
+  return "succeeded";
 }
 
 // ---------------------------------------------------------------------------
@@ -1812,6 +1838,10 @@ export async function runInsightsScan(
     source,
     capability: "getAccountInsights",
   });
+
+  // Completeness outranks emptiness here too: PARTIAL + zero points is an
+  // unfinished look, not the honest observation of absence described below.
+  if (result.status === CapabilityStatus.PARTIAL) return "succeeded-partial";
 
   // AVAILABLE + zero points is an honest observation of absence when the
   // absence rows carry the reasons; never conflated with UNAVAILABLE.

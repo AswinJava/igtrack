@@ -23,6 +23,14 @@
 // ---------------------------------------------------------------------------
 
 import { AppError, AppErrorCode } from "@igtrack/core";
+import { readBoundedJson } from "../http/bounded-response.js";
+
+/**
+ * A search page returns at most the requested number of hits, so a response
+ * this size is already far past any documented answer. The cap is what keeps
+ * `res.json()` from letting one remote body decide this process's memory.
+ */
+const SEARCH_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 export interface SearchResult {
   url: string;
@@ -166,9 +174,9 @@ export class BraveSearchProvider implements ResearchSearchProvider {
           error: `search provider returned HTTP ${response.status}.`,
         };
       }
-      const body = (await response.json()) as {
+      const body = await readBoundedJson<{
         web?: { results?: Array<{ url?: unknown; title?: unknown; description?: unknown }> };
-      };
+      }>(response, SEARCH_MAX_RESPONSE_BYTES, "search provider");
       const raw = body.web?.results ?? [];
       const results: SearchResult[] = [];
       for (const entry of raw) {
@@ -294,13 +302,13 @@ export class FreeSerpSearchProvider implements ResearchSearchProvider {
           }`,
         };
       }
-      const body = (await response.json()) as {
+      const body = await readBoundedJson<{
         ok?: unknown;
         error?: unknown;
         detail?: unknown;
         engine_fallback?: unknown;
         results?: Array<{ url?: unknown; title?: unknown; snippet?: unknown }>;
-      };
+      }>(response, SEARCH_MAX_RESPONSE_BYTES, "search provider");
       if (body.ok !== true) {
         // Remote-supplied strings are data: only a conservative token shape is
         // echoed back, so a hostile body cannot inject prose into a report.

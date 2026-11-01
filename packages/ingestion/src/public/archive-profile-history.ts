@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { IG_USERNAME_PATTERN } from "../config/readiness.js";
+import { ResponseTooLargeError, readBoundedBytes } from "../http/bounded-response.js";
 
 // ---------------------------------------------------------------------------
 // Public-archive profile-count history.
@@ -53,10 +54,16 @@ export interface ArchiveHistoryOptions {
   fetchImpl?: ((url: string, init: { signal: AbortSignal }) => Promise<ArchiveHttpResponse>) | undefined;
 }
 
+/**
+ * The part of an HTTP answer this reader uses: the status, one header, and a
+ * byte stream it is allowed to stop reading. Archived captures are whole web
+ * pages, so the stream is where the cap has to bite — a body collected before
+ * being measured is a body whose size the archive chose.
+ */
 export interface ArchiveHttpResponse {
   status: number;
   headers: { get(name: string): string | null };
-  arrayBuffer(): Promise<ArrayBuffer>;
+  body: ReadableStream<Uint8Array> | null;
 }
 
 export interface ArchiveHistoryResult {
@@ -184,19 +191,22 @@ async function readBounded(
   response: ArchiveHttpResponse,
   maxBytes: number,
 ): Promise<{ bytes: Uint8Array } | { failure: string }> {
-  const declared = response.headers.get("content-length");
-  if (declared !== null) {
-    const size = Number.parseInt(declared, 10);
-    if (Number.isSafeInteger(size) && size > maxBytes) {
-      return { failure: `response declares ${size} bytes, above the ${maxBytes}-byte cap` };
+  let raw: Uint8Array;
+  try {
+    // The cap bites while the bytes arrive, through the one reading primitive
+    // this package uses everywhere else. A capture collected whole and
+    // measured afterwards is a capture whose size the archive chose.
+    raw = await readBoundedBytes(response, maxBytes, "archive capture");
+  } catch (err) {
+    if (err instanceof ResponseTooLargeError) {
+      return {
+        failure: `response passed the ${err.maxBytes}-byte cap (at least ${err.receivedBytes} bytes were offered)`,
+      };
     }
-  }
-  const buffer = await response.arrayBuffer();
-  if (buffer.byteLength > maxBytes) {
-    return { failure: `response is ${buffer.byteLength} bytes, above the ${maxBytes}-byte cap` };
+    throw err;
   }
   try {
-    return { bytes: decodeBody(new Uint8Array(buffer), maxBytes) };
+    return { bytes: decodeBody(raw, maxBytes) };
   } catch {
     return {
       failure: `response unpacked past the ${maxBytes}-byte cap, so its bytes were not read`,

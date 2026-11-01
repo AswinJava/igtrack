@@ -4,6 +4,7 @@ import {
   checkResolvedAddresses,
   gateResearchUrl,
   isPrivateOrReservedAddress,
+  type FetchResult,
 } from "../src/research/index.js";
 
 // ---------------------------------------------------------------------------
@@ -193,6 +194,176 @@ describe("fetchPage through the full gate", () => {
     expect(allowed.ok).toBe(true);
   });
 
+  // RFC 9309 lets a client read the page when robots.txt cannot be read. That
+  // tolerance is only honest if the run does not then claim the site was
+  // checked: an unreachable file must come back as robotsChecked false with the
+  // reason, while a 404 (a real answer) comes back as a checked permission.
+  describe("robots.txt that did not answer", () => {
+    const page = {
+      "/doc": () => html("<html>open</html>"),
+      "/other": () => html("<html>also open</html>"),
+    };
+
+    async function fetchOneWithRobots(handler: Handler): Promise<FetchResult> {
+      const { impl } = routeTable({ ...page, "/robots.txt": handler });
+      vi.stubGlobal("fetch", impl);
+      return new ResearchFetcher({ pinLookup: pinPublic }).fetchPage("https://aurora.example/doc");
+    }
+
+    it("proceeds on an HTTP 5xx but reports the permission as unverified", async () => {
+      const result = await fetchOneWithRobots(() =>
+        new Response("gateway trouble", { status: 500, headers: { "content-type": "text/plain" } }),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.robotsChecked).toBe(false);
+        expect(result.robotsNote).toMatch(/answered HTTP 500/);
+      }
+    });
+
+    it("proceeds on a transport error and names it instead of inventing clearance", async () => {
+      const result = await fetchOneWithRobots(() => {
+        throw new Error("connection reset by peer");
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.robotsChecked).toBe(false);
+        expect(result.robotsNote).toMatch(/could not be read/);
+        expect(result.robotsNote).toMatch(/connection reset by peer/);
+      }
+    });
+
+    it("does not follow a robots.txt redirect, and says so", async () => {
+      const result = await fetchOneWithRobots(() =>
+        redirect("https://aurora.example/robots-v2.txt"),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.robotsChecked).toBe(false);
+        expect(result.robotsNote).toMatch(/redirected to .*\/robots-v2\.txt/);
+      }
+    });
+
+    it("treats a 404 as the site's real answer: checked, with no caveat", async () => {
+      const result = await fetchOneWithRobots(() =>
+        new Response("no file", { status: 404, headers: { "content-type": "text/plain" } }),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.robotsChecked).toBe(true);
+        expect(result.robotsNote).toBeNull();
+      }
+    });
+
+    it("reports a captive-portal HTML page as no answer, not as clearance", async () => {
+      const result = await fetchOneWithRobots(() =>
+        html("<html><head><title>Sign in to continue</title></head><body>login</body></html>"),
+      );
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.robotsChecked).toBe(false);
+        expect(result.robotsNote).toMatch(/not a robots\.txt file/);
+      }
+    });
+
+    // A file that carries robots lines is a robots file whatever the server
+    // calls it. Downgrading it to "unverified" would drop real Disallow rules,
+    // and under-blocking a site's own instruction is the worse mistake.
+    it("still honours a robots file that the server labels text/html", async () => {
+      const { impl } = routeTable({
+        ...page,
+        "/robots.txt": () => html("User-agent: *\nDisallow: /doc\n"),
+      });
+      vi.stubGlobal("fetch", impl);
+      const blocked = await new ResearchFetcher({ pinLookup: pinPublic }).fetchPage(
+        "https://aurora.example/doc",
+      );
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.kind).toBe("BLOCKED_BY_ROBOTS");
+    });
+
+    it("caches an answer but re-asks after a failed read", async () => {
+      let robotsCalls = 0;
+      const { impl } = routeTable({
+        ...page,
+        "/robots.txt": () => {
+          robotsCalls += 1;
+          return new Response("temporarily broken", {
+            status: 503,
+            headers: { "content-type": "text/plain" },
+          });
+        },
+      });
+      vi.stubGlobal("fetch", impl);
+      const fetcher = new ResearchFetcher({ pinLookup: pinPublic });
+
+      const first = await fetcher.fetchPage("https://aurora.example/doc");
+      const second = await fetcher.fetchPage("https://aurora.example/doc");
+      expect(first.ok && second.ok).toBe(true);
+      // One transient outage must not speak for the whole run.
+      expect(robotsCalls).toBe(2);
+
+      const cleared = routeTable({
+        ...page,
+        "/robots.txt": () =>
+          new Response("User-agent: *\nDisallow: /nowhere\n", {
+            status: 200,
+            headers: { "content-type": "text/plain" },
+          }),
+      });
+      vi.stubGlobal("fetch", cleared.impl);
+      const answered = new ResearchFetcher({ pinLookup: pinPublic });
+      await answered.fetchPage("https://borealis.example/doc");
+      await answered.fetchPage("https://borealis.example/other");
+      // A real answer is one read per origin for the run.
+      expect(cleared.calls.filter((c) => c.endsWith("/robots.txt"))).toHaveLength(1);
+    });
+  });
+
+  // RFC 9309 matches a group by product token, not by substring: a site that
+  // tells `r` (Rambler) to stay out of /private does not tell IGTrack to, and a
+  // group naming IGTrack does. A substring test both over- and under-blocks.
+  describe("robots.txt groups are matched by product token", () => {
+    async function fetchWithRobotsFile(file: string, pathname: string): Promise<FetchResult> {
+      const { impl } = routeTable({
+        "/robots.txt": () => new Response(file, { status: 200, headers: { "content-type": "text/plain" } }),
+        [pathname]: () => html("<html>open</html>"),
+      });
+      vi.stubGlobal("fetch", impl);
+      return new ResearchFetcher({ pinLookup: pinPublic }).fetchPage(
+        `https://aurora.example${pathname}`,
+      );
+    }
+
+    it("does not apply a one-letter group that merely appears inside our token", async () => {
+      const blocked = await fetchWithRobotsFile("User-agent: r\nDisallow: /doc\n", "/doc");
+      expect(blocked.ok).toBe(true);
+    });
+
+    it("applies a group naming our product token", async () => {
+      const blocked = await fetchWithRobotsFile("User-agent: IGTrack\nDisallow: /doc\n", "/doc");
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.kind).toBe("BLOCKED_BY_ROBOTS");
+    });
+
+    it("does not apply another bot's group", async () => {
+      const blocked = await fetchWithRobotsFile(
+        "User-agent: googlebot\nDisallow: /doc\nUser-agent: *\nDisallow: /nowhere\n",
+        "/doc",
+      );
+      expect(blocked.ok).toBe(true);
+    });
+
+    it("applies a group that names several user-agents", async () => {
+      const blocked = await fetchWithRobotsFile(
+        "User-agent: somebot\nUser-agent: igtrack-research\nDisallow: /doc\n",
+        "/doc",
+      );
+      expect(blocked.ok).toBe(false);
+      if (!blocked.ok) expect(blocked.kind).toBe("BLOCKED_BY_ROBOTS");
+    });
+  });
+
   it("follows a redirect within budget and reports the hop count", async () => {
     const { impl } = routeTable({
       "/start": () => redirect("/ok"),
@@ -264,6 +435,30 @@ describe("fetchPage through the full gate", () => {
       expect(result.kind).toBe("BLOCKED_BY_POLICY");
       expect(result.reason).toMatch(/10\.0\.0\.5/);
     }
+  });
+
+  it("refuses a host whose answer changes to a private address between the gate and the request", async () => {
+    // The rebinding shape: the first answer is public (passes the gate), the
+    // next one is the operator's own machine. The re-check runs before the
+    // document request, so the page is never fetched.
+    const { impl, calls } = routeTable({
+      "/ok": () => html("<html>should never be read</html>"),
+    });
+    vi.stubGlobal("fetch", impl);
+    let answers = 0;
+    const result = await new ResearchFetcher({
+      pinLookup: async () => (++answers === 1 ? PUBLIC_PIN : "127.0.0.1"),
+    }).fetchPage("https://aurora.example/ok");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.kind).toBe("BLOCKED_BY_POLICY");
+      expect(result.reason).toMatch(/127\.0\.0\.1/);
+    }
+    expect(calls.some((c) => c.includes("/ok"))).toBe(false);
+    // Only the robots read reached the network: the address check runs before
+    // the document request, and the answer it saw was already private.
+    expect(calls.every((c) => c.endsWith("/robots.txt"))).toBe(true);
   });
 
   it("reports a failed DNS lookup as such, never as empty content", async () => {

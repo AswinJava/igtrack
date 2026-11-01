@@ -28,18 +28,43 @@ function response(
 ): ArchiveHttpResponse {
   const bytes =
     typeof body === "string" ? new TextEncoder().encode(body) : body;
+  return streaming([bytes], init);
+}
+
+/**
+ * A response that hands out one chunk per pull. The cap has to bite in the
+ * middle of a stream, so a test that wants to prove it counts the pulls rather
+ * than trusting the body was never measured.
+ */
+function streaming(
+  chunks: Uint8Array[],
+  init: { status?: number; contentLength?: string | null } = {},
+  hooks: { pull?: () => void } = {},
+): ArchiveHttpResponse {
+  const size = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+  let next = 0;
   return {
     status: init.status ?? 200,
     headers: {
       get: (name: string) =>
         name.toLowerCase() === "content-length"
-          ? (init.contentLength ?? String(bytes.byteLength))
+          ? (init.contentLength ?? String(size))
           : null,
     },
-    arrayBuffer: async () => {
-      const copy = new Uint8Array(bytes);
-      return copy.buffer as ArrayBuffer;
-    },
+    body: new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (next >= chunks.length) {
+          controller.close();
+          return;
+        }
+        const chunk = chunks[next];
+        next += 1;
+        if (chunk !== undefined) {
+          hooks.pull?.();
+          controller.enqueue(chunk);
+        }
+      },
+    }),
   };
 }
 
@@ -183,7 +208,7 @@ describe("archived profile count history", () => {
 
     expect(result.state).toBe("UNAVAILABLE");
     expect(result.capturesFailed).toBe(1);
-    expect(result.notes.join(" ")).toContain("above the 1024-byte cap");
+    expect(result.notes.join(" ")).toContain("passed the 1024-byte cap");
   });
 
   it("an unreachable index is UNAVAILABLE, never EMPTY", async () => {
@@ -247,35 +272,36 @@ describe("archived profile count history", () => {
   it("refuses to buffer an oversized archive index", async () => {
     // The index is read under the same cap as a capture. A lying Content-Length
     // must not turn "bounded read" into "buffer the whole response and check
-    // afterwards" — the body is refused, and the refusal says so.
+    // afterwards": the stream is refused in the middle, and the refusal says so.
     const big = cdx(
       Array.from({ length: 200 }, (_, i): [string, string] => [
         `202601010000${String(i).padStart(2, "0")}`,
         "https://www.instagram.com/small.account/",
       ]),
     );
-    let servedBytes = 0;
+    const bytes = new TextEncoder().encode(big);
+    const chunks: Uint8Array[] = [];
+    for (let offset = 0; offset < bytes.byteLength; offset += 16) {
+      chunks.push(bytes.slice(offset, offset + 16));
+    }
+    let pulls = 0;
     const result = await fetchArchivedProfileHistory(USERNAME, {
       now: NOW,
       maxBytes: 64,
-      fetchImpl: async () => ({
-        status: 200,
-        headers: { get: (name: string) => (name.toLowerCase() === "content-length" ? "8" : null) },
-        arrayBuffer: async () => {
-          const bytes = new TextEncoder().encode(big);
-          servedBytes = bytes.byteLength;
-          const copy = new Uint8Array(bytes);
-          return copy.buffer as ArrayBuffer;
-        },
-      }),
+      fetchImpl: async () =>
+        // Content-Length claims eight bytes; the stream keeps coming.
+        streaming(chunks, { contentLength: "8" }, { pull: () => (pulls += 1) }),
     });
 
-    expect(servedBytes).toBeGreaterThan(64);
+    expect(chunks.length).toBeGreaterThan(10);
     expect(result.state).toBe("UNAVAILABLE");
     expect(result.reason).toContain("index was not read");
-    expect(result.reason).toContain("above the 64-byte cap");
+    expect(result.reason).toContain("passed the 64-byte cap");
     expect(result.reason).toContain("failure to look");
     expect(result.consultedUrls).toHaveLength(1);
+    // The read stopped where the cap bit instead of draining the stream: the
+    // bytes past it were never handed over, so they were never buffered.
+    expect(pulls).toBeLessThanOrEqual(8);
   });
 
   it("refuses a capture that unpacks past the cap rather than decompressing it whole", async () => {

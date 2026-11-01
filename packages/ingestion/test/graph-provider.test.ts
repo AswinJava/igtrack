@@ -85,23 +85,98 @@ describe("GraphProvider hostile responses", () => {
     );
     const result = await provider().getProfile({ username: "owned.account" });
     expect(result.status).toBe(CapabilityStatus.ERROR);
-    // INTERNAL + non-retryable: a body that is not JSON is a broken response,
-    // failed fast with a typed error. Recovery happens at scheduler-cadence
-    // (fresh windows keep enqueueing), not via hot retry of a broken payload.
-    expect(result.error?.kind).toBe(CapabilityErrorKind.INTERNAL);
+    // SCHEMA_MISMATCH + non-retryable: the answer is not the object this edge
+    // documents. Recovery happens at scheduler-cadence (fresh windows keep
+    // enqueueing), not via hot retry of a broken payload.
+    expect(result.error?.kind).toBe(CapabilityErrorKind.SCHEMA_MISMATCH);
     expect(result.error?.retryable).toBe(false);
   });
 
-  it("treats wrong-shape JSON as missing data, never fabricated rows", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ data: "not-an-array" })));
+  it("refuses a 200 body that outgrows the documented cap without parsing it", async () => {
+    // 5 MiB with no content-length, so nothing declares its size and the byte
+    // count is the only thing left to check. Parsing this would let one response
+    // decide how much memory the ingestion process spends.
+    const chunk = new TextEncoder().encode("x".repeat(1024 * 1024));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (let i = 0; i < 5; i += 1) controller.enqueue(chunk);
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    const result = await provider().getProfile({ username: "owned.account" });
+    expect(result.status).toBe(CapabilityStatus.ERROR);
+    expect(result.error?.kind).toBe(CapabilityErrorKind.SCHEMA_MISMATCH);
+    expect(result.error?.retryable).toBe(false);
+    expect(result.error?.message).toContain("byte cap");
+    // The refused bytes never reach the message: a payload is data, not prose.
+    expect(result.error?.message ?? "").not.toContain("xxxx");
+  });
+
+  it("refuses an oversized error body without losing the HTTP status", async () => {
+    const chunk = new TextEncoder().encode("y".repeat(1024 * 1024));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (let i = 0; i < 5; i += 1) controller.enqueue(chunk);
+              controller.close();
+            },
+          }),
+          { status: 500 },
+        ),
+      ),
+    );
+    const result = await provider().getProfile({ username: "owned.account" });
+    // A refused body never replaces the refusal: 500 is still a retryable
+    // provider error, just without the platform's own words.
+    expect(result.error?.kind).toBe(CapabilityErrorKind.PROVIDER_ERROR);
+    expect(result.error?.retryable).toBe(true);
+  });
+
+  it("refuses a list edge whose data field is not an array, never an empty listing", async () => {
+    for (const body of [{ data: "not-an-array" }, {}, { data: null }, []]) {
+      vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body)));
+      const stories = await provider().getStories({ username: "owned.account" });
+      // An unrecognised shape is a capability failure, not a read that came
+      // back empty: AVAILABLE with zero stories would record "this account has
+      // no stories", a fact the platform never stated.
+      expect(stories.status, JSON.stringify(body)).toBe(CapabilityStatus.ERROR);
+      if (stories.status === CapabilityStatus.ERROR) {
+        expect(stories.error?.kind).toBe(CapabilityErrorKind.SCHEMA_MISMATCH);
+        expect(stories.error?.retryable).toBe(false);
+        // The refusal names the shape problem, never the bytes behind it.
+        expect(stories.error?.message).not.toContain("not-an-array");
+      }
+    }
+  });
+
+  it("keeps the platform's real zero: data: [] is an observed empty story tray", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ data: [] })));
     const stories = await provider().getStories({ username: "owned.account" });
-    // data ?? [] collapses only when the envelope parses; a wrong shape must
-    // not throw out of the provider boundary.
-    expect(
-      stories.status === CapabilityStatus.AVAILABLE || stories.status === CapabilityStatus.ERROR,
-    ).toBe(true);
-    if (stories.status === CapabilityStatus.AVAILABLE) {
-      expect(stories.data).toEqual([]);
+    expect(stories.status).toBe(CapabilityStatus.AVAILABLE);
+    expect(stories.data).toEqual([]);
+  });
+
+  it("refuses a profile node without its documented identity fields", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const result = await provider().getProfile({ username: "owned.account" });
+    // `{}` parses, so the size cap is not what saves this: without `id` and
+    // `username` there is no profile, and `undefined` must not become a
+    // username in the ledger.
+    expect(result.status).toBe(CapabilityStatus.ERROR);
+    if (result.status === CapabilityStatus.ERROR) {
+      expect(result.error?.kind).toBe(CapabilityErrorKind.SCHEMA_MISMATCH);
+      expect(result.error?.message).toMatch(/id, username/);
     }
   });
 

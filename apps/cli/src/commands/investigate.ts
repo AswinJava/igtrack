@@ -1,4 +1,4 @@
-import { accountPositional, display, emit, flagNumber, flagString, isJson, table, UsageError, type ParsedArgs } from "../output.js";
+import { accountPositional, display, emit, flagNumber, flagString, isJson, strictFlagBool, table, UsageError, type ParsedArgs } from "../output.js";
 import { createContext } from "../context.js";
 import { opInvestigate, type InvestigateResult } from "../tools.js";
 
@@ -79,9 +79,9 @@ export async function runInvestigate(args: ParsedArgs): Promise<number> {
       ...(urls.length > 0 ? { urls } : {}),
       ...(maxSources !== undefined ? { maxSources } : {}),
       ...(maxJobs !== undefined ? { maxJobs } : {}),
-      ...(args.flags["no-web"] === true ? { web: false } : {}),
-      ...(args.flags["refresh"] === true ? { refresh: true } : {}),
-      ...(args.flags["force"] === true ? { force: true } : {}),
+      ...(strictFlagBool(args.flags, "no-web") ? { web: false } : {}),
+      ...(strictFlagBool(args.flags, "refresh") ? { refresh: true } : {}),
+      ...(strictFlagBool(args.flags, "force") ? { force: true } : {}),
     });
     emit({ json, meta: ctx.meta, data: result, human: renderInvestigateHuman(result) });
     return investigateExitCode(result);

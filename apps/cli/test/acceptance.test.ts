@@ -417,6 +417,14 @@ describe.skipIf(!databaseUp)("acceptance scenarios", () => {
     const work = await opWork(ctx, { max: 20, skipScheduler: true });
     expect(work.outcomes.some((o) => o.state === "failed")).toBe(false);
 
+    // "What did the last scan report" names a job that FINISHED. Derived from
+    // the running/retry/failed buckets alone it was null — or a failure — on a
+    // deployment whose scans all succeeded, which is the first thing an operator
+    // asks a healthy queue.
+    const afterWork = await opStatus(ctx);
+    expect(afterWork.scans.lastOutcome).toMatch(/^COMPLETED/);
+    expect(afterWork.scans.lastCompletedAt).not.toBeNull();
+
     const done = await opPlan(ctx, { target: OWNED });
     expect(done.steps.find((s) => s.id === "observe:STORY_SCAN")?.status).toBe("DONE");
 

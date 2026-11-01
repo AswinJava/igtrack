@@ -183,3 +183,51 @@ export const COMMAND_HELP: Record<string, string> = {
   version: VERSION_HELP,
   help: HELP,
 };
+
+/**
+ * The flags every command reads, whatever its own contract documents: the
+ * envelope switch, the two help switches, the version switch and the owner
+ * selection.
+ */
+export const GLOBAL_FLAGS: ReadonlySet<string> = new Set([
+  "h",
+  "help",
+  "json",
+  "user",
+  "v",
+  "version",
+]);
+
+/**
+ * The flag names a command accepts, read out of the one contract it has. A
+ * refusal and a documentation list must never be two different lists, so the
+ * accepted set is not maintained separately from the help text — it is derived
+ * from it.
+ */
+export function documentedFlags(command: string): ReadonlySet<string> {
+  const names = new Set<string>(GLOBAL_FLAGS);
+  for (const match of (COMMAND_HELP[command] ?? "").matchAll(/--([a-z][a-z0-9-]*)/g)) {
+    const name = match[1];
+    if (name !== undefined) names.add(name);
+  }
+  return names;
+}
+
+/**
+ * The flag tokens this call asked for that the command has no contract to read.
+ *
+ * A typo must not run the command anyway: `--form=jsonl` printed as a table is
+ * the caller's request quietly dropped, and an agent cannot see that it did not
+ * get what it asked for. A command with no registered contract (a mistyped verb,
+ * which becomes a prompt) is not checked — the prompt path reads the whole line.
+ */
+export function unknownFlags(
+  command: string,
+  flags: Record<string, string | boolean>,
+): string[] {
+  if (COMMAND_HELP[command] === undefined) return [];
+  const accepted = documentedFlags(command);
+  return Object.keys(flags)
+    .filter((name) => !accepted.has(name))
+    .sort();
+}

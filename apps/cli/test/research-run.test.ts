@@ -2,7 +2,7 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CLAIM_PREDICATES, classifyClaimPredicate } from "@igtrack/core";
 import type { FetchFailureKind, FetchResult, FetchSuccess, ResearchFetcher } from "@igtrack/ingestion";
-import { createDb, listResearchRuns, runMigrations, seed, users, type DatabaseHandle } from "@igtrack/database";
+import { createDb, listResearchDocuments, listResearchRuns, runMigrations, seed, users, type DatabaseHandle } from "@igtrack/database";
 import { createContext, type CliContext } from "../src/context.js";
 import { runResearch } from "../src/commands/intel.js";
 import { CliError } from "../src/output.js";
@@ -227,6 +227,64 @@ describe.skipIf(!databaseUp)("research acquisition engine (opResearchRun)", () =
     expect(listed.groups).toHaveLength(0);
     // Empty means "no research found it", stated as exactly that.
     expect(listed.note).toMatch(/Empty means nobody submitted research yet/);
+  });
+
+  // An unreachable robots.txt is not a clearance. RFC 9309 lets the client read
+  // the page anyway, so the bytes are stored — but the document must say the
+  // permission was assumed, and the freshness reuse path must not lose that.
+  it("says out loud when robots.txt could not be read, instead of claiming clearance", async () => {
+    const target = await newTarget();
+    const unverified: FetchSuccess = {
+      ...ok("https://quiet.example/doc", orgPage("Aurora Print Studio")),
+      robotsChecked: false,
+      robotsNote: "https://quiet.example/robots.txt answered HTTP 500",
+    };
+    const { fetcher } = scripted(() => unverified);
+
+    const out = await opResearchRun(
+      ctx,
+      { target, question: "What is this account about?", urls: ["https://quiet.example/doc"] },
+      { fetcher },
+    );
+
+    expect(out.documents[0]).toMatchObject({ outcome: "FETCHED" });
+    expect(out.documents[0]?.outcomeReason).toMatch(/robots\.txt was NOT verified/);
+    expect(out.documents[0]?.outcomeReason).toMatch(/answered HTTP 500/);
+    expect(out.documents[0]?.outcomeReason).toMatch(/not because the site permitted it/);
+
+    const [stored] = await listResearchDocuments(handle.db, {
+      userId: ctx.userId,
+      runId: out.runId,
+    });
+    expect(stored?.outcomeReason).toBe(out.documents[0]?.outcomeReason);
+
+    // Reuse of the same page for another target carries the same caveat.
+    const secondTarget = await newTarget();
+    const reused = await opResearchRun(
+      ctx,
+      {
+        target: secondTarget,
+        question: "What is this account about?",
+        urls: ["https://quiet.example/doc"],
+      },
+      { fetcher },
+    );
+    expect(reused.documents[0]).toMatchObject({ outcome: "REUSED" });
+    expect(reused.documents[0]?.outcomeReason).toMatch(/robots\.txt was NOT verified/);
+
+    // And a page whose robots did answer gets no caveat — the absence is asserted.
+    const cleanTransport = scripted((url) => ok(url, orgPage("Aurora Print Studio")));
+    const clean = await opResearchRun(
+      ctx,
+      {
+        target: await newTarget(),
+        question: "What is this account about?",
+        urls: ["https://loud.example/doc"],
+      },
+      { fetcher: cleanTransport.fetcher },
+    );
+    expect(clean.documents[0]?.outcome).toBe("FETCHED");
+    expect(clean.documents[0]?.outcomeReason ?? "").not.toMatch(/robots/i);
   });
 
   it("treats prompt injection in page prose as inert: instructions never become claims", async () => {

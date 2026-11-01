@@ -5,6 +5,7 @@ import {
   CapabilityStatus,
   Confidence,
   ObservationCategory,
+  partial,
   SourceKind,
   unavailable,
   type CapabilityResult,
@@ -183,6 +184,14 @@ function insightsSource(config: InsightsSourceConfig = {}): ExecutionSource {
           config.note ?? "Account insights unavailable from this source.",
         );
       }
+      if (status === CapabilityStatus.PARTIAL) {
+        return partial(config.set ?? pointSet(), {
+          observedAt: OBSERVED_AT,
+          source: sourceRef,
+          confidence: Confidence.MEDIUM,
+          note: config.note ?? "Partial insight window",
+        });
+      }
       return available(config.set ?? pointSet(), {
         observedAt: OBSERVED_AT,
         source: sourceRef,
@@ -335,6 +344,23 @@ describe.runIf(dbAvailable)("worker INSIGHTS_SCAN", () => {
 
     const health = await getSourceHealth(handle.db, "stub:insights");
     expect(health.find((h) => h.capability === "getAccountInsights")?.status).toBe("HEALTHY");
+  });
+
+  it("PARTIAL window reports partial, not an observed absence (IN3b)", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const src = insightsSource({
+      set: absenceOnlySet(),
+      status: CapabilityStatus.PARTIAL,
+      note: "Insight window truncated by the source",
+    });
+
+    // IN3 gives COMPLETED_EMPTY its meaning: the whole window was read and
+    // every metric carried the platform's reason. A truncated window cannot
+    // claim that, so an unfinished read must surface as partial even though the
+    // rows it did manage to write are stored.
+    expect(await runInsightsScan(handle.db, job, src)).toBe("succeeded-partial");
+    expect(await insightRows(targetId)).toHaveLength(2);
   });
 
   it("UNAVAILABLE → no rows at all, source health says why (IN4)", async () => {

@@ -16,7 +16,8 @@ import { Confidence, ObservationCategory, SourceKind, type PeriodReport } from "
 import { opAsk } from "../src/ask/execute.js";
 import { planAsk } from "../src/ask/parse.js";
 import { createContext, type CliContext } from "../src/context.js";
-import { CliError, UsageError } from "../src/output.js";
+import { runReport } from "../src/commands/report.js";
+import { CliError, parseArgs, UsageError } from "../src/output.js";
 import {
   opAlerts,
   opAudience,
@@ -778,10 +779,95 @@ describe.skipIf(!databaseUp)("periodic report surfaces", () => {
 
     const ask = await opAsk(ctx, plan);
     expect(ask.understanding.intents[0]).toBe("recent");
-    // The fixture target has a recorded baseline and no diffs, so the honest
-    // answer is a computed empty one — and it says the baseline exists.
-    expect(ask.answer.join(" ")).toContain("@aurora.wilde");
-    expect(ask.answer.join(" ")).toContain("baseline exists and nothing moved");
+    // The answer carries opRecent's own note instead of restating it. The two
+    // EMPTY flavours — "a COMPLETE roster was re-read and nothing moved" versus
+    // "nothing was read inside this window" — are the distinction this surface
+    // exists to keep, and a paraphrase here is how one sentence ends up
+    // claiming a no-change the ledger never observed.
+    const recent = await opRecent(ctx, { target: FIXTURE_USERNAME, direction: "following" });
+    expect(recent.state).toBe("EMPTY");
+    const note = recent.notes.find((row) => /add or removal/i.test(row));
+    expect(note).toBeDefined();
+    const answer = ask.answer.join(" ");
+    expect(answer).toContain(`@${FIXTURE_USERNAME}`);
+    expect(answer).toContain(note ?? "");
+    // "Instead of restating it" means exactly once. The summary quotes the note
+    // verbatim and the note list then repeats it, so an operator reading the
+    // answer sees one fact, not two agreements from the same source.
+    expect(ask.answer.filter((line) => line.includes(note ?? "§"))).toHaveLength(1);
+  });
+
+  it("never says nothing moved when the window contains no roster re-read", async () => {
+    // A target whose only COMPLETE rosters are backdated: the default
+    // "recently" window holds no read at all, so an empty answer there proves
+    // only that nothing was looked at. Before this fix the ask surface rendered
+    // that as "the baseline exists and nothing moved" — an observed no-change
+    // the ledger never observed.
+    const probe = await opTargetAdd(ctx, { username: "probe.roster.stale" });
+    for (const takenAt of [new Date("2026-08-21T18:00:00.000Z"), new Date("2026-08-25T18:00:00.000Z")]) {
+      await recordFollowSnapshot(handle.db, {
+        targetId: probe.id,
+        direction: "FOLLOWING",
+        source: { id: "fixture:v1", kind: SourceKind.FIXTURE, name: "Fixture v1" },
+        takenAt,
+        page: {
+          entries: [{ username: "probe_roster_alpha" }, { username: "probe_roster_beta" }],
+          complete: true,
+          meta: {
+            category: ObservationCategory.OBSERVED,
+            confidence: Confidence.HIGH,
+            observedAt: takenAt.toISOString(),
+          },
+        },
+      });
+    }
+
+    const recent = await opRecent(ctx, {
+      target: "probe.roster.stale",
+      direction: "following",
+      since: "2026-08-26",
+    });
+    expect(recent.state).toBe("EMPTY");
+    expect(recent.notes.join(" ")).toContain("nothing observed between the reads");
+
+    const ask = await opAsk(ctx, planAsk("who did @probe.roster.stale recently follow?"));
+    const answer = ask.answer.join(" ");
+    expect(answer).toContain("nothing observed between the reads");
+    expect(answer).not.toContain("computed empty answer");
+    expect(answer.toLowerCase()).not.toContain("nothing moved");
+  });
+
+  it("says an incomplete audience once, not in the summary and again in the notes", async () => {
+    // One-sided rosters are the common first-week state: the follower side has
+    // no COMPLETE snapshot, so the refusal IS the answer. The ask summary quotes
+    // opAudience's first note verbatim, and a note list that repeats it reads as
+    // two separate findings about one missing roster.
+    const probe = await opTargetAdd(ctx, { username: "probe.audience.onesided" });
+    const takenAt = new Date("2026-08-25T18:00:00.000Z");
+    await recordFollowSnapshot(handle.db, {
+      targetId: probe.id,
+      direction: "FOLLOWING",
+      source: { id: "fixture:v1", kind: SourceKind.FIXTURE, name: "Fixture v1" },
+      takenAt,
+      page: {
+        entries: [{ username: "probe_audience_alpha" }],
+        complete: true,
+        meta: {
+          category: ObservationCategory.OBSERVED,
+          confidence: Confidence.HIGH,
+          observedAt: takenAt.toISOString(),
+        },
+      },
+    });
+
+    const audience = await opAudience(ctx, { target: "probe.audience.onesided" });
+    expect(audience.sets.complete).toBe(false);
+    const first = audience.notes[0];
+    expect(first).toBeDefined();
+
+    const ask = await opAsk(ctx, planAsk("who is the audience of @probe.audience.onesided?"));
+    expect(ask.answer.join(" ")).toContain(first ?? "§");
+    expect(ask.answer.filter((line) => line.includes(first ?? "§"))).toHaveLength(1);
   });
 
   it("warns about synthetic rows from the rows themselves, never from the configured provider", async () => {
@@ -830,5 +916,35 @@ describe.skipIf(!databaseUp)("periodic report surfaces", () => {
     expect(liveText).not.toContain("Synthetic fixture rows");
     expect(liveText).toContain("Configured source: the synthetic fixture");
     expect(liveText).not.toContain("NOT observing a real account");
+  });
+
+  it("carries the source labels through --format json, not only through --json", async () => {
+    // `--format json` is how a caller asks for machine-shaped report data. If
+    // that path prints a bare object, the synthetic/source attribution the
+    // product exists to preserve is the first thing a pipeline drops.
+    const chunks: string[] = [];
+    const write = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      chunks.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stdout.write;
+    let code = -1;
+    try {
+      code = await runReport(
+        parseArgs(["report", FIXTURE_USERNAME, "--period", "weekly", "--at", AUGUST_AT, "--format", "json"]),
+      );
+    } finally {
+      process.stdout.write = write;
+    }
+    expect(code).toBe(0);
+    const body = JSON.parse(chunks.join("")) as {
+      ok: boolean;
+      data: unknown;
+      _meta?: { sourceId: string | null; synthetic: boolean };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toBeDefined();
+    expect(body._meta?.synthetic).toBe(true);
+    expect(body._meta?.sourceId).toContain("fixture");
   });
 });

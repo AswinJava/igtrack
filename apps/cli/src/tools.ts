@@ -49,6 +49,7 @@ import {
   normalizeClaimValue,
   normalizeHandleInput,
   parseAccountReference,
+  parsePostReference,
   validateClaimExcerpt,
   validateClaimSourceUrl,
   validateClaimValue,
@@ -181,8 +182,11 @@ import {
   handleSearchQueries,
   researchSearchProviderFromEnv,
   ResearchFetcher,
+  type AnonStoriesDossier,
   type ArchiveHistoryResult,
   type ArchiveHttpResponse,
+  type PublicSinglePost,
+  type PublicWebDossier,
   type Readiness,
   type ResearchSearchProvider,
   type SearchResult,
@@ -198,7 +202,7 @@ import {
 } from "@igtrack/core";
 import type { TargetStatus } from "@igtrack/core";
 import type { CliContext } from "./context.js";
-import { capabilityLines, CliError, resolveUserPath, UsageError } from "./output.js";
+import { capabilityLines, CliError, resolveUserPath, UsageError, type OutputMeta } from "./output.js";
 
 // ---------------------------------------------------------------------------
 // The operations layer.
@@ -333,10 +337,11 @@ export async function opStatus(ctx: CliContext): Promise<StatusReport> {
     listTargetsForUser(ctx.db, ctx.userId),
   ]);
 
-  const outcomes = operations === null ? [] : [operations.runningJobs, operations.retryWaitJobs, operations.failedJobs].flat();
-  const latest = [...outcomes].sort(
-    (a, b) => (b.completedAt?.getTime() ?? 0) - (a.completedAt?.getTime() ?? 0),
-  )[0];
+  // "What did the last scan report" is answered by the last job that FINISHED.
+  // Reading it out of the running/retry/failed buckets instead can only ever
+  // name an unfinished job, so a deployment whose scans all succeed shows a
+  // failure as its latest outcome.
+  const lastCompleted = operations?.lastCompletedJob ?? null;
 
   return {
     owner: { id: ctx.userId, email: ctx.userEmail },
@@ -356,8 +361,8 @@ export async function opStatus(ctx: CliContext): Promise<StatusReport> {
     queue: overview.queue,
     scans: {
       total: overview.recentSnapshots + overview.followChanges + overview.storiesObserved,
-      lastCompletedAt: latest?.completedAt ?? null,
-      lastOutcome: latest?.outcome ?? null,
+      lastCompletedAt: lastCompleted?.completedAt ?? null,
+      lastOutcome: lastCompleted?.outcome ?? null,
     },
     sourceHealth: overview.sourceHealth.map((h) => ({
       sourceId: h.sourceId,
@@ -567,9 +572,19 @@ export async function opTargetSetStatus(
 
 export async function opTargetRemove(
   ctx: CliContext,
-  target: string,
+  input: { target: string; confirm: boolean },
 ): Promise<{ id: string; username: string; deleted: boolean }> {
-  const resolved = await resolveTarget(ctx.db, ctx.userId, target);
+  // The guard lives in the one operations layer, not in either surface's
+  // argument schema. A literal `confirm: true` in the MCP schema and a `--yes`
+  // check in the CLI are both replaceable; an op that deletes on request is not.
+  if (input.confirm !== true) {
+    throw new CliError(
+      "CONFIRMATION_REQUIRED",
+      "Deleting a target removes every observation, snapshot and evidence row retained for it; pass confirm: true (CLI: --yes).",
+      2,
+    );
+  }
+  const resolved = await resolveTarget(ctx.db, ctx.userId, input.target);
   const deleted = await deleteOwnedTarget(ctx.db, ctx.userId, resolved.id);
   return { id: resolved.id, username: resolved.username, deleted };
 }
@@ -5720,10 +5735,20 @@ export async function opResearchRun(
 
     if (fresh !== null && fresh.title !== null && fresh.byteSize !== null) {
       reused += 1;
+      // The stored document's own caveats (an unverified robots.txt, links we
+      // chose not to follow) travel with the reuse: a re-read row is the SAME
+      // evidence, and replacing its reason with "fetched recently" would quietly
+      // upgrade an assumed permission to a cleared one.
+      const reuseReason = [
+        fresh.outcomeReason,
+        `Fetched ${fresh.retrievedAt?.toISOString() ?? "previously"} (inside the ${RESEARCH_DOCUMENT_FRESH_HOURS}h freshness window); pass --refresh to refetch.`,
+      ]
+        .filter((part): part is string => part !== null)
+        .join(" ");
       const result: ResearchDocumentResult = {
         url: plannedDoc.url,
         outcome: "REUSED",
-        outcomeReason: `Fetched ${fresh.retrievedAt?.toISOString() ?? "previously"} (inside the ${RESEARCH_DOCUMENT_FRESH_HOURS}h freshness window); pass --refresh to refetch.`,
+        outcomeReason: reuseReason,
         httpStatus: fresh.httpStatus,
         title: fresh.title,
         contentType: fresh.contentType,
@@ -5815,7 +5840,13 @@ export async function opResearchRun(
     );
     if (plannedDoc.sourceType === "SEARCH_RESULT" && !pageMentionsHandle) {
       pagesDiscarded += 1;
-      const discardedReason = `Discarded — this page never names @${dossier.target.username}, so it cannot be a statement about that account.`;
+      const discardedReason =
+        [
+          `Discarded — this page never names @${dossier.target.username}, so it cannot be a statement about that account.`,
+          robotsUnverifiedNote(response),
+        ]
+          .filter((part): part is string => part !== null)
+          .join(" ");
       const discardedResult: ResearchDocumentResult = {
         url: response.finalUrl,
         outcome: "FETCHED",
@@ -5927,9 +5958,14 @@ export async function opResearchRun(
       url: response.finalUrl,
       outcome: "FETCHED",
       outcomeReason:
-        linksNotFollowed > 0
-          ? `${linksNotFollowed} link(s) on this page were NOT followed (depth-1 bound).`
-          : null,
+        [
+          robotsUnverifiedNote(response),
+          linksNotFollowed > 0
+            ? `${linksNotFollowed} link(s) on this page were NOT followed (depth-1 bound).`
+            : null,
+        ]
+          .filter((part): part is string => part !== null)
+          .join(" ") || null,
       httpStatus: response.httpStatus,
       title: extracted.title,
       contentType: response.contentType,
@@ -6084,6 +6120,23 @@ const RESEARCH_FETCH_OUTCOMES: Record<string, ResearchDocumentResult["outcome"]>
   RATE_LIMITED: "RATE_LIMITED",
   NETWORK_ERROR: "FAILED",
 };
+
+/**
+ * A page read while robots.txt could NOT be read is a different fact from a
+ * page read after the site answered. RFC 9309 lets a client proceed when the
+ * file is unreachable, so the bytes are still stored — but the document may
+ * not read as a permission the site gave, so the run says what happened.
+ */
+function robotsUnverifiedNote(response: {
+  robotsChecked: boolean;
+  robotsNote?: string | null;
+}): string | null {
+  if (response.robotsChecked) return null;
+  return (
+    `robots.txt was NOT verified: ${response.robotsNote ?? "the read did not answer"} — ` +
+    "this page was stored because the file could not be read, not because the site permitted it."
+  );
+}
 
 // ---------------------------------------------------------------------------
 /**
@@ -6548,6 +6601,7 @@ export async function opAuditWebProbe(
           `Relevance gate: this page does not name @${username} in its URL, title or body, so its ${
             extracted.candidates.length
           } structured value(s) were discarded — a search hit is a candidate, never a statement about the handle.`,
+          robotsUnverifiedNote(response),
           linksNotFollowed > 0
             ? `${linksNotFollowed} link(s) on this page were NOT followed (depth-1 bound).`
             : null,
@@ -6637,6 +6691,7 @@ export async function opAuditWebProbe(
       outcome: "FETCHED",
       outcomeReason:
         [
+          robotsUnverifiedNote(response),
           linksNotFollowed > 0
             ? `${linksNotFollowed} link(s) on this page were NOT followed (depth-1 bound).`
             : null,
@@ -8204,19 +8259,36 @@ export async function opInvestigate(
   const targetJobs = await listJobsForTarget(ctx.db, targetId, 50);
   const completed = targetJobs.filter((j) => j.outcome === "COMPLETED").length;
   const partial = targetJobs.filter((j) => j.outcome === "COMPLETED_PARTIAL").length;
+  // A read that finished and found nothing is its own fact. Counting it in
+  // neither bucket made the sum of the parts smaller than the jobs on record,
+  // which reads as jobs the report lost.
+  const empty = targetJobs.filter((j) => j.outcome === "COMPLETED_EMPTY").length;
   const failed = targetJobs.filter((j) => j.status === "failed").length;
   platformStage.retrieved = {
     ...platformStage.retrieved,
     jobs: targetJobs.length,
     completed,
+    empty,
     partial,
     failed,
   };
   if (targetJobs.length > 0) {
     platformStage.reason =
-      `${targetJobs.length} scan job(s) on record: ${completed} completed, ${partial} partial, ${failed} failed`;
-    if (failed > 0) {
+      `${targetJobs.length} scan job(s) on record: ${completed} completed, ` +
+      `${empty} completed and found nothing, ${partial} partial, ${failed} failed`;
+    if (partial > 0 || failed > 0) {
+      // A PARTIAL scan is a listing that was not fully read. Leaving the stage
+      // COMPLETED because nothing failed is how an incomplete roster gets
+      // presented as the account's whole audience.
       platformStage.status = INVESTIGATION_STAGE_STATUS.PARTIAL;
+      if (partial > 0) {
+        gaps.push({
+          subject: "one or more platform scans that stopped before the end of a listing",
+          kind: "investigation",
+          reason: `${partial} job(s) recorded COMPLETED_PARTIAL: what was read is stored, what was not reached is not claimed.`,
+          howToImprove: "igtrack scans list --target " + handle + " names the partial scans and their sources.",
+        });
+      }
       const firstError = targetJobs.find(
         (j): j is (typeof targetJobs)[number] & { errorMessage: string } =>
           j.errorMessage !== null,
@@ -9510,6 +9582,195 @@ function buildInvestigateNextSteps(
   }
   void ctx;
   return steps;
+}
+
+// ---------------------------------------------------------------------------
+// The database-free live reads: one logged-out profile page, one logged-out
+// media page, one aggregator session.
+//
+// Each surface used to build the provider itself, decide what a refusal becomes,
+// and write its own evidence label — so one question had two answers, and the
+// sentence that tells a reader what class of evidence they hold drifted between
+// them. Construction, refusal and label are decided once, here.
+// ---------------------------------------------------------------------------
+
+export type LiveReadSource = "public-page" | "public-post" | "anonstories";
+
+const LIVE_READ_LABELS: Record<
+  LiveReadSource,
+  { provider: string; sourceId: string; note: string }
+> = {
+  "public-page": {
+    provider: "public",
+    sourceId: "public:web:v1",
+    note: "Live observation of Instagram's logged-out public pages, rendered in a local headless browser. Not an official Graph API response.",
+  },
+  "public-post": {
+    provider: "public",
+    sourceId: "public:web:v1",
+    note: "Live observation of Instagram's logged-out public media page, rendered in a local headless browser. Not an official Graph API response.",
+  },
+  anonstories: {
+    provider: "anonstories",
+    sourceId: "anonstories:v1",
+    note: "Live reading of a third-party public aggregator (anonstories.com) through a local browser. PUBLIC_AGGREGATOR — not an Instagram page and not an official Graph API response.",
+  },
+};
+
+/**
+ * `_meta` for a live read. `synthetic: false` is a statement about the bytes:
+ * these paths observe a real page, and a file written by `--out` keeps the same
+ * label as the answer printed next to it.
+ */
+export function liveReadMeta(
+  source: LiveReadSource,
+  studio: "cli" | "mcp",
+  note?: string | undefined,
+): OutputMeta {
+  const label = LIVE_READ_LABELS[source];
+  return {
+    provider: label.provider,
+    sourceId: label.sourceId,
+    synthetic: false,
+    production: process.env.NODE_ENV === "production",
+    studio,
+    generatedAt: new Date().toISOString(),
+    note: note ?? label.note,
+  };
+}
+
+function providerUnusable(name: string, err: unknown): CliError {
+  return new CliError(
+    "PROVIDER_UNAVAILABLE",
+    `The ${name} provider is not usable: ${
+      err instanceof Error ? err.message : String(err)
+    } Nothing was requested.`,
+    3,
+  );
+}
+
+function newPublicProvider(chromePath?: string, maxPosts?: number): PublicWebProvider {
+  try {
+    return new PublicWebProvider({
+      ...(chromePath !== undefined ? { chromePath } : {}),
+      ...(maxPosts !== undefined ? { maxPosts } : {}),
+    });
+  } catch (err) {
+    throw providerUnusable("public", err);
+  }
+}
+
+function newAnonProvider(chromePath?: string, maxHighlights?: number): AnonStoriesProvider {
+  try {
+    return new AnonStoriesProvider({
+      ...(chromePath !== undefined ? { chromePath } : {}),
+      ...(maxHighlights !== undefined ? { maxHighlights } : {}),
+    });
+  } catch (err) {
+    throw providerUnusable("anonstories", err);
+  }
+}
+
+/** Test seam for the live reads: replaces the browser-backed transport. */
+export interface LiveReadDeps {
+  publicProvider?: Pick<PublicWebProvider, "getDossier" | "getPublicPost"> | undefined;
+  anonProvider?: Pick<AnonStoriesProvider, "getDossier"> | undefined;
+}
+
+export interface PublicPageReadInput {
+  username: string;
+  chromePath?: string | undefined;
+  maxPosts?: number | undefined;
+}
+
+export async function opPublicDossier(
+  input: PublicPageReadInput,
+  deps: LiveReadDeps = {},
+): Promise<PublicWebDossier> {
+  const provider = deps.publicProvider ?? newPublicProvider(input.chromePath, input.maxPosts);
+  const result = await provider.getDossier(input.username);
+  if (result.dossier === undefined) {
+    // A failure to read is reported as the provider's own typed refusal; the
+    // absence of a dossier is never an empty dossier.
+    throw new CliError(
+      result.error?.kind ?? "PUBLIC_WEB_FAILED",
+      result.error?.message ?? result.note ?? "The public dossier could not be built.",
+      1,
+    );
+  }
+  return result.dossier;
+}
+
+export interface PublicPostReadInput {
+  url: string;
+  chromePath?: string | undefined;
+}
+
+export async function opPublicPost(
+  input: PublicPostReadInput,
+  deps: LiveReadDeps = {},
+): Promise<PublicSinglePost> {
+  const parsed = parsePostReference(input.url);
+  if (!parsed.ok) throw new UsageError(parsed.message);
+  const provider = deps.publicProvider ?? newPublicProvider(input.chromePath);
+  const result = await provider.getPublicPost(parsed.reference);
+  if (result.data === undefined) {
+    throw new CliError(
+      result.error?.kind ?? "PUBLIC_WEB_FAILED",
+      result.error?.message ?? result.note ?? "The post could not be read.",
+      result.status === "UNAVAILABLE" ? 3 : 1,
+    );
+  }
+  return result.data;
+}
+
+export interface AnonStoriesReadInput {
+  username: string;
+  chromePath?: string | undefined;
+  maxHighlights?: number | undefined;
+}
+
+export async function opAnonstoriesDossier(
+  input: AnonStoriesReadInput,
+  deps: LiveReadDeps = {},
+): Promise<AnonStoriesDossier> {
+  const provider = deps.anonProvider ?? newAnonProvider(input.chromePath, input.maxHighlights);
+  const result = await provider.getDossier(
+    input.username,
+    input.maxHighlights !== undefined ? { maxHighlights: input.maxHighlights } : {},
+  );
+  if (result.dossier === undefined) {
+    throw new CliError(
+      result.error?.kind ?? "ANONSTORIES_FAILED",
+      result.error?.message ?? result.note ?? "The aggregator dossier could not be built.",
+      1,
+    );
+  }
+  return result.dossier;
+}
+
+/**
+ * `_meta` for a viewer report. The `sourceId` names the sources actually read,
+ * so a caller can tell a public-only composition from a full one; `generatedAt`
+ * is the report's own, not the moment the label was written.
+ */
+export function viewerMeta(
+  report: ViewerReport,
+  studio: "cli" | "mcp",
+  note?: string | undefined,
+): OutputMeta {
+  const sources = report.profile.sources.join("+");
+  return {
+    provider: "viewer",
+    sourceId: sources === "" ? "viewer:v1" : `viewer:${sources}`,
+    synthetic: false,
+    production: process.env.NODE_ENV === "production",
+    studio,
+    generatedAt: report.generatedAt,
+    note:
+      note ??
+      `Read-only six-tab composition of ${report.requestedSources.join(" + ")}. Evidence classes are stated per tab; unavailable tabs carry their reason.`,
+  };
 }
 
 // ---------------------------------------------------------------------------

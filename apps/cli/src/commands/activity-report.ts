@@ -57,7 +57,6 @@ are refused rather than guessed. Synthetic rows are labelled in JSON and in a
 banner at the top of the Markdown. Nothing in this command scans or writes.`;
 
 export async function runActivityReport(args: ParsedArgs): Promise<number> {
-  const json = isJson(args.flags);
   const target = args.positionals[0];
   if (target === undefined) {
     throw new UsageError(
@@ -78,6 +77,10 @@ export async function runActivityReport(args: ParsedArgs): Promise<number> {
   if (timelineLimit < 0) throw new UsageError("--limit must be zero or greater.");
   const inventoryLimit = flagNumber(args.flags, "inventory-limit", 180);
   const out = flagString(args.flags, "out");
+  // A `--format json` answer with nowhere else to go is machine-shaped, and a
+  // machine-shaped answer carries `_meta` — the source id and synthetic label
+  // belong to the data, not to a second flag the caller must remember.
+  const json = isJson(args.flags) || (out === undefined && format === "json");
 
   const ctx = await createContext();
   try {

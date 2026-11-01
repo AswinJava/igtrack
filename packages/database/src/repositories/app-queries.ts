@@ -2177,6 +2177,12 @@ export interface OperationsSnapshot {
   runningJobs: JobQueueSummary[];
   retryWaitJobs: JobQueueSummary[];
   failedJobs: JobQueueSummary[];
+  /**
+   * The most recent job that FINISHED, whatever its outcome. A snapshot of the
+   * unfinished buckets alone cannot answer "what did the last scan report",
+   * because a successful scan is not in any of them.
+   */
+  lastCompletedJob: { kind: string; outcome: string; completedAt: Date | null } | null;
   sources: SourceHealthRecord[];
   error?: string;
 }
@@ -2184,8 +2190,19 @@ export interface OperationsSnapshot {
 export async function getOperationsSnapshot(db: Database): Promise<OperationsSnapshot> {
   try {
     await db.execute(sql`SELECT 1`);
-    const [migrationCheck, q, tables, runningJobs, retryWaitJobs, failedJobs, health, workerRow, schedulerRow, outcomeRows] =
-      await Promise.all([
+    const [
+      migrationCheck,
+      q,
+      tables,
+      runningJobs,
+      retryWaitJobs,
+      failedJobs,
+      health,
+      workerRow,
+      schedulerRow,
+      outcomeRows,
+      lastCompletedRow,
+    ] = await Promise.all([
         query<{ exists: boolean }>(
           db,
           sql`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'monitoring_jobs') AS exists`,
@@ -2224,6 +2241,14 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
               WHERE outcome IS NOT NULL
               GROUP BY outcome`,
         ).catch(() => [] as Array<{ outcome: string; n: number }>),
+        query<{ kind: string; outcome: string; completed_at: Date | string | null }>(
+          db,
+          sql`SELECT kind, outcome::text AS outcome, completed_at
+              FROM monitoring_jobs
+              WHERE outcome IS NOT NULL
+              ORDER BY completed_at DESC NULLS LAST, created_at DESC
+              LIMIT 1`,
+        ).catch(() => [] as Array<{ kind: string; outcome: string; completed_at: Date | string | null }>),
       ]);
 
     const lastClaimRaw = workerRow[0]?.started_at ?? null;
@@ -2263,6 +2288,17 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
       runningJobs,
       retryWaitJobs,
       failedJobs,
+      lastCompletedJob:
+        lastCompletedRow[0] === undefined
+          ? null
+          : {
+              kind: lastCompletedRow[0].kind,
+              outcome: lastCompletedRow[0].outcome,
+              completedAt:
+                lastCompletedRow[0].completed_at === null
+                  ? null
+                  : asDate(lastCompletedRow[0].completed_at),
+            },
       sources: health,
     };
   } catch (e) {
@@ -2280,6 +2316,7 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
       runningJobs: [],
       retryWaitJobs: [],
       failedJobs: [],
+      lastCompletedJob: null,
       sources: [],
       error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
     };

@@ -59,7 +59,6 @@ following-roster comparison measured it. Synthetic rows are labelled in JSON
 and in the Markdown.`;
 
 export async function runTracker(args: ParsedArgs): Promise<number> {
-  const json = isJson(args.flags);
   const target = args.positionals[0];
   const limit = flagNumber(args.flags, "limit", 12);
   const out = flagString(args.flags, "out");
@@ -67,6 +66,10 @@ export async function runTracker(args: ParsedArgs): Promise<number> {
   if (!["md", "markdown", "json"].includes(format)) {
     throw new UsageError(`--format expects md or json, received "${format}".`);
   }
+  // A `--format json` answer with nowhere else to go is machine-shaped, and a
+  // machine-shaped answer carries `_meta` — the source id and synthetic label
+  // belong to the data, not to a second flag the caller must remember.
+  const json = isJson(args.flags) || (out === undefined && format === "json");
 
   const ctx = await createContext();
   try {

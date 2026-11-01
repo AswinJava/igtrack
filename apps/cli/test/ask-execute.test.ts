@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { opAsk } from "../src/ask/execute.js";
+import { askExitCode } from "../src/commands/ask.js";
 import { planAsk } from "../src/ask/parse.js";
 
 // ---------------------------------------------------------------------------
@@ -115,5 +116,16 @@ describe("opAsk: report surfaces without a database", () => {
       code: "DB_UNAVAILABLE",
       exitCode: 3,
     });
+  });
+});
+
+describe("ask exit codes", () => {
+  it("does not report an answer with a failed step as success", () => {
+    // A PARTIAL answer is still an answer, but a step the sentence asked for
+    // did not happen. Exit 0 would tell a script the request was carried out.
+    expect(askExitCode("ANSWERED")).toBe(0);
+    expect(askExitCode("NEEDS_INPUT")).toBe(0);
+    expect(askExitCode("PARTIAL")).toBe(1);
+    expect(askExitCode("FAILED")).toBe(1);
   });
 });

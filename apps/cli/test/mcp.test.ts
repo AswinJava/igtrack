@@ -149,6 +149,50 @@ describe("igtrack mcp", () => {
     }
   });
 
+  it("refuses arguments on tools that declare none", async () => {
+    const { client, close } = await connect();
+    try {
+      const tools = await client.listTools();
+      // The SDK skips validation entirely for a tool with no input schema, so a
+      // no-argument tool that leaves its schema unstated accepts anything it
+      // cannot honour: `igtrack_status {target:"x"}` would answer the whole
+      // deployment and the client would read that as a filtered one. Declaring
+      // an empty strict object is what makes "takes no arguments" a contract.
+      const zeroArg = tools.tools.filter(
+        (t) =>
+          t.name === "igtrack_status" ||
+          t.name === "igtrack_capabilities" ||
+          t.name === "igtrack_doctor" ||
+          t.name === "igtrack_targets_list",
+      );
+      expect(zeroArg).toHaveLength(4);
+      for (const tool of zeroArg) {
+        const shape = tool.inputSchema as {
+          additionalProperties?: unknown;
+          properties?: Record<string, unknown>;
+        };
+        expect(shape.properties, tool.name).toEqual({});
+        expect(shape.additionalProperties, tool.name).toBe(false);
+      }
+
+      for (const name of ["igtrack_status", "igtrack_capabilities", "igtrack_targets_list"]) {
+        const result = await client.callTool({ name, arguments: { target: "aurora.wilde" } });
+        expect(result.isError, name).toBe(true);
+        expect(errCode(result), name).toBeNull();
+        // Every tool answers one sentence for a refusal; a declared schema that
+        // swallows keys silently is the failure this pins shut.
+        const text = (result.content as Array<{ text: string }>)[0]?.text ?? "";
+        expect(text, name).toMatch(/target/);
+      }
+
+      // With no arguments the same tools still answer normally.
+      const clean = await client.callTool({ name: "igtrack_capabilities", arguments: {} });
+      expect(clean.isError).toBeFalsy();
+    } finally {
+      await close();
+    }
+  });
+
   it("states the MCP surface as the studio on every tool result", async () => {
     const { client, close } = await connect();
     try {

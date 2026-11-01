@@ -27,6 +27,7 @@ import {
   opTaggedMedia,
   opTargetSetStatus,
   opTargetAdd,
+  opTargetRemove,
   opWork,
   resolveTarget,
 } from "../src/tools.js";
@@ -99,6 +100,22 @@ describe.skipIf(!databaseUp)("agent surface operations", () => {
   afterAll(async () => {
     await ctx?.close();
     await handle?.close();
+  });
+
+  it("refuses to delete a target that was not explicitly confirmed", async () => {
+    // Registered without `--observed`: a DISCOVERY target of an account this
+    // fixture set does not observe is refused at the probe, and a refusal there
+    // is not the deletion contract this case is about. The row is what
+    // `opTargetRemove` needs in order to refuse half a delete.
+    const added = await opTargetAdd(ctx, { username: "unconfirmed.drop" });
+    await expect(
+      opTargetRemove(ctx, { target: "unconfirmed.drop", confirm: false }),
+    ).rejects.toThrow(/confirm: true/);
+    // A refusal is not a half-delete: the row is exactly where it was.
+    expect(await resolveTarget(ctx.db, ctx.userId, "unconfirmed.drop")).toMatchObject({
+      id: added.id,
+    });
+    await opTargetRemove(ctx, { target: "unconfirmed.drop", confirm: true });
   });
 
   it("queues a newly added target's first scans as claimable immediately", async () => {

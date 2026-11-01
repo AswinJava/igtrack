@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 import { createDb, runMigrations, seed, users } from "@igtrack/database";
 import { assessReadiness, isBlocking } from "@igtrack/ingestion";
 import { loadProjectEnv, repoRoot, redactEnvValue } from "../env.js";
-import { CliError, emit, isJson, type OutputMeta, type ParsedArgs, table } from "../output.js";
+import { CliError, emit, isJson, strictFlagBool, type OutputMeta, type ParsedArgs, table } from "../output.js";
 import { opCapabilities, opDoctor, opStatus, type DoctorReport } from "../tools.js";
 import { createContext } from "../context.js";
 
@@ -44,12 +44,12 @@ export const LOCAL_DATABASE_URL = "postgresql://igtrack:igtrack@localhost:5432/i
 
 export async function runSetup(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
-  const withSeed = !args.flags["no-seed"];
+  const withSeed = !strictFlagBool(args.flags, "no-seed");
   const envFiles = loadProjectEnv();
   let usingLocalDefault = false;
   let envWritten: string | null = null;
 
-  if (args.flags["local"] === true) {
+  if (strictFlagBool(args.flags, "local")) {
     if ((process.env.IGTRACK_DATABASE_URL ?? process.env.DATABASE_URL ?? "") === "") {
       process.env.IGTRACK_DATABASE_URL = LOCAL_DATABASE_URL;
       usingLocalDefault = true;

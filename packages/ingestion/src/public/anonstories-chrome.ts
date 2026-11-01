@@ -15,6 +15,22 @@ import {
   DEFAULT_CHROME_USER_AGENT,
   findChrome,
 } from "./chrome.js";
+import {
+  ResponseParseError,
+  ResponseTooLargeError,
+  readBoundedJson,
+} from "../http/bounded-response.js";
+
+/** A Chrome target list is a handful of small objects; anything larger is not. */
+const CDP_TARGET_LIST_MAX_BYTES = 256 * 1024;
+
+/**
+ * A cap on one API answer, enforced inside the page. Story payloads are JSON
+ * lists whose items each carry a long signed CDN URL, so a real answer is
+ * measured in kilobytes; this is a bound that a misbehaving or hostile answer
+ * cannot exceed, not a measurement of the largest answer seen.
+ */
+export const ANON_PAGE_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // The anonstories transport: a real local Chrome page context.
@@ -83,22 +99,56 @@ async function waitForDebugPort(profileDir: string, timeoutMs: number): Promise<
   }
 }
 
-async function connectCdp(port: number, timeoutMs: number): Promise<CdpConnection> {
+/**
+ * Connect to the DevTools endpoint of an already-running browser.
+ *
+ * Exported for the two refusal tests below: the session behind it needs a real
+ * browser, but "the endpoint never answered" and "the endpoint answered with
+ * something that is not a target list" are different operator problems, and
+ * that difference is the part worth pinning.
+ */
+export async function connectCdp(port: number, timeoutMs: number): Promise<CdpConnection> {
   const deadline = Date.now() + timeoutMs;
   let targets: Array<{ type: string; webSocketDebuggerUrl?: string }> = [];
+  // Why there is no page yet, when the browser did answer.
+  let answeredButUnusable: string | null = null;
   for (;;) {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/list`);
-      if (response.ok) targets = (await response.json()) as typeof targets;
-    } catch {
-      // Endpoint not accepting yet.
+      const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
+        // Per-request bound: without it one stalled read can spend the whole
+        // connect deadline, and the operator sees "never opened its endpoint"
+        // for a browser that answered slowly rather than not at all.
+        signal: AbortSignal.timeout(Math.max(1, Math.min(2_000, deadline - Date.now()))),
+      });
+      if (response.ok) {
+        targets = await readBoundedJson<typeof targets>(
+          response,
+          CDP_TARGET_LIST_MAX_BYTES,
+          "DevTools target list",
+        );
+      } else {
+        answeredButUnusable = `answered its target list with HTTP ${response.status}`;
+      }
+    } catch (err) {
+      if (err instanceof ResponseTooLargeError) {
+        answeredButUnusable = "answered a target list past its read cap";
+      } else if (err instanceof ResponseParseError) {
+        answeredButUnusable = "answered a target list that is not JSON";
+      }
+      // Anything else means the endpoint is not accepting yet, or the read
+      // itself did not complete: no answer, and nothing claimed about one.
     }
     const page = targets.find((t) => t.type === "page" && t.webSocketDebuggerUrl !== undefined);
     if (page !== undefined && page.webSocketDebuggerUrl !== undefined) {
       return await openSocket(page.webSocketDebuggerUrl, deadline);
     }
     if (Date.now() > deadline) {
-      throw new AnonTransportError("PROVIDER_ERROR", "Chrome exposed no debuggable page target.");
+      throw new AnonTransportError(
+        "PROVIDER_ERROR",
+        answeredButUnusable === null
+          ? "Chrome exposed no debuggable page target."
+          : `Chrome ${answeredButUnusable}, so no debuggable page target could be reached.`,
+      );
     }
     await sleep(200);
   }
@@ -201,6 +251,103 @@ async function openSocket(url: string, deadline: number): Promise<CdpConnection>
       }
     },
   };
+}
+
+/**
+ * Turn the string the page handed back into the HTTP answer the provider
+ * expects. Three answers are refusals, and none of them quotes the body:
+ * malformed JSON from this side of the wire, an answer the page refused to
+ * finish reading, and a fetch that threw in the page.
+ *
+ * Exported because the transport behind it needs a real browser, while these
+ * three branches are exactly the part that can be wrong without one.
+ */
+export function decodeInPagePayload(
+  payload: string,
+  maxBytes: number = ANON_PAGE_RESPONSE_MAX_BYTES,
+): AnonHttpResponse {
+  let parsed: { status?: number; body?: string; error?: string; oversize?: boolean; bytes?: number };
+  try {
+    parsed = JSON.parse(payload) as typeof parsed;
+  } catch {
+    throw new AnonTransportError("PROVIDER_ERROR", "the in-page request returned malformed JSON");
+  }
+  if (parsed.oversize === true) {
+    // The body never crossed the wire, so the only number this side has is the
+    // byte count the page counted before it stopped.
+    const offered = Number.isFinite(parsed.bytes) ? parsed.bytes : undefined;
+    throw new AnonTransportError(
+      "PROVIDER_ERROR",
+      `the in-page aggregator response passed the ${maxBytes}-byte cap` +
+        (offered === undefined ? "" : ` (at least ${offered} bytes were offered)`) +
+        "; it was not read",
+    );
+  }
+  if (parsed.error !== undefined && parsed.error !== "") {
+    throw new AnonTransportError(
+      "NETWORK",
+      `the in-page request failed: ${parsed.error.slice(0, 200)}`,
+    );
+  }
+  return { status: parsed.status ?? 0, body: parsed.body ?? "" };
+}
+
+/**
+ * Build the page-side script that makes one API call and hands the answer back
+ * as a JSON string.
+ *
+ * Exported because the cap is the part that can be wrong silently: the script
+ * is plain JavaScript, so a test can stream a response through it in Node and
+ * prove the read stops, rather than taking the cap on trust until a browser is
+ * in the loop.
+ */
+export function buildInPageRequestExpression(
+  endpoint: string,
+  auth: string,
+  maxBytes: number,
+): string {
+  return `(async () => {
+    try {
+      const res = await fetch(${JSON.stringify(endpoint)}, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+          "x-requested-with": "XMLHttpRequest"
+        },
+        body: "auth=" + ${JSON.stringify(auth)},
+        credentials: "include"
+      });
+      // Read under the cap inside the page. res.text() would let the answer
+      // size the page's memory, and a body truncated only after it crossed the
+      // wire arrives as text that no longer parses — which this side can no
+      // longer tell apart from a malformed answer.
+      const reader = res.body === null ? null : res.body.getReader();
+      if (reader === null) return JSON.stringify({ status: res.status, body: "" });
+      const chunks = [];
+      let total = 0;
+      for (;;) {
+        const part = await reader.read();
+        if (part.done) break;
+        if (part.value === undefined) continue;
+        total += part.value.byteLength;
+        if (total > ${maxBytes}) {
+          await reader.cancel();
+          return JSON.stringify({ status: res.status, oversize: true, bytes: total });
+        }
+        chunks.push(part.value);
+      }
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      return JSON.stringify({ status: res.status, body: text });
+    } catch (err) {
+      return JSON.stringify({ status: 0, body: "", error: String((err && err.message) || err) });
+    }
+  })()`;
 }
 
 /**
@@ -322,23 +469,11 @@ export async function openAnonStoriesChrome(
       }
       lastRequestAt = Date.now();
 
-      const expression = `(async () => {
-        try {
-          const res = await fetch(${JSON.stringify(endpoint)}, {
-            method: "POST",
-            headers: {
-              "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
-              "x-requested-with": "XMLHttpRequest"
-            },
-            body: "auth=" + ${JSON.stringify(auth)},
-            credentials: "include"
-          });
-          const text = await res.text();
-          return JSON.stringify({ status: res.status, body: text });
-        } catch (err) {
-          return JSON.stringify({ status: 0, body: "", error: String((err && err.message) || err) });
-        }
-      })()`;
+      const expression = buildInPageRequestExpression(
+        endpoint,
+        auth,
+        ANON_PAGE_RESPONSE_MAX_BYTES,
+      );
 
       let payload: string;
       try {
@@ -351,19 +486,7 @@ export async function openAnonStoriesChrome(
         throw err;
       }
 
-      let parsed: { status?: number; body?: string; error?: string };
-      try {
-        parsed = JSON.parse(payload) as typeof parsed;
-      } catch {
-        throw new AnonTransportError("PROVIDER_ERROR", "the in-page request returned malformed JSON");
-      }
-      if (parsed.error !== undefined && parsed.error !== "") {
-        throw new AnonTransportError(
-          "NETWORK",
-          `the in-page request failed: ${parsed.error.slice(0, 200)}`,
-        );
-      }
-      return { status: parsed.status ?? 0, body: parsed.body ?? "" };
+      return decodeInPagePayload(payload);
     },
 
     async close(): Promise<void> {

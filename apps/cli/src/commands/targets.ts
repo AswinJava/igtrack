@@ -1,4 +1,4 @@
-import { display, emit, flagString, isJson, relativeTime, table, UsageError, type ParsedArgs } from "../output.js";
+import { display, emit, flagString, isJson, relativeTime, strictFlagBool, table, UsageError, type ParsedArgs } from "../output.js";
 import { createContext } from "../context.js";
 import { opTargetAdd, opTargetList, opTargetRemove, opTargetSetStatus } from "../tools.js";
 
@@ -10,9 +10,11 @@ export const TARGETS_HELP = `igtrack targets <subcommand>
   pause <id|username>           Stop scheduling scans (history is preserved)
   resume <id|username>          Return the target to ACTIVE
   rm <id|username> --yes        Delete the target and its observations
+                                ("remove" and "delete" are the same verb)
 
 Targets are always scoped to the resolved owner user. "rm" proceeds through the
-retention boundary and is irreversible, so it requires --yes.
+retention boundary and is irreversible, so it requires --yes — and the refusal
+lives in the operations layer, so no surface can forget to ask.
 
 --observed tracks ANOTHER public account through the documented Business
 Discovery route (mode DISCOVERY). The route is probed once first; if it answers
@@ -60,7 +62,7 @@ export async function runTargets(args: ParsedArgs): Promise<number> {
         "Usage: igtrack targets add <username> [--name N] [--tags a,b] [--observed]",
       );
     }
-    const observed = args.flags["observed"] === true;
+    const observed = strictFlagBool(args.flags, "observed");
     const tags = (flagString(args.flags, "tags") ?? "")
       .split(",")
       .map((t) => t.trim())
@@ -114,14 +116,14 @@ export async function runTargets(args: ParsedArgs): Promise<number> {
   if (sub === "rm" || sub === "remove" || sub === "delete") {
     const reference = rest[0];
     if (reference === undefined) throw new UsageError("Usage: igtrack targets rm <id|username> --yes");
-    if (args.flags["yes"] !== true) {
-      throw new UsageError(
-        "Refusing to delete without --yes. This removes the target and every observation, snapshot and evidence row retained for it.",
-      );
-    }
     const ctx = await createContext();
     try {
-      const result = await opTargetRemove(ctx, reference);
+      // One refusal, in the operations layer: the CLI and the MCP tool cannot
+      // drift into disagreeing about what counts as confirmation.
+      const result = await opTargetRemove(ctx, {
+        target: reference,
+        confirm: strictFlagBool(args.flags, "yes"),
+      });
       const human = `Deleted @${result.username} (${result.id}) and its observations.`;
       emit({ json, meta: ctx.meta, data: result, human });
       return 0;

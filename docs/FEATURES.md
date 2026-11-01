@@ -235,8 +235,11 @@ authority:
 `research --run` is the only acquisition path. It is bounded to 10 documents at
 depth 1, 10s per document, 512KB per document, 3 re-validated redirects and a
 24h freshness window. Every URL passes an SSRF gate; private, loopback,
-link-local and metadata addresses are refused, Instagram-family hosts are refused
-by policy, and robots.txt is respected. Extraction reads four fixed field
+link-local and metadata addresses are refused, the host is resolved again
+immediately before each request, Instagram-family hosts are refused by policy,
+and robots.txt is respected — a robots.txt that cannot be read lets the read
+proceed under RFC 9309, but the document is labelled unverified rather than
+cleared. Extraction reads four fixed field
 families (JSON-LD, meta tags, mailto, public profile links), never page prose —
 a fetched page cannot prompt-inject its way into a claim.
 

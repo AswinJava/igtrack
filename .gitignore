@@ -34,6 +34,9 @@ logs/
 # local scratch output from scripts/
 .tmp/
 
+# tracked-files snapshot (git ls-files dump) — scratch artifact
+tracked.txt
+
 # internal research dossiers — never publish from this repository
 docs/research/
 

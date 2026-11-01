@@ -114,15 +114,23 @@ describe("ask --dry-run executes nothing", () => {
     expect(run.out).toContain("untrack");
   });
 
-  it("refuses a --dry-run whose value swallowed the sentence", async () => {
-    // `ask --dry-run "…"` parses the sentence as the flag's value. Silently
-    // dropping a "do not execute" instruction is the defect this guards.
-    const run = await cli(["ask", "--dry-run", "track @dryrun.probe and run the first scan", "--json"]);
-    expect(run.code).toBe(2);
-    const body = parse(run.err);
-    expect(body.ok).toBe(false);
-    expect(body.error?.code).toBe("USAGE");
-    expect(body.error?.message).toContain("--dry-run is a switch");
+  it("honours --dry-run placed before the sentence, not around it", async () => {
+    // The parser used to read the sentence as the value of --dry-run, which
+    // turned "do not execute" into a string the request never saw and ran the
+    // write anyway. A switch no longer eats the token after it, so flag order is
+    // a style choice rather than a trap — and the refusal path stays reachable
+    // for a value typed ON the switch (`--dry-run=maybe`).
+    const before = await cli(["ask", "--dry-run", "track @dryrun.probe and run the first scan", "--json"]);
+    expect(before.code).toBe(0);
+    const body = parse(before.out);
+    expect(body.ok).toBe(true);
+    expect(body.data.dryRun).toBe(true);
+    expect(body.data.steps).toBeUndefined();
+    expect(body.data.prompt).toContain("@dryrun.probe");
+
+    const nonsense = await cli(["ask", "track @dryrun.probe", "--dry-run=maybe", "--json"]);
+    expect(nonsense.code).toBe(2);
+    expect(parse(nonsense.err).error?.message).toContain("--dry-run is a switch");
   });
 
   it("matches the MCP dryRun answer for the same sentence", async () => {

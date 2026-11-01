@@ -157,6 +157,42 @@ describe.skipIf(!databaseUp)("username-first investigation", () => {
     ).toBe(false);
   });
 
+  it("downgrades the platform stage when a scan on record stopped before the end of a listing", async () => {
+    // COMPLETED_PARTIAL means "nothing failed and the read was not finished".
+    // A stage that only looked for failures kept reporting the account as fully
+    // observed, which is how a truncated roster gets read back as an audience.
+    const before = await opInvestigate(ctx, { username: FIXTURE_USERNAME, web: false });
+    const targetId = before.investigation.targetId;
+    expect(targetId).not.toBeNull();
+    const platformOf = (result: typeof before) =>
+      result.investigation.stages.find((s) => s.id === INVESTIGATION_STAGE.PLATFORM);
+    expect(platformOf(before)?.status).toBe(INVESTIGATION_STAGE_STATUS.COMPLETED);
+
+    const rows = Array.from(
+      await handle.sql<{ id: string; outcome: string }[]>
+        `SELECT id, outcome::text AS outcome FROM monitoring_jobs
+         WHERE target_id = ${targetId} AND outcome::text = 'COMPLETED'
+         ORDER BY created_at LIMIT 1`,
+    );
+    expect(rows).toHaveLength(1);
+    const jobId = rows[0]!.id;
+    await handle.sql`UPDATE monitoring_jobs SET outcome = 'COMPLETED_PARTIAL' WHERE id = ${jobId}`;
+    try {
+      const after = await opInvestigate(ctx, { username: FIXTURE_USERNAME, web: false });
+      const platform = platformOf(after);
+      expect(platform?.status).toBe(INVESTIGATION_STAGE_STATUS.PARTIAL);
+      expect(platform?.reason).toContain("1 partial");
+      // The parts must still sum to the jobs on record, and the empty ones are
+      // named rather than dropped from the sentence.
+      expect(platform?.reason).toMatch(/(\d+) completed, (\d+) completed and found nothing, 1 partial/);
+      expect(
+        after.gaps.some((g) => g.subject.includes("stopped before the end of a listing")),
+      ).toBe(true);
+    } finally {
+      await handle.sql`UPDATE monitoring_jobs SET outcome = 'COMPLETED' WHERE id = ${jobId}`;
+    }
+  });
+
   it("exits 4 when nothing was retrieved, and 0 when something was", async () => {
     const empty = await opInvestigate(ctx, { username: UNKNOWN_USERNAME, web: false });
     expect(investigateExitCode(empty)).toBe(4);

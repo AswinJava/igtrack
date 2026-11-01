@@ -94,7 +94,10 @@ instant, so by default the answer is "everything new since tracking started".
 
 States:
   OBSERVED     at least one delta was recorded in the window
-  EMPTY        a baseline exists and nothing changed in the window
+  EMPTY        a baseline exists and no add or removal was recorded in the
+               window; the notes say whether a COMPLETE roster was re-read
+               inside it (a computed no-change) or not (nothing was observed
+               between the older reads)
   UNAVAILABLE  no COMPLETE roster has ever been recorded for the requested side
 
 Rosters are only readable from an owner export (import provider) or an
@@ -172,7 +175,6 @@ function writeOut(path: string, content: string): void {
 }
 
 export async function runReport(args: ParsedArgs): Promise<number> {
-  const json = isJson(args.flags);
   const target = args.positionals[0];
   if (target === undefined) {
     throw new UsageError(
@@ -184,6 +186,10 @@ export async function runReport(args: ParsedArgs): Promise<number> {
     throw new UsageError(`--format expects md or json, received "${format}".`);
   }
   const out = flagString(args.flags, "out");
+  // A `--format json` answer with nowhere else to go is machine-shaped, and every
+  // machine-shaped answer carries `_meta`: the source id and the synthetic label
+  // are part of the data, not decoration the caller has to ask for twice.
+  const json = isJson(args.flags) || (out === undefined && format === "json");
   const ctx = await createContext();
   try {
     const result = await opReport(ctx, {

@@ -136,6 +136,7 @@ async function main(): Promise<void> {
                 fetchedAt: new Date(),
                 redirectsFollowed: 0,
                 robotsChecked: false,
+                robotsNote: "the scripted bench transport answers without touching the network",
               }),
             };
             let n = 0;

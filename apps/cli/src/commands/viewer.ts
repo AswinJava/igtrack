@@ -6,7 +6,7 @@ import {
   type ViewerTab,
   type ViewerTabKey,
 } from "@igtrack/core";
-import { opViewer } from "../tools.js";
+import { opViewer, viewerMeta } from "../tools.js";
 import {
   CliError,
   display,
@@ -18,7 +18,6 @@ import {
   resolveOptionalUserPath,
   table,
   UsageError,
-  type OutputMeta,
   type ParsedArgs,
 } from "../output.js";
 
@@ -62,21 +61,6 @@ another account, liker identities and AI inferences are UNAVAILABLE with the
 registry reason — not empty results. A private account yields only its public
 profile shell. Media rows carry original source URLs; nothing is proxied or
 re-served.`;
-
-function viewerMeta(report: ViewerReport, note?: string): OutputMeta {
-  const sources = report.profile.sources.join("+");
-  return {
-    provider: "viewer",
-    sourceId: sources === "" ? "viewer:v1" : `viewer:${sources}`,
-    synthetic: false,
-    production: process.env.NODE_ENV === "production",
-    studio: "cli",
-    generatedAt: report.generatedAt,
-    note:
-      note ??
-      `Read-only six-tab composition of ${report.requestedSources.join(" + ")}. Evidence classes are stated per tab; unavailable tabs carry their reason.`,
-  };
-}
 
 function firstLine(value: string | null, max = 70): string {
   if (value === null) return "—";
@@ -379,11 +363,16 @@ export async function runViewer(args: ParsedArgs): Promise<number> {
 
   const meta = viewerMeta(
     report,
+    "cli",
     out !== undefined ? `Viewer report written to ${out}.` : undefined,
   );
   if (out !== undefined) {
     try {
-      writeFileSync(out, `${JSON.stringify(envelope(report, viewerMeta(report)), null, 2)}\n`, "utf8");
+      writeFileSync(
+        out,
+        `${JSON.stringify(envelope(report, viewerMeta(report, "cli")), null, 2)}\n`,
+        "utf8",
+      );
     } catch (err) {
       throw new CliError(
         "WRITE_FAILED",

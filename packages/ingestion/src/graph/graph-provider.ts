@@ -31,6 +31,16 @@ import {
   type SourceRef,
 } from "@igtrack/core";
 import { IG_USERNAME_PATTERN, graphConfigBlocker } from "../config/readiness.js";
+import { readBoundedText, ResponseTooLargeError } from "../http/bounded-response.js";
+
+/**
+ * A Graph edge returns a documented object with at most `limit` items, and the
+ * largest page this provider asks for is 250 media nodes. Anything beyond that
+ * is not the response this capability was promised, so the read is refused
+ * mid-stream rather than parsed: `res.json()` would otherwise let one answer
+ * decide how much memory the ingestion process spends.
+ */
+const GRAPH_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 
 export interface GraphProviderConfig {
   accessToken: string;
@@ -335,7 +345,7 @@ export class GraphProvider implements InstagramProvider {
         true,
       );
     }
-    if (res.ok) return (await res.json()) as T;
+    if (res.ok) return await readGraphJson<T>(res);
     throw await graphHttpFailure(res);
   }
 
@@ -364,6 +374,7 @@ export class GraphProvider implements InstagramProvider {
         `/${this.igUserId}`,
         { fields: "id,username" },
       );
+      requireGraphNode(data, "the owned-account node", ["id", "username"]);
       return available(
         { username: data.username, igId: data.id },
         { ...meta, confidence: Confidence.HIGH },
@@ -393,6 +404,7 @@ export class GraphProvider implements InstagramProvider {
       }>(`/${this.igUserId}`, {
         fields: GRAPH_PROFILE_FIELDS,
       });
+      requireGraphNode(data, "the profile node", ["id", "username"]);
       return available(
         {
           account: {
@@ -427,6 +439,7 @@ export class GraphProvider implements InstagramProvider {
       const data = await this.get<{
         data?: Array<{ id: string; timestamp?: string; media_type?: string; caption?: string }>;
       }>(`/${this.igUserId}/stories`, { fields: GRAPH_STORY_FIELDS });
+      requireGraphList(data, "the stories edge");
       const stories: NormalizedStory[] = (data.data ?? []).map((s) => ({
         storyId: s.id,
         mediaType: mapGraphMediaType(s.media_type),
@@ -506,6 +519,7 @@ export class GraphProvider implements InstagramProvider {
         },
       );
       const observedAt = meta.observedAt;
+      requireGraphList(data, "the media edge");
       const posts: NormalizedPost[] = (data.data ?? []).map((p) =>
         mapGraphMediaItem(p, observedAt),
       );
@@ -549,6 +563,7 @@ export class GraphProvider implements InstagramProvider {
         },
       );
       const observedAt = meta.observedAt;
+      requireGraphList(data, "the comments edge");
       const comments: NormalizedComment[] = [];
       for (const c of data.data ?? []) {
         comments.push(mapGraphComment(c, post.postId, c.parent_id, observedAt));
@@ -595,6 +610,7 @@ export class GraphProvider implements InstagramProvider {
       }>(`/${post.postId}/children`, {
         fields: GRAPH_CHILD_FIELDS,
       });
+      requireGraphList(data, "the album-children edge");
       const children: NormalizedPostChild[] = (data.data ?? []).map((c) => ({
         childId: c.id,
         ...(c.media_type !== undefined ? { mediaType: mapGraphMediaType(c.media_type) } : {}),
@@ -639,6 +655,7 @@ export class GraphProvider implements InstagramProvider {
         ...(cursor !== undefined ? { after: cursor.value } : {}),
       });
       const observedAt = meta.observedAt;
+      requireGraphList(data, "the tags edge");
       const items: NormalizedTaggedMedia[] = (data.data ?? []).map((t) => ({
         mediaId: t.id,
         ...(t.username !== undefined ? { ownerUsername: t.username } : {}),
@@ -808,6 +825,7 @@ export class GraphProvider implements InstagramProvider {
         throw err;
       }
       const seen = new Set<string>();
+      requireGraphList(data, "the insights edge");
       for (const item of data.data ?? []) {
         seen.add(item.name);
         const itemPoints = insightPointsFromItem(item, period, requestedTimeframe);
@@ -1151,10 +1169,87 @@ function graphFailure(
   return new GraphFailure(kind, message, retryable);
 }
 
+/**
+ * A Graph answer outside the documented size or shape is a capability failure,
+ * never a truncated parse silently treated as data: the caller cannot tell a
+ * half-read page from an empty edge, and neither claim belongs in the ledger.
+ */
+function graphBodyFailure(err: unknown): GraphFailure {
+  if (err instanceof ResponseTooLargeError) {
+    return graphFailure(CapabilityErrorKind.SCHEMA_MISMATCH, err.message, false);
+  }
+  if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+    return graphFailure(CapabilityErrorKind.TIMEOUT, "Graph API response body timed out", true);
+  }
+  return graphFailure(
+    CapabilityErrorKind.NETWORK,
+    err instanceof Error ? err.message : "Graph API response body failed to read",
+    true,
+  );
+}
+
+async function readGraphJson<T>(res: Response): Promise<T> {
+  let text: string;
+  try {
+    text = await readBoundedText(res, GRAPH_MAX_RESPONSE_BYTES, "Graph API");
+  } catch (err) {
+    throw graphBodyFailure(err);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw graphFailure(
+      CapabilityErrorKind.SCHEMA_MISMATCH,
+      "Graph API returned a body that is not the JSON object this edge documents",
+      false,
+    );
+  }
+}
+
+/**
+ * A Graph list edge answers `{"data": [...]}` — `[]` included. A body without a
+ * `data` ARRAY is not that answer, and treating it as one would persist an
+ * empty roster, an empty media set or an empty insight series the platform never
+ * stated: an invented absence, which is the failure this product exists to avoid.
+ */
+function requireGraphList(body: { data?: unknown }, edge: string): void {
+  if (!Array.isArray(body.data)) {
+    throw graphFailure(
+      CapabilityErrorKind.SCHEMA_MISMATCH,
+      `Graph API ${edge} answered without the documented "data" array — an unrecognised shape, ` +
+        "so nothing is recorded as empty",
+      false,
+    );
+  }
+}
+
+/** The same rule for a node: the documented identity fields must actually be there. */
+function requireGraphNode(body: unknown, edge: string, required: readonly string[]): void {
+  const node =
+    typeof body === "object" && body !== null ? (body as Record<string, unknown>) : null;
+  const missing =
+    node === null
+      ? required
+      : required.filter((field) => typeof node[field] !== "string" || node[field] === "");
+  if (missing.length > 0) {
+    throw graphFailure(
+      CapabilityErrorKind.SCHEMA_MISMATCH,
+      `Graph API ${edge} answered without the documented string field(s) ${missing.join(", ")}` +
+        " — an unrecognised shape, so no observation is recorded from it",
+      false,
+    );
+  }
+}
+
 async function graphHttpFailure(res: Response): Promise<GraphFailure> {
   let body: GraphErrorBody = {};
   try {
-    body = (await res.json()) as GraphErrorBody;
+    // The refusal is the HTTP status; the body only adds the platform's own
+    // words, so an oversized or malformed one is read as absent rather than
+    // allowed to replace the status with a parse error.
+    body = JSON.parse(
+      await readBoundedText(res, GRAPH_MAX_RESPONSE_BYTES, "Graph API error"),
+    ) as GraphErrorBody;
   } catch {
     body = {};
   }

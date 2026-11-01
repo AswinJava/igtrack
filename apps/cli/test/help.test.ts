@@ -35,6 +35,13 @@ async function helpFor(command: string): Promise<string> {
   return r.out;
 }
 
+// A cold `tsx` start costs 5–13s on this platform, so a case that spawns the CLI
+// several times in sequence can exceed Vitest's 30s per-test default while every
+// assertion is still correct. The budget below is per spawn, and it buys time —
+// never a skip and never a weaker assertion.
+const SPAWN_BUDGET_MS = 40_000;
+const spawnBudget = (count: number): number => count * SPAWN_BUDGET_MS;
+
 describe("--help is a read, never an execution", () => {
   it("prints status help without opening the database", async () => {
     expect(await helpFor("status")).toContain("igtrack status [--json]");
@@ -58,21 +65,24 @@ describe("one contract for both help entry points", () => {
     const topic = await spawn(["help", command]);
     expect(topic.code).toBe(0);
     expect(topic.out).toBe(await helpFor(command));
-  });
+  }, spawnBudget(2));
 
+  // Every verb with a subcommand contract answers `<command> help`; `evidence`
+  // gained one, so it answers the same question as the other three instead of
+  // opening the ledger and printing rows.
   it("resolves subcommand help typed as a positional", async () => {
-    for (const command of ["targets", "scans", "claims"]) {
+    for (const command of ["targets", "scans", "claims", "evidence"]) {
       const viaPositional = await spawn([command, "help"]);
       expect(viaPositional.code, command).toBe(0);
       expect(viaPositional.out, command).toBe((await spawn(["help", command])).out);
     }
-  });
+  }, spawnBudget(8));
 
   it("prints the generic help for --help, -h and no topic", async () => {
     expect((await spawn(["help"])).out).toBe(`${HELP}\n`);
     expect((await spawn(["--help"])).out).toBe(`${HELP}\n`);
     expect((await spawn(["-h"])).out).toBe(`${HELP}\n`);
-  });
+  }, spawnBudget(3));
 
   it("lists every registered command in the generic help", () => {
     for (const command of Object.keys(COMMAND_HELP)) {
@@ -107,22 +117,39 @@ describe("one contract for both help entry points", () => {
     const j = await spawn(["help", "nosuchcommand", "--json"]);
     expect(j.code).toBe(2);
     expect(JSON.parse(j.err).error.code).toBe("UNKNOWN_COMMAND");
-  });
+  }, spawnBudget(2));
 
   it("accepts casing, underscores and an igtrack prefix in the topic", async () => {
     const expected = (await spawn(["help", "activity-report"])).out;
     expect((await spawn(["help", "ACTIVITY-REPORT"])).out).toBe(expected);
     expect((await spawn(["help", "activity_report"])).out).toBe(expected);
     expect((await spawn(["help", "igtrack", "activity-report"])).out).toBe(expected);
-  });
+  }, spawnBudget(4));
 
   it("treats help on an unknown verb as a read, never as a prompt", async () => {
     // A mistyped verb plus --help must not reach the plain-English path: that
-    // path can enqueue real work, and a help request is a read.
+    // path can enqueue real work, and a help request is a read. It is then
+    // answered exactly as `igtrack help <typo>` answers it — one contract for
+    // one mistake, on stderr, with exit 2.
     const r = await spawn(["scan", "--help"]);
-    expect(r.code).toBe(0);
-    expect(r.out).toBe(`${HELP}\n`);
-  });
+    expect(r.code).toBe(2);
+    expect(r.out).toBe("");
+    expect(r.err).toContain('There is no igtrack command "scan"');
+
+    const j = await spawn(["scan", "--help", "--json"]);
+    expect(j.code).toBe(2);
+    expect(JSON.parse(j.err).error.code).toBe("UNKNOWN_COMMAND");
+
+    // A sentence that also asked for help wanted the tour, and gets it as an
+    // envelope rather than prose: every --json answer has one shape.
+    const prose = await spawn(["how", "do", "i", "audit", "--help", "--json"]);
+    expect(prose.code).toBe(0);
+    const body = JSON.parse(prose.out);
+    expect(body.ok).toBe(true);
+    expect(body._meta).toBeDefined();
+    expect(body.data.commands).toBeDefined();
+    expect(Array.isArray(body.data.commands)).toBe(true);
+  }, spawnBudget(3));
 
   it("gives every command a contract that states its own usage line", () => {
     for (const [command, text] of Object.entries(COMMAND_HELP)) {

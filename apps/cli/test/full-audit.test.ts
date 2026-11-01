@@ -69,10 +69,12 @@ function archiveResponse(body: string): ArchiveHttpResponse {
   return {
     status: 200,
     headers: { get: () => String(bytes.byteLength) },
-    arrayBuffer: async () => {
-      const copy = new Uint8Array(bytes);
-      return copy.buffer as ArrayBuffer;
-    },
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      },
+    }),
   };
 }
 
