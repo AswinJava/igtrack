@@ -7,6 +7,7 @@ import {
   isJson,
   resolveUserPath,
   storedRowMeta,
+  UsageError,
   type ParsedArgs,
 } from "../output.js";
 import { createContext } from "../context.js";
@@ -44,6 +45,7 @@ Options:
   --period daily|weekly|monthly|quarterly|yearly   default weekly
   --at <ISO date|YYYY-MM-DD>    window containing this instant (may be open)
   --limit <n>                   overview cards printed (default 12, max 50)
+  --format md|json              human output (default md)
   --out <file>                  write the Markdown to a file
   --json                        standard JSON envelope around the result
 
@@ -61,6 +63,10 @@ export async function runTracker(args: ParsedArgs): Promise<number> {
   const target = args.positionals[0];
   const limit = flagNumber(args.flags, "limit", 12);
   const out = flagString(args.flags, "out");
+  const format = (flagString(args.flags, "format") ?? "md").trim().toLowerCase();
+  if (!["md", "markdown", "json"].includes(format)) {
+    throw new UsageError(`--format expects md or json, received "${format}".`);
+  }
 
   const ctx = await createContext();
   try {
@@ -93,12 +99,12 @@ export async function runTracker(args: ParsedArgs): Promise<number> {
     const summary =
       result.mode === "target" && result.card !== null
         ? `Wrote the ${result.card.period.data_type} ${result.card.period.label} tracker card for @${result.card.target.username} to ${out} (${result.card.period.state}).`
-        : `Wrote the ${result.window.label} watchlist to ${out} (${result.overview?.totals.displayed ?? 0} of ${result.overview?.totals.tracked ?? 0} target(s)).`;
+        : `Wrote the ${result.window.label} watchlist to ${out} (${result.overview?.totals.displayed ?? "unknown"} of ${result.overview?.totals.tracked ?? "unknown"} target(s)).`;
 
     const human =
       out !== undefined
         ? summary
-        : json
+        : format === "json"
           ? JSON.stringify(result, null, 2)
           : markdown;
 

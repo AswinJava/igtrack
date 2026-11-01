@@ -18,7 +18,8 @@ export interface OutputMeta {
   /** True when the active provider does not observe reality. */
   synthetic: boolean;
   production: boolean;
-  studio: "cli";
+  /** The surface that answered. The same app serves the terminal and MCP. */
+  studio: "cli" | "mcp";
   generatedAt: string;
   note?: string;
 }
@@ -67,6 +68,24 @@ export function storedRowMeta(
           : evidence.evidenceClass === "MIXED"
             ? "Computed from stored rows from both synthetic and live sources; no single class describes the data."
             : "Computed from stored observation rows; provider and synthetic describe those rows, not the provider configured for future scans.",
+  };
+}
+
+/**
+ * `_meta` for the capability registry. The registry is a static statement of
+ * what the product can observe, so inheriting the active provider's metadata
+ * would mislabel it — a fixture deployment and a Graph deployment answer the
+ * same registry, and `synthetic: true` would imply the answer was invented.
+ */
+export function registryMeta(studio: "cli" | "mcp"): OutputMeta {
+  return {
+    provider: process.env.IGTRACK_PROVIDER ?? "fixture",
+    sourceId: null,
+    synthetic: false,
+    production: process.env.NODE_ENV === "production",
+    studio,
+    generatedAt: new Date().toISOString(),
+    note: "Static product capability registry — independent of the active data source.",
   };
 }
 
@@ -200,6 +219,30 @@ export function flagBool(
   const value = flags[name];
   if (value === undefined) return false;
   return value === true || value === "true" || value === "1";
+}
+
+const BOOLEAN_WORDS = new Set(["true", "false", "1", "0", "yes", "no"]);
+
+/**
+ * `flagBool` for a flag whose whole meaning is "do not do the thing". The parser
+ * reads the token after a flag as its value, so `igtrack ask --dry-run "track
+ * @x"` turns the promise into a string the request never sees — and the
+ * operation runs anyway. A swallowed value is an error, never a silently
+ * dropped refusal.
+ */
+export function strictFlagBool(
+  flags: Record<string, string | boolean>,
+  name: string,
+): boolean {
+  const value = flags[name];
+  if (value === undefined || value === false) return false;
+  if (value === true) return true;
+  if (!BOOLEAN_WORDS.has(value.toLowerCase())) {
+    throw new UsageError(
+      `--${name} is a switch, not an option with a value. Put it after the request, as in igtrack ask "…" --${name}.`,
+    );
+  }
+  return flagBool(flags, name);
 }
 
 export function flagNumber(

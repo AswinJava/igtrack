@@ -1,8 +1,8 @@
 import { stdin, stderr, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
 import { createContext, previewMeta, type CliContext } from "../context.js";
-import { emit, errorHint, isJson, table, type ParsedArgs } from "../output.js";
-import { opAsk, type AskResult } from "../ask/execute.js";
+import { emit, errorHint, isJson, strictFlagBool, table, type ParsedArgs } from "../output.js";
+import { askDryRun, opAsk, type AskResult } from "../ask/execute.js";
 import { formatInputQuestion, mergeClarification } from "../ask/clarify.js";
 import { planAsk, type AskPlan } from "../ask/parse.js";
 import { guideText, welcomeText } from "../ask/guide.js";
@@ -38,6 +38,10 @@ Notes:
     field, so an agent can ask its own operator and re-send the sentence.
   - Destructive requests (removing an account) return the exact command instead
     of running it.
+  - --dry-run answers with the plan only and executes nothing: no provider is
+    constructed, no database is contacted, no clarification is asked. A sentence
+    that would write is safe to preview. The JSON matches the igtrack_ask MCP
+    tool's dryRun, so both surfaces describe one sentence the same way.
   - --json returns { ok, data, _meta }; every step keeps its full operation
     result, so an agent can quote evidence ids and never fill gaps with guesses.
 
@@ -94,6 +98,39 @@ function renderAskHuman(result: AskResult): string {
     lines.push("", "Next");
     for (const command of result.next) lines.push(`  ${command}`);
   }
+  return lines.join("\n");
+}
+
+/** The plan, printed. Nothing in this render came from a source. */
+function renderDryRunHuman(data: ReturnType<typeof askDryRun>): string {
+  const plan = data.plan;
+  const rows: Array<readonly [string, string]> = [
+    ["steps", plan.intents.map((intent) => intent.replace(/_/g, " ")).join(" + ")],
+    ["account", plan.username === null ? "(not named)" : `@${plan.username}`],
+    ["window", plan.since ?? "(default)"],
+    ["limit", plan.limit === null ? "(default)" : String(plan.limit)],
+    ["period", plan.period ?? "(none)"],
+    ["export kind", plan.exportKind ?? "(none)"],
+    ["evidence id", plan.evidenceId ?? "(none)"],
+    ["links", plan.urls.length === 0 ? "(none)" : plan.urls.join(" ")],
+    ["needs database", plan.needsDb ? "yes" : "no"],
+    ["would execute", plan.executable ? "yes" : "no — it only names the command to run"],
+  ];
+  const lines: string[] = [
+    `You asked: ${data.prompt}`,
+    `I understood: ${data.understanding}`,
+    "",
+    "Plan only — nothing ran, no source was contacted, nothing was written.",
+  ];
+  if (plan.assumptions.length > 0) {
+    lines.push("Assumptions:");
+    for (const assumption of plan.assumptions) lines.push(`  - ${assumption}`);
+  }
+  lines.push("", table(["plan", "value"], rows));
+  if (plan.needsUsername) {
+    lines.push("", "Run for real and it asks which account first; a dry run never asks.");
+  }
+  lines.push("", "To run it, drop --dry-run.");
   return lines.join("\n");
 }
 
@@ -228,6 +265,14 @@ async function runInteractive(): Promise<number> {
 export async function runAskPrompt(prompt: string, args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
   const plan = planAsk(prompt);
+  // Answered from the plan alone, before any context exists: a request to
+  // preview a write must not open a database connection, construct a provider,
+  // or run a step — that is the entire promise of the flag.
+  if (strictFlagBool(args.flags, "dry-run")) {
+    const data = askDryRun(prompt, plan);
+    emit({ json, meta: previewMeta(), data, human: renderDryRunHuman(data) });
+    return 0;
+  }
   const ctx = await contextForPlan(plan);
   try {
     const onProgress = json
@@ -265,6 +310,10 @@ export async function runAskPrompt(prompt: string, args: ParsedArgs): Promise<nu
 }
 
 export async function runAsk(args: ParsedArgs): Promise<number> {
+  // Validate the switch even with no sentence attached: `igtrack ask --dry-run
+  // "…"` reads the sentence as the flag's value, and a refusal that quietly
+  // becomes a guide is a refusal nobody meant to drop.
+  strictFlagBool(args.flags, "dry-run");
   const prompt = args.positionals.join(" ").trim();
   if (prompt !== "") return runAskPrompt(prompt, args);
   if (isJson(args.flags)) {

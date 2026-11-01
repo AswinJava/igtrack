@@ -2061,6 +2061,25 @@ interface JobSummaryRaw {
   target_username: string | null;
 }
 
+/**
+ * The queue summary is a bounded view, so a long recorded reason is cut — but a
+ * cut in the middle of a sentence reads as the whole reason. A truncated
+ * summary therefore says it is truncated, and cuts on a word boundary so no
+ * half instruction ("… configure IGTRACK_PROVIDER=import with th") is ever
+ * presented as advice.
+ */
+const JOB_ERROR_SUMMARY_LIMIT = 1000;
+
+function summarizeJobError(value: string | null): string | null {
+  if (value === null) return null;
+  const text = String(value).replace(/\s+/g, " ").trim();
+  if (text.length <= JOB_ERROR_SUMMARY_LIMIT) return text;
+  const cut = text.slice(0, JOB_ERROR_SUMMARY_LIMIT);
+  const boundary = cut.lastIndexOf(" ");
+  const head = boundary > 200 ? cut.slice(0, boundary) : cut;
+  return `${head} … (reason truncated in the queue summary; the job stores the full text)`;
+}
+
 function mapJobSummary(r: JobSummaryRaw): JobQueueSummary {
   return {
     id: r.id,
@@ -2072,8 +2091,7 @@ function mapJobSummary(r: JobSummaryRaw): JobQueueSummary {
     availableAt: r.available_at === null ? null : asDate(r.available_at),
     startedAt: r.started_at === null ? null : asDate(r.started_at),
     completedAt: r.completed_at === null ? null : asDate(r.completed_at),
-    errorMessage:
-      r.error_message === null ? null : String(r.error_message).slice(0, 300),
+    errorMessage: summarizeJobError(r.error_message),
     targetUsername: r.target_username,
   };
 }
@@ -2082,7 +2100,7 @@ const JOB_SUMMARY_SELECT = sql`
   SELECT j.id::text AS id, j.kind, j.status::text AS status, j.outcome::text AS outcome, j.attempts, j.max_attempts,
          j.available_at, j.started_at, j.completed_at,
          (CASE WHEN j.error IS NULL THEN NULL
-               ELSE left(coalesce(j.error->>'message', 'unknown failure'), 300) END) AS error_message,
+               ELSE left(coalesce(j.error->>'message', 'unknown failure'), 4000) END) AS error_message,
          ia.username AS target_username
   FROM monitoring_jobs j
   LEFT JOIN targets t ON t.id = j.target_id
@@ -2192,13 +2210,13 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
           db,
           sql`SELECT max(started_at) AS started_at FROM monitoring_jobs`,
         ).catch(() => [] as Array<{ started_at: Date | string | null }>),
-        query<{ last_tick_at: Date | string | null; last_success_at: Date | string | null; last_error: { message?: string } | null }>(
+        query<{ last_tick_at: Date | string | null; last_success_at: Date | string | null; last_error: string | null }>(
           db,
           sql`SELECT last_tick_at, last_success_at,
                      (CASE WHEN last_error IS NULL THEN NULL
-                           ELSE left(coalesce(last_error->>'message', 'unknown error'), 300) END) AS last_error
+                           ELSE left(coalesce(last_error->>'message', 'unknown error'), 4000) END) AS last_error
                 FROM scheduler_state WHERE id = 'default'`,
-        ).catch(() => [] as Array<{ last_tick_at: Date | string | null; last_success_at: Date | string | null; last_error: { message?: string } | null }>),
+        ).catch(() => [] as Array<{ last_tick_at: Date | string | null; last_success_at: Date | string | null; last_error: string | null }>),
         query<{ outcome: string; n: number }>(
           db,
           sql`SELECT outcome::text AS outcome, count(*)::int AS n
@@ -2237,7 +2255,7 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
           schedulerRow[0]?.last_success_at === null || schedulerRow[0] === undefined
             ? null
             : asDate(schedulerRow[0].last_success_at),
-        lastError: schedulerRow[0]?.last_error?.message ?? null,
+        lastError: summarizeJobError(schedulerRow[0]?.last_error ?? null),
         outcomes: Object.fromEntries(
           outcomeRows.map((r) => [r.outcome, int(r.n)]),
         ),

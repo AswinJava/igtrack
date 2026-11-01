@@ -681,7 +681,16 @@ export function renderFullAuditHuman(result: FullAuditResult): string {
               ),
             ]
           : [
-              `  ${recent.notes.find((note) => note.startsWith("Recent identity activity")) ?? "no COMPLETE roster baseline is stored"}`,
+              `  ${
+                recent.state === "EMPTY"
+                  ? // The operations layer decides what an empty window means and
+                    // says it in its own note; restating it here is how the two
+                    // surfaces drift apart.
+                    (recent.notes.find((note) => /add or removal/i.test(note)) ??
+                      "no add or removal was recorded in this window")
+                  : (recent.notes.find((note) => note.startsWith("Recent identity activity")) ??
+                      "no COMPLETE roster baseline is stored for the requested side")
+              }`,
             ]),
       );
     }

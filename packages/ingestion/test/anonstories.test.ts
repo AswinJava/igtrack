@@ -423,6 +423,23 @@ describe("AnonStoriesProvider — stories", () => {
   });
 });
 
+describe("AnonStoriesProvider — profile completeness", () => {
+  it("reports the aggregator profile PARTIAL because the source carries no bio, URL or type", async () => {
+    const { provider } = providerWith({
+      "/api/v1/story": [ok({ user_info: SEL_USER_INFO, stories: [], message: null, ticket: 12, queue: null })],
+    });
+    const result = await provider.getProfile(account as never);
+    // AVAILABLE would mean "this is the whole profile", so a profile scan
+    // stores it as a COMPLETE diff baseline and the next reading — from any
+    // source — reports biography, external URL and account type as removed.
+    expect(result.status).toBe(CapabilityStatus.PARTIAL);
+    expect(result.note).toMatch(/biography/i);
+    expect(result.note).toMatch(/external URL/i);
+    expect(result.data?.account.username).toBe("sel_win_");
+    expect(result.data?.followerCount).toBe(361);
+  });
+});
+
 describe("AnonStoriesProvider — dossier", () => {
   function dossierScript(highlightResponses?: AnonHttpResponse[]): Record<string, AnonHttpResponse[]> {
     return {

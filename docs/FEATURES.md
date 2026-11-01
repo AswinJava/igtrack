@@ -46,7 +46,7 @@ plain-language tour. `igtrack help <command>` prints that command's contract.
 | `igtrack scans run` | Queue scans. Queuing is not observing. |
 | `igtrack scans list` | Inspect queued, running and terminal jobs. |
 | `igtrack work` | Execute queued jobs in the foreground (one scheduler tick + drain). |
-| `igtrack activity` | The change feed, with evidence ids. `--since 7d`, `--type`, `--json`. |
+| `igtrack activity` | The change feed, with evidence ids. `<target>` positional or `--target`, `--since 7d`, `--type A,B`, `--limit`, `--query`, `--json`. |
 | `igtrack relationships` | Relationship ranking by evidence class. |
 | `igtrack dossier` | Read back everything recorded about one account, with coverage and gaps. |
 | `igtrack evidence` | One evidence row and its lineage. |
@@ -70,7 +70,7 @@ plain-language tour. `igtrack help <command>` prints that command's contract.
 | Command | What it does |
 |---|---|
 | `igtrack investigate <handle>` | The primary workflow: every supported stage, one dossier. `--url`, `--no-web`, `--force`, `--json`. |
-| `igtrack report <target> --period weekly\|monthly\|quarterly\|yearly` | Compose one calendar period from stored rows. `--at <date>`, `--format md`, `--out`. |
+| `igtrack report <target> --period weekly\|monthly\|quarterly\|yearly` | Compose one calendar period from stored rows. `--at <date>`, `--format md\|json`, `--out`. |
 | `igtrack tracker [target]` | Watchlist of tracked accounts, one card each, for the latest **closed** period (weekly by default): new followings, unfollows, posts, stories, comments, tags, mentions. With a target it adds rosters, top commenters, recent comments, posts, hashtags, next-scan state and refusals. `--period`, `--at` (selects exactly, may be open), `--limit`, `--format md\|json`, `--out`. Read-only. |
 | `igtrack activity-report <target>` | The four-tab Activity Report over stored rows. `--period daily\|weekly\|monthly\|quarterly\|yearly`, `--at`, `--data-id`, `--tab analytics\|trails\|stories\|insights`, `--limit`, `--inventory-limit`, `--format md\|json`, `--out`. Read-only. |
 | `igtrack reports <target>` | Which periods have stored data. |

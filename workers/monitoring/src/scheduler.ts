@@ -67,6 +67,15 @@ export function schedulerTickIntervalMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
 }
 
+/** The error text as stored for diagnostics, bounded but never cut mid-word. */
+function reasonText(err: unknown, max: number): string {
+  const text = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  const head = text.slice(0, max);
+  const boundary = head.lastIndexOf(" ");
+  return boundary > 200 ? head.slice(0, boundary) : head;
+}
+
 export async function runSchedulerTick(
   db: Parameters<typeof recordSchedulerTickStart>[0],
   options: SchedulerTickOptions = {},
@@ -145,8 +154,11 @@ export async function runSchedulerTick(
     return result;
   } catch (err) {
     // Best-effort diagnostics recording; the original error still propagates.
+    // The reason is stored whole (up to the write bound) because a summary that
+    // cuts a sentence mid-word presents a half instruction as the recorded
+    // reason — the read surface adds an explicit truncation marker instead.
     await recordSchedulerTickFailure(db, now, {
-      message: err instanceof Error ? err.message.slice(0, 300) : String(err).slice(0, 300),
+      message: reasonText(err, 4000),
       failedAt: new Date().toISOString(),
     });
     throw err;

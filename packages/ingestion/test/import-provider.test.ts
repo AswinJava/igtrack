@@ -125,6 +125,35 @@ describe("ImportProvider (import:v1)", () => {
     expect(f.note).not.toMatch(/freshness equals the export date/);
   });
 
+  it("pages a sharded following export exactly like a sharded follower export", async () => {
+    // Instagram splits BOTH sides of the roster once a list is long:
+    // following_1.json, following_2.json … A reader that only accepted a bare
+    // following.json told that owner "your export has no following file" while
+    // the files sat in the directory in front of it.
+    const dir = await exportWith({
+      "following_1.json": JSON.stringify([{ string_list_data: [{ value: "edge.one" }] }]),
+      "following_2.json": JSON.stringify([{ string_list_data: [{ value: "edge.two" }] }]),
+      "followers.json": JSON.stringify([{ string_list_data: [{ value: "fan.one" }] }]),
+    });
+    const p = providerAt(dir);
+
+    const first = await p.getFollowing(ACCOUNT);
+    expect(first.status).toBe(CapabilityStatus.AVAILABLE);
+    expect(first.data?.entries.map((e) => e.username)).toEqual(["edge.one"]);
+    expect(first.data?.complete).toBe(false);
+    expect(first.data?.nextCursor).toBe("following_2.json");
+
+    const second = await p.getFollowing(ACCOUNT, { value: "following_2.json" });
+    expect(second.data?.entries.map((e) => e.username)).toEqual(["edge.two"]);
+    expect(second.data?.complete).toBe(true);
+    expect(second.data?.nextCursor).toBeUndefined();
+
+    // Numbered shards win over a bare file, for either direction.
+    const bare = await p.getFollowers(ACCOUNT);
+    expect(bare.data?.entries.map((e) => e.username)).toEqual(["fan.one"]);
+    expect(bare.data?.complete).toBe(true);
+  });
+
   it("answers out-of-roster capabilities UNAVAILABLE with the reason — never zero", async () => {
     const profile = await sample.getProfile();
     const stories = await sample.getStories();

@@ -971,8 +971,12 @@ export async function runFollowScan(
     capability: cfg.capability,
   });
 
+  // Completeness outranks emptiness. A truncated read that collected no member
+  // is "we could not read the roster", not "the roster is empty", and the job
+  // outcome is what an operator reads months later.
+  if (!lastPageComplete) return "succeeded-partial";
   if (members.length === 0) return "succeeded-empty";
-  return lastPageComplete ? "succeeded" : "succeeded-partial";
+  return "succeeded";
 }
 
 // ---------------------------------------------------------------------------
@@ -1670,6 +1674,7 @@ export async function runPostScan(
   await saveCheckpoint(db, {
     targetId,
     kind: POSTS_CHECKPOINT_KIND,
+    cursor: null,
     page: 0,
     progress: { page: 0 },
   });

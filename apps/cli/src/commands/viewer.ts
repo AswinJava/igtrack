@@ -93,11 +93,14 @@ function mentioned(row: ViewerStoryRow): string {
 
 function tabCount(tab: ViewerTab): string {
   if (tab.status === "UNAVAILABLE") return "UNAVAILABLE";
-  const observed = tab.count ?? 0;
-  if (tab.declaredCount !== null && tab.declaredCount !== observed) {
-    return `${observed} observed / ${tab.declaredCount} declared`;
+  // `count` is null only for an unavailable tab, so this branch should not
+  // fire — but rendering it as 0 would silently claim "the source said zero
+  // rows", which is the one thing this product never does.
+  if (tab.count === null) return "count unknown";
+  if (tab.declaredCount !== null && tab.declaredCount !== tab.count) {
+    return `${tab.count} observed / ${tab.declaredCount} declared`;
   }
-  return String(observed);
+  return String(tab.count);
 }
 
 function tabStrip(report: ViewerReport): string {

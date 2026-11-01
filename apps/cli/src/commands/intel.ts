@@ -5,6 +5,7 @@ import {
   flagNumber,
   flagString,
   isJson,
+  storedRowMeta,
   table,
   UsageError,
   type ParsedArgs,
@@ -234,6 +235,21 @@ function changesMarkdown(result: ResearchResult): string[] {
   return lines;
 }
 
+/**
+ * Which class of evidence the stored rows behind this report belong to. The
+ * dossier states this and research read the same rows without saying it, so a
+ * synthetic demo target read like a live observation.
+ */
+function evidenceLabel(evidenceClass: ResearchResult["identity"]["route"]["evidenceClass"]): string {
+  return evidenceClass === "SYNTHETIC"
+    ? "SYNTHETIC — generated fixture data. Not live Instagram evidence; no real account was contacted."
+    : evidenceClass === "LIVE"
+      ? "LIVE — stored rows came from a real observation route or the operator's own export."
+      : evidenceClass === "MIXED"
+        ? "MIXED — stored rows come from both synthetic and live sources; no single class describes this target."
+        : "NONE — no stored row exists yet, so there is nothing to classify.";
+}
+
 /** The same report as a Markdown hand-off document (igtrack research --format md). */
 function researchMarkdown(result: ResearchResult): string {
   const lines: string[] = [
@@ -245,6 +261,8 @@ function researchMarkdown(result: ResearchResult): string {
     `- platform id: ${display(result.identity.account.igId)}`,
     `- account type: ${display(result.identity.account.accountType)} · private ${display(result.identity.account.isPrivate)} · verified ${display(result.identity.account.isVerified)}`,
     `- route: ${result.identity.route.providerMethod} — ${result.identity.route.scope}`,
+    `- evidence: ${evidenceLabel(result.identity.route.evidenceClass)}`,
+    `- sources: ${result.identity.route.observingSources.length === 0 ? "none recorded yet" : result.identity.route.observingSources.join(", ")}`,
     "",
     "## Platform observations",
     "",
@@ -671,6 +689,8 @@ export async function runResearch(args: ParsedArgs): Promise<number> {
       "Identity",
       `  platform id ${display(result.identity.account.igId)} · type ${display(result.identity.account.accountType)} · private ${display(result.identity.account.isPrivate)} · verified ${display(result.identity.account.isVerified)}`,
       `  route ${result.identity.route.providerMethod} — ${result.identity.route.scope}`,
+      `  evidence ${evidenceLabel(result.identity.route.evidenceClass)}`,
+      `  sources ${result.identity.route.observingSources.length === 0 ? "none recorded yet" : result.identity.route.observingSources.join(", ")}`,
       `  local name ${display(result.target.localName)} · tags ${display(result.target.tags)}`,
       "",
       "Platform observations (recorded rows only; never merged with claims)",
@@ -899,7 +919,10 @@ export async function runResearch(args: ParsedArgs): Promise<number> {
 
     emit({
       json,
-      meta: ctx.meta,
+      meta: storedRowMeta(ctx.meta, {
+        sourceIds: result.identity.route.observingSources,
+        evidenceClass: result.identity.route.evidenceClass,
+      }),
       data: result,
       human: format === "text" ? sections.join("\n") : researchMarkdown(result),
     });

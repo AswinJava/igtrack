@@ -38,6 +38,49 @@ import { ASK_EXAMPLES, describePlan, planAsk, type AskIntent, type AskPlan } fro
 // the honesty notes; the underlying result travels intact in `steps[].result`.
 // ---------------------------------------------------------------------------
 
+/**
+ * The four named-edge counts of one recent-activity read. A side with no
+ * COMPLETE roster baseline is null: it was not observed. Rendering null as 0
+ * would tell the operator that nobody followed or unfollowed, which is a claim
+ * about the account rather than about this deployment's data.
+ */
+type RecentCounts = {
+  newFollowing: number | null;
+  lostFollowing: number | null;
+  newFollowers: number | null;
+  lostFollowers: number | null;
+};
+
+function countClause(counts: RecentCounts): string {
+  const clauses: string[] = [];
+  if (counts.newFollowing !== null && counts.lostFollowing !== null) {
+    clauses.push(`${counts.newFollowing} new follow(s), ${counts.lostFollowing} lost follow(s)`);
+  }
+  if (counts.newFollowers !== null && counts.lostFollowers !== null) {
+    clauses.push(`${counts.newFollowers} new follower(s), ${counts.lostFollowers} lost follower(s)`);
+  }
+  return clauses.length === 0 ? "no side had a COMPLETE roster to diff" : clauses.join("; ");
+}
+
+export function recentActivitySentence(
+  username: string,
+  since: string | Date,
+  counts: RecentCounts,
+): string {
+  return `Recent activity for @${username} since ${since}: ${countClause(counts)}.`;
+}
+
+export function namedEdgesSentence(counts: RecentCounts): string {
+  const side = (value: number | null, label: string): string =>
+    value === null ? `${label}: side not observed` : `${value} ${label}`;
+  return (
+    `Named edges: ${side(counts.newFollowing, "new following")}, ` +
+    `${side(counts.lostFollowing, "lost following")}, ` +
+    `${side(counts.newFollowers, "new followers")}, ` +
+    `${side(counts.lostFollowers, "lost followers")}.`
+  );
+}
+
 export type AskStepStatus = "OK" | "FAILED" | "SUGGESTED" | "SKIPPED";
 export type AskStatus = "ANSWERED" | "NEEDS_INPUT" | "PARTIAL" | "FAILED";
 
@@ -403,13 +446,11 @@ async function runIntent(
           `No ${direction === "followers" ? "follower" : "follow"} change was recorded for @${result.target.username} ` +
           `since ${result.since.toISOString()} — the baseline exists and nothing moved.`;
       } else {
-        summary =
-          `Recent activity for @${result.target.username} since ${result.since.toISOString()}: ` +
-          `${result.counts.newFollowing ?? 0} new follow(s), ${result.counts.lostFollowing ?? 0} lost follow(s)` +
-          (result.counts.newFollowers === null
-            ? ""
-            : `, ${result.counts.newFollowers} new follower(s), ${result.counts.lostFollowers} lost follower(s)`) +
-          ".";
+        summary = recentActivitySentence(
+          result.target.username,
+          result.since.toISOString(),
+          result.counts,
+        );
       }
       answer.push(summary);
       const movement = result.countActivity;
@@ -702,16 +743,13 @@ async function runIntent(
         }
         const recent = activity.recent;
         if (recent !== null && recent.state === "OBSERVED") {
-          answer.push(
-            `Named edges: ${recent.counts.newFollowing ?? "null"} new following, ` +
-              `${recent.counts.lostFollowing ?? "null"} lost following, ` +
-              `${recent.counts.newFollowers ?? "null"} new followers, ` +
-              `${recent.counts.lostFollowers ?? "null"} lost followers.`,
-          );
+          answer.push(namedEdgesSentence(recent.counts));
         } else if (recent !== null) {
           answer.push(
             recent.state === "EMPTY"
-              ? "Named follows/unfollows: EMPTY — a COMPLETE roster baseline exists and no add or removal was recorded in this window."
+              ? `Named follows/unfollows: EMPTY — ` +
+                (recent.notes.find((note) => /add or removal/i.test(note)) ??
+                  "no add or removal was recorded in this window")
               : `Named follows/unfollows: ${recent.state} — ` +
                 (recent.notes.find((note) => note.startsWith("Recent identity activity")) ??
                   "no COMPLETE roster baseline is stored."),
@@ -920,6 +958,29 @@ function needsInput(
     answer,
     next: nextFor(plan),
     examples: plan.examples,
+  };
+}
+
+/**
+ * The answer to a dry run: the plan and nothing else. The CLI `--dry-run` and
+ * the `igtrack_ask` dryRun parameter both come through here, so a sentence that
+ * would write can be previewed, and a preview cannot be described differently
+ * from the run it stands in for. It constructs no provider and opens no
+ * database connection.
+ */
+export function askDryRun(prompt: string, plan: AskPlan): {
+  prompt: string;
+  dryRun: true;
+  understanding: string;
+  plan: AskPlan;
+  examples: readonly string[];
+} {
+  return {
+    prompt,
+    dryRun: true,
+    understanding: describePlan(plan),
+    plan,
+    examples: ASK_EXAMPLES,
   };
 }
 

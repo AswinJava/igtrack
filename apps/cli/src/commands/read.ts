@@ -10,6 +10,7 @@ import {
   flagString,
   isJson,
   relativeTime,
+  registryMeta,
   storedRowMeta,
   table,
   UsageError,
@@ -35,6 +36,24 @@ import {
 // row carries its provenance (source id, confidence, evidence id).
 // ---------------------------------------------------------------------------
 
+export const ACTIVITY_HELP = `igtrack activity [target] [--since 7d] [--limit N] [--type A,B] [--query text] [--json]
+
+What changed, newest first, with evidence ids. Covers every tracked target
+when none is named. Read-only: nothing is fetched, this is a report over
+stored observations.
+
+Options
+  [target]           positional target id or username (same as --target)
+  --target <id|user> scope the feed to one tracked target
+  --since <window>   30m / 24h / 7d, or an ISO date (default: whole record)
+  --limit <n>        events printed (default 30)
+  --type A,B         exact event types, comma-separated. Allowed:
+                     ${ACTIVITY_TYPES.join(", ")}
+  --query <text>     case-insensitive substring over username and summary
+
+An unknown --type value is a usage error with the allowed list; it never
+becomes a silent filter that returns nothing.`;
+
 export async function runActivity(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
   const ctx = await createContext();
@@ -55,7 +74,7 @@ export async function runActivity(args: ParsedArgs): Promise<number> {
     const result = await opActivity(ctx, {
       since: flagString(args.flags, "since"),
       limit: flagNumber(args.flags, "limit", 30),
-      target: flagString(args.flags, "target"),
+      target: flagString(args.flags, "target") ?? args.positionals[0],
       types: rawTypes,
       query: flagString(args.flags, "query"),
     });
@@ -88,6 +107,18 @@ export async function runActivity(args: ParsedArgs): Promise<number> {
     await ctx.close();
   }
 }
+
+export const RELATIONSHIPS_HELP = `igtrack relationships <target id|username> [--limit N] [--json]
+
+Rank accounts by observed signal strength (story mentions, comment authorship
+on owned media, follow deltas) against one tracked target, with
+mutual/observed state, first/last seen, the newest signal, and the stored rows
+behind each count.
+
+  --limit <n>   accounts printed per section (default 25)
+  --json        standard JSON envelope around the result (includes the rows)
+
+Live and synthetic evidence classes are shown separately and never blended.`;
 
 export async function runRelationships(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
@@ -162,12 +193,32 @@ export async function runRelationships(args: ParsedArgs): Promise<number> {
   }
 }
 
+export const EVIDENCE_HELP = `igtrack evidence [--limit N] [--json]
+igtrack evidence --id <evidenceId>
+igtrack evidence chain <evidenceId>
+
+The evidence ledger: hashes, source, observed vs captured time, and — for one
+row — its full provenance chain.
+
+  --id <evidenceId>       one row plus its chain
+  chain <evidenceId>      the same read in subcommand form
+  --limit <n>             ledger rows printed (default 20)
+
+Append-only: nothing here can be edited or deleted. A row whose source
+transports no raw representation says so instead of passing the normalized
+hash off as the payload hash.`;
+
 export async function runEvidence(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
+  if (args.positionals[0] === "chain" && args.positionals[1] === undefined) {
+    throw new UsageError("Usage: igtrack evidence chain <evidenceId>");
+  }
   const ctx = await createContext();
   try {
     const result = await opEvidence(ctx, {
-      id: flagString(args.flags, "id"),
+      id:
+        flagString(args.flags, "id") ??
+        (args.positionals[0] === "chain" ? args.positionals[1] : undefined),
       limit: flagNumber(args.flags, "limit", 20),
     });
 
@@ -781,15 +832,7 @@ export async function runCapabilities(args: ParsedArgs): Promise<number> {
 
   emit({
     json,
-    meta: {
-      provider: process.env.IGTRACK_PROVIDER ?? "fixture",
-      sourceId: null,
-      synthetic: false,
-      production: process.env.NODE_ENV === "production",
-      studio: "cli",
-      generatedAt: new Date().toISOString(),
-      note: "Static product capability registry — independent of the active data source.",
-    },
+    meta: registryMeta("cli"),
     data,
     human,
   });

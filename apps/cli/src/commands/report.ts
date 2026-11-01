@@ -35,7 +35,7 @@ import {
 // ---------------------------------------------------------------------------
 
 export const REPORT_HELP = `igtrack report <target> [--period weekly|monthly|quarterly|yearly]
-                                 [--at <ISO date>] [--out <file>] [--json]
+                                 [--at <ISO date>] [--format md|json] [--out <file>] [--json]
 
 Compose one period from stored rows: profile movement, audience change, posts,
 stories, engagement, comments, mentions, tags, insights, relationships and the
@@ -49,8 +49,9 @@ Every section states its epistemic state:
   EMPTY        the source answered and nothing was recorded in this window
   UNAVAILABLE  the source cannot answer at all, with the reason
 
-Output is deterministic Markdown. --out writes it to a file. --json returns the
-structured report plus the same Markdown. Nothing is generated, inferred or
+Output is deterministic Markdown. --format json prints the structured report
+instead of the Markdown document; --out writes the Markdown to a file. --json
+returns the structured report plus the same Markdown. Nothing is generated, inferred or
 narrated beyond what the rows support.`;
 
 export const REPORTS_HELP = `igtrack reports <target> [--period P] [--limit N]
@@ -175,7 +176,7 @@ export async function runReport(args: ParsedArgs): Promise<number> {
   const target = args.positionals[0];
   if (target === undefined) {
     throw new UsageError(
-      "Usage: igtrack report <target id|username> [--period weekly|monthly|quarterly|yearly] [--at <date>] [--out <file>]",
+      "Usage: igtrack report <target id|username> [--period weekly|monthly|quarterly|yearly] [--at <date>] [--format md|json] [--out <file>]",
     );
   }
   const format = (flagString(args.flags, "format") ?? "md").trim().toLowerCase();

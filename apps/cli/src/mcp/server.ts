@@ -5,9 +5,9 @@ import { parsePostReference } from "@igtrack/core";
 import { AnonStoriesProvider, PublicWebProvider } from "@igtrack/ingestion";
 import { createContext, previewMeta, type CliContext } from "../context.js";
 import { VERSION } from "../version.js";
-import { CliError, storedRowMeta, type StoredEvidenceClass } from "../output.js";
-import { opAsk } from "../ask/execute.js";
-import { ASK_EXAMPLES, describePlan, planAsk } from "../ask/parse.js";
+import { CliError, envelope, registryMeta, storedRowMeta, type OutputMeta, type StoredEvidenceClass } from "../output.js";
+import { planAsk } from "../ask/parse.js";
+import { askDryRun, opAsk } from "../ask/execute.js";
 import {
   opActivity,
   opAlerts,
@@ -179,8 +179,19 @@ async function guarded(fn: () => Promise<unknown>): Promise<ToolResult> {
   }
 }
 
+/**
+ * `_meta` as this transport states it. The context and the operations layer
+ * are shared with the terminal, so their metadata says `studio: "cli"`; a
+ * client that reached the same code over MCP and was told "cli" would be
+ * reading a false provenance — and three tools already reported "mcp" here,
+ * which made one field carry two meanings in one conversation.
+ */
+function mcpMeta(meta: OutputMeta): OutputMeta {
+  return { ...meta, studio: "mcp" };
+}
+
 function withMeta(ctx: CliContext, data: unknown): { ok: true; data: unknown; _meta: unknown } {
-  return { ok: true, data, _meta: ctx.meta };
+  return { ok: true, data, _meta: mcpMeta(ctx.meta) };
 }
 
 // The three login-free observation tools read providers directly and never
@@ -222,7 +233,24 @@ function withStoredMeta(
   data: unknown,
   evidence: { sourceIds: readonly string[]; evidenceClass: StoredEvidenceClass },
 ): { ok: true; data: unknown; _meta: unknown } {
-  return { ok: true, data, _meta: storedRowMeta(ctx.meta, evidence) };
+  return { ok: true, data, _meta: mcpMeta(storedRowMeta(ctx.meta, evidence)) };
+}
+
+/**
+ * A tool's declared argument names are the whole contract: an argument the
+ * server never declared is a filter that silently did not apply. The SDK parses
+ * tool input with a plain object schema, which strips unknown keys, so a client
+ * that invented `tab` on a tab-less tool got the unfiltered report back with
+ * `isError: false` and no way to know its request was ignored. `.strict()`
+ * turns that into the typed refusal every other surface in this product gives.
+ */
+function strictToolConfig(config: unknown): unknown {
+  if (typeof config !== "object" || config === null) return config;
+  const shape = (config as { inputSchema?: unknown }).inputSchema;
+  if (shape === undefined || typeof (shape as { parse?: unknown }).parse === "function") {
+    return config;
+  }
+  return { ...config, inputSchema: z.object(shape as z.ZodRawShape).strict() };
 }
 
 export function buildServer(): McpServer {
@@ -238,7 +266,17 @@ export function buildServer(): McpServer {
     },
   );
 
-  server.registerTool(
+  // Every tool is registered through this wrapper so the strict argument schema
+  // above applies without restating each declared shape at its call site. The
+  // cast preserves the SDK generic signature, so each call still infers its own
+  // argument types exactly as it did before.
+  const registerTool: McpServer["registerTool"] = ((
+    name: string,
+    config: unknown,
+    callback: unknown,
+  ) => server.registerTool(name, strictToolConfig(config) as never, callback as never)) as McpServer["registerTool"];
+
+  registerTool(
     "igtrack_ask",
     {
       title: "Ask in plain English",
@@ -260,29 +298,20 @@ export function buildServer(): McpServer {
       guarded(async () => {
         const plan = planAsk(args.prompt);
         if (args.dryRun === true) {
-          return {
-            ok: true,
-            data: {
-              prompt: args.prompt,
-              understanding: describePlan(plan),
-              plan,
-              examples: ASK_EXAMPLES,
-            },
-            _meta: previewMeta(),
-          };
+          return { ok: true, data: askDryRun(args.prompt, plan), _meta: mcpMeta(previewMeta()) };
         }
         if (!plan.needsDb) {
-          return { ok: true, data: await opAsk(null, plan), _meta: previewMeta() };
+          return { ok: true, data: await opAsk(null, plan), _meta: mcpMeta(previewMeta()) };
         }
         return withContext(async (ctx) => ({
           ok: true,
           data: await opAsk(ctx, plan),
-          _meta: ctx.meta,
+          _meta: mcpMeta(ctx.meta),
         }));
       }),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_status",
     {
       title: "Deployment status",
@@ -293,7 +322,7 @@ export function buildServer(): McpServer {
     async () => guarded(async () => withContext(async (ctx) => withMeta(ctx, await opStatus(ctx)))),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_capabilities",
     {
       title: "Capability registry",
@@ -301,10 +330,10 @@ export function buildServer(): McpServer {
         "What this system can and cannot observe, and the exact reason for each gap. Use this before claiming any data is unavailable or absent.",
       annotations: { readOnlyHint: true },
     },
-    async () => guarded(async () => opCapabilities()),
+    async () => guarded(async () => envelope(opCapabilities(), registryMeta("mcp"))),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_doctor",
     {
       title: "Diagnostics",
@@ -315,7 +344,7 @@ export function buildServer(): McpServer {
     async () => guarded(async () => withContext(async (ctx) => withMeta(ctx, await opDoctor(ctx)))),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_targets_list",
     {
       title: "List tracked targets",
@@ -326,7 +355,7 @@ export function buildServer(): McpServer {
     async () => guarded(async () => withContext(async (ctx) => withMeta(ctx, await opTargetList(ctx)))),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_target_add",
     {
       title: "Track an account",
@@ -360,7 +389,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_target_set_status",
     {
       title: "Pause or resume a target",
@@ -378,7 +407,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_target_remove",
     {
       title: "Delete a target and its data",
@@ -397,7 +426,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_scans_run",
     {
       title: "Queue scans",
@@ -423,7 +452,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_scans_list",
     {
       title: "Recent scan jobs",
@@ -442,7 +471,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_work",
     {
       title: "Run the worker",
@@ -461,7 +490,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_activity",
     {
       title: "Activity feed",
@@ -491,12 +520,12 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_report",
     {
       title: "Period report",
       description:
-        "Compose one calendar period (weekly/monthly/quarterly/yearly, UTC) from STORED ROWS ONLY: profile movement, audience change, posts, stories, engagement, comments, mentions, tags, insights, relationships and the gaps. Every section states OBSERVED / DERIVED / EMPTY / UNAVAILABLE and every fact carries evidence ids (bounded, with the total count). Returns the structured report and a deterministic Markdown rendering. Nothing is generated or inferred: a section the source cannot answer is UNAVAILABLE with the reason, never zero. --at selects the period containing that date; omitting it reports the current period.",
+        "Compose one calendar period (weekly/monthly/quarterly/yearly, UTC) from STORED ROWS ONLY: profile movement, audience change, posts, stories, engagement, comments, mentions, tags, insights, relationships and the gaps. Every section states OBSERVED / DERIVED / EMPTY / UNAVAILABLE and every fact carries evidence ids (bounded, with the total count). Returns the structured report and a deterministic Markdown rendering. Nothing is generated or inferred: a section the source cannot answer is UNAVAILABLE with the reason, never zero. \`at\` selects the period containing that date; omitting it reports the current period.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         target: z.string().describe("Target id or username"),
@@ -516,7 +545,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_activity_report",
     {
       title: "Activity Report (four tabs)",
@@ -568,7 +597,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_tracker",
     {
       title: "Activity tracker (watchlist + period card)",
@@ -577,7 +606,7 @@ export function buildServer(): McpServer {
         "Without a target: every owned target (sorted by last observation, newest first) with new followings, " +
         "unfollows, posts, stories, comments, tags and mentions for the latest CLOSED period. With a target: the " +
         "full card adds follow/unfollow rosters, top commenters, recent comments, posts, hashtags, evidence ids, " +
-        "next-scan state and explicit refusals. Default period is weekly; --at selects the containing window " +
+        "next-scan state and explicit refusals. Default period is weekly; \`at\` selects the containing window " +
         "exactly, including an open one (state IN_PROGRESS). Read-only: no scan, queue or write. Counts match " +
         "igtrack_activity_report for the same window because both read the same ledger. A metric no lawful source " +
         "answers is null with state UNAVAILABLE and a capability-registry reason, never zero; a follow count of zero " +
@@ -624,7 +653,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_reports",
     {
       title: "Period index",
@@ -646,7 +675,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_audience",
     {
       title: "Audience set algebra",
@@ -668,7 +697,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_recent",
     {
       title: "Recent follow activity",
@@ -702,7 +731,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_export",
     {
       title: "Export stored rows",
@@ -743,7 +772,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_digest",
     {
       title: "Change digest",
@@ -765,7 +794,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_alerts",
     {
       title: "Change alerts (local outbox)",
@@ -802,7 +831,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_relationships",
     {
       title: "Relationship ranking",
@@ -822,7 +851,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_dossier",
     {
       title: "Account dossier",
@@ -845,7 +874,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_evidence",
     {
       title: "Evidence list",
@@ -862,7 +891,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_evidence_chain",
     {
       title: "Evidence chain",
@@ -879,7 +908,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_insights",
     {
       title: "Account insights",
@@ -910,7 +939,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_audit",
     {
       title: "Audit one account",
@@ -952,7 +981,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_lookup",
     {
       title: "Probe one account",
@@ -969,7 +998,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_public",
     {
       title: "Read a logged-out public profile",
@@ -1019,7 +1048,7 @@ export function buildServer(): McpServer {
       }),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_post",
     {
       title: "Read one post from its permalink",
@@ -1065,7 +1094,7 @@ export function buildServer(): McpServer {
       }),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_anonstories",
     {
       title: "Read login-free stories and highlights",
@@ -1117,7 +1146,7 @@ export function buildServer(): McpServer {
       }),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_viewer",
     {
       title: "Six-tab account viewer",
@@ -1182,7 +1211,7 @@ export function buildServer(): McpServer {
       }),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_tags",
     {
       title: "Tagged media",
@@ -1202,7 +1231,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_mention_read",
     {
       title: "Read one mentioned comment",
@@ -1235,7 +1264,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_plan",
     {
       title: "Plan the next investigation step",
@@ -1258,7 +1287,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_research",
     {
       title: "Account research report",
@@ -1297,7 +1326,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_research_run",
     {
       title: "Run a bounded public-web research acquisition",
@@ -1345,7 +1374,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_investigate",
     {
       title: "Investigate one username and return the dossier",
@@ -1411,7 +1440,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_full_audit",
     {
       title: "Full audit: collect everything readable, then read the audit back",
@@ -1485,7 +1514,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_claims_list",
     {
       title: "List recorded claims",
@@ -1516,7 +1545,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_claim_add",
     {
       title: "Record a sourced claim",
@@ -1564,7 +1593,7 @@ export function buildServer(): McpServer {
       ),
   );
 
-  server.registerTool(
+  registerTool(
     "igtrack_claim_retract",
     {
       title: "Retract a claim",

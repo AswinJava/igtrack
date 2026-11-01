@@ -261,6 +261,21 @@ describe.runIf(dbAvailable)("checkpoint staging (PC-T2)", () => {
     expect(row.total).toBe(0);
   });
 
+  it("a truncated read that collected nobody is partial, never an empty roster", async () => {
+    const job = await makeJob();
+    const src = paginatedSource([{ usernames: [], complete: false }]);
+    const result = await runFollowingScan(handle.db, job, src);
+    // "succeeded-empty" would tell an operator the account has no followers.
+    // The only honest reading of a truncated read that returned nothing is
+    // "we did not get to see the roster".
+    expect(result).toBe("succeeded-partial");
+    const snap = await handle.db.execute(sql`
+      SELECT completeness::text AS completeness, total_observed::int AS total
+      FROM follow_snapshots WHERE target_id = ${targetId} AND direction = 'FOLLOWING'
+    `);
+    expect(Array.from(snap)[0]).toMatchObject({ completeness: "PARTIAL", total: 0 });
+  });
+
   it("stale-lease reclaim re-executes the same logical scan idempotently (T2-5)", async () => {
     const job = await makeJob();
     const src = paginatedSource([

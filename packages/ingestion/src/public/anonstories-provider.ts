@@ -490,8 +490,12 @@ export class AnonStoriesProvider implements InstagramProvider {
       if ("failure" in answer) return answer.failure;
       const subject = answer.subject;
       // Biography, external URL and account type are not carried by the
-      // aggregator: absent here, exactly as absent in its response.
-      return available(
+      // aggregator: absent here, exactly as absent in its response. That makes
+      // the reading PARTIAL, not COMPLETE — a snapshot labelled COMPLETE would
+      // be allowed to serve as a diff baseline, and a profile scan that
+      // switched route to this source would then report those fields as
+      // removed.
+      return partial(
         {
           account: {
             // The aggregator reports the legacy pk, not the IGSID. Recording
@@ -517,6 +521,9 @@ export class AnonStoriesProvider implements InstagramProvider {
           observedAt: this.now().toISOString(),
           source: meta.source,
           confidence: Confidence.MEDIUM,
+          note:
+            "The login-free aggregator profile carries no biography, external URL or account type. " +
+            "Those fields are absent because this source does not expose them, not because the account lacks them.",
           ...(answer.raw !== "" ? { rawPayloadHash: sha256(answer.raw) } : {}),
         },
       );

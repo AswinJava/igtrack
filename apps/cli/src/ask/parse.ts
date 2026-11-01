@@ -405,6 +405,12 @@ const SPECS: readonly IntentSpec[] = [
     intent: "targets",
     phrases: [
       { re: /\btracked (?:accounts?|profiles?|targets?)\b/, weight: 5 },
+      // "which accounts are tracked?" puts the noun before the verb, so the
+      // phrase above cannot see it. Without this the question scores as `track`
+      // — a read routed into the write intent, answered by asking which account
+      // to add.
+      { re: /\b(?:which|what|how many|who)\b[^?.]{0,40}\b(?:tracked|tracking|tracks|track|watched|monitoring)\b/, weight: 5 },
+      { re: /\b(?:am i|are we|you are)\b[^?.]{0,24}\b(?:tracking|watching|monitoring)\b/, weight: 5 },
       { re: /\bwho am i (?:tracking|watching)\b/, weight: 5 },
       { re: /\blist (?:the )?(?:targets?|accounts|profiles)\b/, weight: 4 },
       { re: /\b(?:my )?watchlist\b/, weight: 4 },
@@ -1159,6 +1165,15 @@ export function planAsk(prompt: string, options: ParseOptions = {}): AskPlan {
   // A full audit already reads back the audit report; a verification step in
   // the same sentence must not run the same read twice.
   if (chosen.has("full_audit")) chosen.delete("audit");
+  // "stop tracking @x" scores `untrack` (what was asked) and `track` (the word
+  // "tracking" inside it). They are opposites, and a plan holding both adds back
+  // the account the operator just asked to remove — so the specific action wins
+  // and its opposite is dropped, the way a repeated read is dropped above.
+  if (chosen.has("untrack")) chosen.delete("track");
+  // "what am I tracking?" is a question about the list, and the word inside it
+  // also scores as the add. A sentence whose main ask is the list never asked
+  // for a new target, so the write is dropped rather than run after the read.
+  if (primary === "targets") chosen.delete("track");
   if (chosen.size === 0) add(primary);
 
   const intents = canonicalOrder([...chosen]);

@@ -58,7 +58,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Public account; graph observes the owned account only.
 - **Provider methods:** `resolveAccount`, `getProfile`
 - **Persists to:** `igAccounts`, `profileSnapshots`, `profileChanges`, `evidence`
-- **Surfaced in:** `/targets/[id] (overview)`, `/lookup`, `POST /api/targets/lookup`
+- **Surfaced in:** `igtrack lookup <username> (CLI: probe, persists nothing)`, `igtrack dossier <target> (CLI: profile block and snapshot history)`, `igtrack public <username> (CLI: logged-out public profile read)`, `igtrack_lookup / igtrack_dossier / igtrack_public (MCP tools)`
 
 **Pipeline.** resolveAccount maps a username to a stable account reference; getProfile returns a normalized profile that is appended to profile_snapshots (never overwritten). The adapter requests only documented IG User fields, including website, which maps to externalUrl. Field-level diffs against the previous snapshot become DERIVED profile_changes rows, each backed by an evidence row.
 
@@ -69,7 +69,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Same as PROFILE.
 - **Provider methods:** `getProfile`
 - **Persists to:** `profileSnapshots`
-- **Surfaced in:** `/targets/[id] (overview)`, `/targets (cards)`, `/lookup`
+- **Surfaced in:** `igtrack dossier <target> (CLI: counts with first-observed time and source)`, `igtrack tracker [target] (CLI: latest closed-period card)`, `igtrack_lookup / igtrack_dossier / igtrack_tracker (MCP tools)`
 
 **Pipeline.** Counts ride inside profile snapshots, so every count has a timestamp, a source, and a history. A missing count renders as unavailable, never zero — zero is a real observation of absence, only valid when the provider returns it.
 
@@ -80,7 +80,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Owned professional account only. The documented IG User insights edge; Standard Access covers an app used solely by the account's owner (Meta, 2026-06-30). No App Review for own-account observation.
 - **Provider methods:** `getAccountInsights`
 - **Persists to:** `insightPoints`, `evidence`
-- **Surfaced in:** `igtrack insights (CLI)`, `insights (MCP tool)`
+- **Surfaced in:** `igtrack insights <target> (CLI)`, `igtrack export <target> --kind insights (CLI)`, `igtrack_insights / igtrack_export (MCP tools)`
 
 **Pipeline.** Each INSIGHTS_SCAN calls the documented IG User insights edge once for a fixed, docs-pinned metric set: daily time series for follower_count, reach, views, accounts_engaged and total_interactions, plus follower_demographics (country breakdown) as a lifetime total_value point-in-time snapshot. Points are appended to insight_points (append-only), so repeated scans build the history the native 90-day window deletes and the demographic time line the API itself cannot produce (demographics are a current-state snapshot, never a series). A metric the platform does not return becomes an ABSENCE row with the documented reason (below 100 followers, 48 h demographic delay) — never a zero.
 
@@ -91,7 +91,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Facebook Login product; the documented business_discovery edge. Public Business/Creator accounts only — consumer and private accounts are unreachable, age-gated accounts return nothing. Documented permissions: instagram_basic + instagram_manage_insights + pages_read_engagement. Opt-in on the graph provider: IGTRACK_GRAPH_BUSINESS_DISCOVERY=1.
 - **Provider methods:** `discoverAccount`
 - **Persists to:** `profileSnapshots`, `posts`, `evidence`
-- **Surfaced in:** `igtrack lookup (CLI)`, `igtrack dossier (CLI)`, `igtrack targets add --observed (CLI)`, `lookup / dossier / igtrack_target_add (MCP tools)`
+- **Surfaced in:** `igtrack lookup (CLI)`, `igtrack dossier (CLI)`, `igtrack targets add --observed (CLI)`, `igtrack_lookup / igtrack_dossier / igtrack_target_add (MCP tools)`
 
 **Pipeline.** Two intents, one edge. `lookup` is a probe, not a record: it renders the public profile fields plus the bounded recent-media preview and persists nothing — a probe is not a claim of record. Recording is operator-directed: `targets add <username> --observed` probes the route once, refuses on UNAVAILABLE with the platform's reason (a target that can never be scanned is not created), and creates a DISCOVERY target; DISCOVERY_SCAN then stores the documented profile fields as a COMPLETE, diffable snapshot and the media preview as posts rows. The preview is capped by the edge and cannot page (cap 12, DISCOVERY_MEDIA_PREVIEW_LIMIT): the cap is written into every media row's evidence, the scan completes as COMPLETED_PARTIAL, and no surface may call those rows the account's post history. Media rows carry the platform's published time and our first-observation time as separate fields. No documented route returns another account's media comments — that stays UNAVAILABLE with a reason.
 
@@ -102,7 +102,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Public account stories; graph returns the owned account's tray.
 - **Provider methods:** `getStories`
 - **Persists to:** `stories`, `storySightings`, `evidence`
-- **Surfaced in:** `/targets/[id] (stories tab)`
+- **Surfaced in:** `igtrack viewer <target> --tab story (CLI)`, `igtrack activity --type STORY_POSTED (CLI)`, `igtrack export <target> --kind stories (CLI)`, `igtrack_viewer / igtrack_activity / igtrack_export (MCP tools)`, `igtrack anonstories <username> (CLI: PUBLIC_AGGREGATOR rows, never a platform story)`
 
 **Pipeline.** Each scan appends new stories and records a sighting row for every story still present, so first-seen, last-seen, and observable duration are derived from evidence, not guessed. Stories expire after ~24h: a story missing from later scans is EXPIRED, never deleted-history.
 
@@ -113,11 +113,11 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Same as STORIES. Graph exposes id, timestamp, media type, and one caption only.
 - **Provider methods:** `getStories`
 - **Persists to:** `stories`
-- **Surfaced in:** `/targets/[id] (stories tab)`, `evidence chain`
+- **Surfaced in:** `igtrack viewer <target> --tab story (CLI: persisted fields only)`, `igtrack evidence <target> (CLI: source, observed time, confidence)`, `igtrack_evidence_chain (MCP tool)`
 
 **What would unlock it.** Graph story objects would need richer read fields; until then the degraded path is explicit.
 
-**Pipeline.** Caption (at most one per story, per provider docs), expiry, duration, link, stickers, poll, question, location, and music persist when the provider supplies them (fixture) and stay null when it does not (graph). The UI renders persisted fields only — absence is shown as absence.
+**Pipeline.** Caption (at most one per story, per provider docs), expiry, duration, link, stickers, poll, question, location, and music persist when the provider supplies them (fixture) and stay null when it does not (graph). Every surface renders persisted fields only — absence is shown as absence.
 
 ### Story mentions and tags — `available`
 
@@ -126,9 +126,9 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Same as STORIES. Only provider-exposed mentions are stored.
 - **Provider methods:** `getStories`
 - **Persists to:** `storyMentions`, `evidence`
-- **Surfaced in:** `/targets/[id] (stories tab)`, `/relationships`
+- **Surfaced in:** `igtrack viewer <target> --tab story (CLI: mention badges per story)`, `igtrack activity --type MENTION_OBSERVED (CLI)`, `igtrack export <target> --kind mentions (CLI)`, `igtrack_viewer / igtrack_activity / igtrack_export (MCP tools)`
 
-**Pipeline.** Mentions normalize to username, optional platform id, geometry, and a visibility class (VISIBLE, POSSIBLY_HIDDEN, OFF_CANVAS, METADATA_ONLY, UNKNOWN). Geometry describes where the provider placed the sticker; it is never proof of intent to hide, and the UI says so.
+**Pipeline.** Mentions normalize to username, optional platform id, geometry, and a visibility class (VISIBLE, POSSIBLY_HIDDEN, OFF_CANVAS, METADATA_ONLY, UNKNOWN). Geometry describes where the provider placed the sticker; it is never proof of intent to hide, and every surface says so.
 
 ### Mention roll-up (not-established-visible accounts) — `available`
 
@@ -137,7 +137,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Same as STORIES. Reads only mentions the provider already exposed.
 - **Provider methods:** `getStories`
 - **Persists to:** `storyMentions`, `evidence`
-- **Surfaced in:** `/targets/[id] (stories tab, hidden-mention roll-up with /lookup?username= pivot)`
+- **Surfaced in:** `igtrack viewer <target> --mention <username> (CLI: hidden-class roll-up)`, `igtrack_viewer (MCP tool: mention argument)`
 
 **Pipeline.** A pure read-side aggregation over stored story_mentions rows: per mentioned account, how many distinct stories named it, how many of those named it through a class that did not establish on-canvas rendering (POSSIBLY_HIDDEN, OFF_CANVAS, METADATA_ONLY), and which story ids those were. It fetches nothing, adds no provider method, and writes no new table. Merging is case-insensitive and per story, so one story naming an account twice counts once but stays hidden if any of its rows was hidden-class. UNKNOWN is deliberately excluded from the hidden classes: a missing visibility signal is absence of evidence, never a finding, and a classification is never proof of intent to hide.
 
@@ -148,7 +148,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Owned account only; the documented IG User tags edge. Media from private accounts are excluded by the platform, and the edge is subject to Platform Rate Limits.
 - **Provider methods:** `getTags`
 - **Persists to:** `taggedMedia`, `evidence`
-- **Surfaced in:** `igtrack tags (CLI)`, `igtrack_tags (MCP tool)`, `igtrack tracker <target> (tagged count and evidence)`, `dossier counts (taggedMedia)`, `activity timeline (TAG_OBSERVED)`
+- **Surfaced in:** `igtrack tags (CLI)`, `igtrack_tags (MCP tool)`, `igtrack tracker <target> (CLI: tagged count and evidence)`, `igtrack dossier <target> (CLI: tagged-media count)`, `igtrack activity --type TAG_OBSERVED (CLI)`, `igtrack export <target> --kind tagged (CLI)`, `igtrack_tracker / igtrack_dossier / igtrack_activity / igtrack_export (MCP tools)`
 
 **What would unlock it.** Live verification of the tags edge under this integration's credentials; the pipeline, table, scan kind, and CLI are already in place.
 
@@ -174,13 +174,13 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Would require an official highlights edge.
 - **Provider methods:** —
 - **Persists to:** —
-- **Surfaced in:** `/targets/[id] (highlights tab shows UNAVAILABLE with reason)`, `igtrack tracker <target> (highlights KPI refused with reason)`
+- **Surfaced in:** `igtrack viewer <target> --tab highlights (CLI: refuses with reason)`, `igtrack tracker <target> (CLI: highlights KPI refused with reason)`, `igtrack_viewer / igtrack_tracker (MCP tools)`
 
 **Why it is unavailable.** The Instagram Graph API exposes no highlights edge (the exhaustive IG User edge list has none; the stories edge returns last-24h stories only). The only known alternative is the undocumented private reels_media endpoint, which this project forbids: no private endpoints, no session use, no access-control circumvention.
 
 **What would unlock it.** An official, documented highlights edge or object. If one appears: add a provider method, normalize to a highlights table, scan on the story cadence, and render from snapshots like stories.
 
-**Pipeline.** There is no provider method, table, pipeline, or UI beyond the honest unavailable state — by decision, not oversight.
+**Pipeline.** There is no provider method, table, pipeline, or surfaced data beyond the honest UNAVAILABLE state — by decision, not oversight.
 
 ### Public posts — `available`
 
@@ -189,7 +189,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Public account media; graph returns the owned account's media.
 - **Provider methods:** `getPublicPosts`
 - **Persists to:** `posts`, `postPresence`, `postChanges`, `evidence`
-- **Surfaced in:** `/targets/[id] (content tab)`
+- **Surfaced in:** `igtrack viewer <target> --tab post (CLI)`, `igtrack report <target> (CLI)`, `igtrack activity --type POST_PUBLISHED|POST_EDITED|POST_REMOVED (CLI)`, `igtrack export <target> --kind posts (CLI)`, `igtrack_viewer / igtrack_report / igtrack_activity / igtrack_export (MCP tools)`
 
 **Pipeline.** Listings paginate with opaque cursors; the executor persists a checkpoint per page, resumes after crashes, stops on duplicate cursors (PARTIAL, never a loop), and records idempotently. The provider shortcode is preferred with permalink parsing as fallback. A page without a cursor is a complete listing. For OWNED targets each scan also records media change state: the caption as last read per post, a CAPTION_EDITED event when a caption read differs from the caption last read, and — only when the media listing completed — a NO_LONGER_OBSERVED event for posts absent from that complete listing ('no longer observed', never 'deleted'). DISCOVERY previews are never diffed.
 
@@ -200,7 +200,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Same as POSTS. media_product_type is Facebook-Login-only.
 - **Provider methods:** `getPublicPosts`
 - **Persists to:** `posts`
-- **Surfaced in:** `/targets/[id] (content tab, Reel label)`
+- **Surfaced in:** `igtrack viewer <target> --tab reels (CLI)`, `igtrack export <target> --kind posts (CLI: rows carry the provider-declared product type)`, `igtrack_viewer / igtrack_export (MCP tools)`
 
 **Pipeline.** A post is labeled Reel only when the provider declares media_product_type REELS. Untyped items render as posts — classification is never inferred from appearance, duration, or dimensions.
 
@@ -211,11 +211,11 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Same as POSTS. Per-child detail comes from the dedicated children edge.
 - **Provider methods:** `getPublicPosts`, `getPostChildren`
 - **Persists to:** `posts`, `postChildren`
-- **Surfaced in:** `/targets/[id] (content tab, Carousel label plus per-child rows)`
+- **Surfaced in:** `igtrack viewer <target> --tab post (CLI: Carousel label)`, `igtrack dossier <target> (CLI: carousel-post and child counts)`, `igtrack_viewer / igtrack_dossier (MCP tools)`
 
-**What would unlock it.** Live verification of the children edge under this integration's credentials; the pipeline, tables, and UI are already in place.
+**What would unlock it.** Live verification of the children edge under this integration's credentials; the pipeline, tables, and CLI/MCP surfaces are already in place.
 
-**Pipeline.** A post is labeled Carousel only when the provider declares media_type CAROUSEL_ALBUM. The POSTS_SCAN executor then expands provider-declared carousels through the dedicated children edge (isolated per album, so a children failure degrades the scan to partial without endangering the parent post) and persists items in provider order to post_children, rendered as child rows. Fixture v1 ships no child source, so fixture carousels stay childless by fixture design.
+**Pipeline.** A post is labeled Carousel only when the provider declares media_type CAROUSEL_ALBUM. The POSTS_SCAN executor then expands provider-declared carousels through the dedicated children edge (isolated per album, so a children failure degrades the scan to partial without endangering the parent post) and persists items in provider order to post_children, read back as child counts and per-post children in the dossier. Fixture v1 ships no child source, so fixture carousels stay childless by fixture design.
 
 ### Public comments — `available`
 
@@ -224,7 +224,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Comments on observable media.
 - **Provider methods:** `getPublicComments`
 - **Persists to:** `postComments`, `evidence`
-- **Surfaced in:** `/targets/[id] (content tab, per-post threads)`
+- **Surfaced in:** `igtrack export <target> --kind comments (CLI)`, `igtrack activity --type COMMENT_POSTED (CLI)`, `igtrack_export / igtrack_activity (MCP tools)`
 
 **Pipeline.** Each post carries a comment state: OBSERVED (source read, even when empty), UNAVAILABLE (no exposed comment source), NOT_SCANNED (capability off). Comment pages paginate like post pages. Comment like counts and author platform ids persist when the provider supplies them; a missing like count renders as absent, never zero. Empty is never faked and never conflated with unavailable.
 
@@ -235,9 +235,9 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Same as COMMENTS.
 - **Provider methods:** `getPublicComments`
 - **Persists to:** `postComments`
-- **Surfaced in:** `/targets/[id] (content tab, reply badges)`
+- **Surfaced in:** `igtrack export <target> --kind comments (CLI: threaded rows)`, `igtrack_export (MCP tool)`
 
-**What would unlock it.** Live verification under this integration's credentials; the pipeline, column, join, and UI are already in place.
+**What would unlock it.** Live verification under this integration's credentials; the pipeline, column, join, and CLI/MCP surfaces are already in place.
 
 **Pipeline.** Threading arrives through the documented replies field expansion (the listing edge returns top-level comments only) plus explicit parent_id values, flattened into rows carrying in_reply_to_comment_id. Replies render with the parent author resolved in one self-join. When the provider returns no threading, threads stay flat — flatness is data, not a bug.
 
@@ -248,7 +248,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Fixture exposes synthetic rosters; import:v1 reads the operator's own Instagram export for the real one. Graph exposes counts only, never lists.
 - **Provider methods:** `getFollowers`
 - **Persists to:** `followSnapshots`, `followSnapshotMembers`, `followDeltas`, `evidence`
-- **Surfaced in:** `/targets/[id] (followers tab)`, `/relationships`, `activity timeline`
+- **Surfaced in:** `igtrack audience <target> (CLI: mutuals and one-way follows)`, `igtrack recent <target> --direction followers (CLI)`, `igtrack relationships <target> (CLI)`, `igtrack activity --type NEW_FOLLOWER|LOST_FOLLOWER (CLI)`, `igtrack export <target> --kind followers (CLI)`, `igtrack_audience / igtrack_recent / igtrack_relationships / igtrack_activity / igtrack_export (MCP tools)`
 
 **What would unlock it.** A supported list endpoint (the Graph API has none by design).
 
@@ -261,7 +261,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Same as FOLLOWERS.
 - **Provider methods:** `getFollowing`
 - **Persists to:** `followSnapshots`, `followSnapshotMembers`, `followDeltas`, `evidence`
-- **Surfaced in:** `/targets/[id] (following tab)`, `/relationships`, `activity timeline`
+- **Surfaced in:** `igtrack recent <target> --direction following (CLI)`, `igtrack audience <target> (CLI)`, `igtrack relationships <target> (CLI)`, `igtrack activity --type NEW_FOLLOWING|LOST_FOLLOWING (CLI)`, `igtrack export <target> --kind following (CLI)`, `igtrack_recent / igtrack_audience / igtrack_relationships / igtrack_activity / igtrack_export (MCP tools)`
 
 **What would unlock it.** A supported list endpoint (the Graph API has none by design).
 
@@ -274,7 +274,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Would require a public likes feed, which does not exist.
 - **Provider methods:** —
 - **Persists to:** —
-- **Surfaced in:** `Relationships page states UNAVAILABLE with reason; like counts on posts and comments are labeled provider metadata`, `igtrack tracker <target> (accounts-liked KPI refused with reason)`
+- **Surfaced in:** `igtrack relationships <target> (CLI: states UNAVAILABLE with reason; like counts on posts and comments are labeled provider metadata)`, `igtrack tracker <target> (CLI: accounts-liked KPI refused with reason)`, `igtrack capabilities (CLI: UNAVAILABLE row with this reason)`
 
 **Why it is unavailable.** Instagram exposes no liker list through any supported interface: no liker edge exists on IG Media or IG Comment (the Facebook Comment likes edge is Facebook-only and must not be conflated). Anything labeled 'likes' beyond post/comment metadata would be fabricated.
 
@@ -289,13 +289,13 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Would require a lawful interaction feed.
 - **Provider methods:** —
 - **Persists to:** `interactions`
-- **Surfaced in:** —
+- **Surfaced in:** `igtrack capabilities (CLI: UNAVAILABLE row with this reason)`
 
 **Why it is unavailable.** No supported provider exposes interaction history. LIKE_SIGNAL in the model describes a shape, not a source. The insights edge was considered and rejected: it yields aggregates without actors or per-event timestamps, which cannot satisfy actor+kind+timestamp evidence.
 
-**What would unlock it.** A lawful interaction source. Activation criteria: a provider method returning actor, kind, timestamp, and evidence; then add the writer, ledger branch, and UI.
+**What would unlock it.** A lawful interaction source. Activation criteria: a provider method returning actor, kind, timestamp, and evidence; then add the writer, ledger branch, and CLI/MCP surface.
 
-**Pipeline.** The interactions table exists as a typed landing zone with a documented rationale in schema comments, but has no writer: no supported source provides interaction actors, counts with history, or timestamps. The relationships page derives association signals from mentions and deltas instead, labeled as observed association — never 'favorite people'.
+**Pipeline.** The interactions table exists as a typed landing zone with a documented rationale in schema comments, but has no writer: no supported source provides interaction actors, counts with history, or timestamps. igtrack relationships derives association signals from mentions and deltas instead, labeled as observed association — never 'favorite people'.
 
 ### Repost count metadata — `available`
 
@@ -304,7 +304,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** reposts_count is a documented IG Media scalar, top-level media only; the owner can hide counts.
 - **Provider methods:** `getPublicPosts`
 - **Persists to:** `posts`
-- **Surfaced in:** `/targets/[id] (content tab, repost count where the provider returned one)`
+- **Surfaced in:** `igtrack viewer <target> --tab repost (CLI)`, `igtrack export <target> --kind posts (CLI: reposts_count where the provider returned one)`, `igtrack_viewer / igtrack_export (MCP tools)`
 
 **What would unlock it.** Live verification of reposts_count under this integration's credentials (harness scripts/verify-graph-provider.ts); then add it to GRAPH_MEDIA_FIELDS so the default live path surfaces it.
 
@@ -317,7 +317,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** Would require a repost object or reshare edge.
 - **Provider methods:** —
 - **Persists to:** —
-- **Surfaced in:** —
+- **Surfaced in:** `igtrack viewer <target> --tab repost (CLI: attribution refused with reason)`, `igtrack capabilities (CLI: UNAVAILABLE row with this reason)`
 
 **Why it is unavailable.** No repost object or reshare edge exists anywhere in the IG Platform reference — cross-account attribution is structurally unavailable, not unimplemented. This is the repost-identities refusal: the count scalar carries no actors, so no lawful source can name who reposted what.
 
@@ -328,11 +328,11 @@ A capability can be available **and** documented-absent at the same time, and sa
 ### Media bytes and assets — `UNAVAILABLE`
 
 - **Registry id:** `MEDIA`
-- **Live state:** `DOCUMENTED_ABSENT` — The IG Media reference documents media_url omission rules that rule out archival use. Metadata links render as user-initiated outbound links only.
+- **Live state:** `DOCUMENTED_ABSENT` — The IG Media reference documents media_url omission rules that rule out archival use. Metadata links print as text only; no bytes are fetched.
 - **Permissions:** Would require archivable provider URLs plus a storage policy.
 - **Provider methods:** —
 - **Persists to:** `mediaAssets`
-- **Surfaced in:** `Provider links render as user-initiated outbound links behind an http(s) guard; bytes are never auto-loaded`
+- **Surfaced in:** `igtrack public / igtrack post / igtrack viewer (CLI: permalinks and link URLs print as text; bytes are never fetched)`, `igtrack_public / igtrack_post / igtrack_viewer (MCP tools)`
 
 **Why it is unavailable.** No archivable source: fixture carries no media URLs and graph media URLs are expiring CDN links with documented omission semantics (copyright, reel-download settings) — never stable enough to archive.
 
@@ -347,7 +347,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** No provider permission applies: claims are submitted by the operator or their agent, each with the source that stated it, and the report reads stored claims plus stored observations only. The platform exposes no edge for any claim predicate (organization, industry, contact, affiliation, stated relationships), which is why no provider method is listed — and none can be added.
 - **Supplied by:** operator/agent submissions — no provider method exists, and none can (the platform exposes no route)
 - **Persists to:** `claims`
-- **Surfaced in:** `igtrack claims add/list/retract (CLI)`, `igtrack research (CLI, --format md for a hand-off document)`, `claim_add / claims_list / claim_retract / research (MCP tools)`, `igtrack dossier (ACCOUNT_RESEARCH coverage row)`
+- **Surfaced in:** `igtrack claims add/list/retract (CLI)`, `igtrack research <target> (CLI, --format md for a hand-off document)`, `igtrack_claim_add / igtrack_claims_list / igtrack_claim_retract / igtrack_research (MCP tools)`, `igtrack dossier <target> (CLI: ACCOUNT_RESEARCH coverage row)`
 
 **Pipeline.** A claim is a finding the operator (or their agent) researched: a predicate from a closed 9-entry registry, a value, an optional absolute http(s) source URL, an excerpt (hashed on write), and stated/retrieved times. Writes are validated and deduplicated — re-submitting the same finding is refused, because it is not corroboration. `igtrack research <account>` composes a deterministic report: sections built only from stored observations (identity and route, observation summary, leads, closest connections, coverage) and one section built only from claims, with per-predicate relation labels derived from distinct web domains (CORROBORATED at two or more domains, SINGLE_SOURCE at one, OPERATOR_ASSERTED for operator-only, CONFLICTED when values disagree — both sides kept, nothing chosen). Sensitive person-level predicates (employment, health, religion, politics, sexuality, ethnicity, criminal or legal history, home address, education records, family and personal relationships) are refused at write time, from every source. Claims are never merged into platform observations, never upgraded to facts, and never expire silently: a claim whose retrieval basis is older than 180 days is flagged DUE_FOR_REVIEW and stays exactly as it was recorded.
 
@@ -358,7 +358,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** No platform permission applies: the engine fetches only public web pages the operator named (or a configured search provider returned as candidates), through the SSRF-gated fetcher. Instagram-family hosts are refused by policy — platform data belongs to the Graph API adapters.
 - **Supplied by:** the bounded research engine — operator-named or search-provider-named public pages, fetched through the SSRF gate; no platform route exists, and none can
 - **Persists to:** `researchRuns`, `researchDocuments`, `claims`
-- **Surfaced in:** `igtrack research <target> --run --question "..." (CLI)`, `igtrack_research_run (MCP tool)`, `Research runs section of igtrack research (CLI report)`
+- **Surfaced in:** `igtrack research <target> --run --question "..." (CLI)`, `igtrack_research_run (MCP tool)`, `Research runs section of igtrack research <target> (CLI report)`
 
 **Pipeline.** A run is created first (question, focus, bounds), then at most RESEARCH_MAX_SOURCES=10 documents are planned: operator URLs first, then search-provider candidates (no provider configured means UNAVAILABLE with the exact reason — never invented sources), then the source URLs of prior claims; deduplicated, sliced to the cap. Every URL and every redirect hop passes the static gate: http(s) on port 80/443 only, no embedded credentials, Instagram/localhost/metadata hosts refused by policy, DNS results checked against private, loopback, link-local and metadata ranges; robots.txt is respected, content types are allowlisted, the body is streamed to a 512KB byte cap under a 10s wall-clock timeout. Extraction reads four fixed field families (JSON-LD, meta tags, mailto addresses, public profile links) — never page prose, so a page cannot prompt-inject its way into a claim. Each candidate passes the same closed predicate registry as operator claims before storage; duplicates are counted, never re-stored; a document fetched within 24h is REUSED unless --refresh. Every per-document outcome, including refusals and failures, is recorded on the run. Depth is fixed at 1: the engine never follows links it did not plan.
 
@@ -369,7 +369,7 @@ A capability can be available **and** documented-absent at the same time, and sa
 - **Permissions:** No permission can supply this because no provider returns it. Personality, MBTI, relationship, financial and location inferences are model output, not observations; deriving them from this ledger would present inference as evidence.
 - **Provider methods:** —
 - **Persists to:** —
-- **Surfaced in:** `igtrack activity-report <target> (AI Insights tab, always UNAVAILABLE)`, `igtrack_activity_report (MCP tool, ai_insights block)`, `igtrack tracker <target> (ai_insights block, always UNAVAILABLE)`
+- **Surfaced in:** `igtrack activity-report <target> (CLI: AI Insights tab, always UNAVAILABLE)`, `igtrack_activity_report (MCP tool, ai_insights block)`, `igtrack tracker <target> (CLI: ai_insights block, always UNAVAILABLE)`
 
 **Why it is unavailable.** IGTrack has no AI-insight provider. Personality, MBTI, relationship, financial and location inferences are not observations; no supported source returns them, and generating them from this ledger would be fabrication. The AI Insights tab is therefore UNAVAILABLE.
 

@@ -457,7 +457,14 @@ export interface CheckpointInput {
   targetId: string;
   kind: string;
   jobId?: string;
-  cursor?: string;
+  /**
+   * A page cursor to store, or null to clear the stored one. An omitted cursor
+   * leaves the column untouched, so a scan that finishes its listing must pass
+   * null: otherwise the last page's cursor survives, and a job that is retried
+   * after completing resumes from that stale tail and reports COMPLETED having
+   * read only the tail.
+   */
+  cursor?: string | null;
   page?: number;
   progress?: Record<string, unknown>;
 }

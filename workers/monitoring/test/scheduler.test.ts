@@ -7,6 +7,7 @@ import {
   createTarget,
   enqueueJob,
   getJob,
+  getSchedulerState,
   monitoringJobs,
   transitionTargetStatus,
   updateOwnedTargetMeta,
@@ -250,5 +251,28 @@ describe.runIf(dbAvailable)("scheduler fleet coverage", () => {
     // 30 s default is tight on a slow or containerised host, and a timeout
     // here says nothing about the scheduler. The assertion above is
     // unchanged.
+  }, 180_000);
+
+  it("records the reason when a tick fails against a writable database (S8 write path)", async () => {
+    // The S8 test above fails a tick with an unreachable database, where the
+    // diagnostic write cannot land either — so it can never notice that the
+    // recorded reason is broken. Here the database is live and the failure is
+    // the identity gate, the one provider call inside a tick: this is exactly
+    // the path `doctor` reads as scheduler.lastError.
+    const reason = "identity gate exploded: simulated provider outage at 127.0.0.1:5432";
+    await expect(
+      runSchedulerTick(handle.db, {
+        now: new Date(T0 + 86_400_000),
+        provider: {
+          observesAccount: async () => {
+            throw new Error(reason);
+          },
+        },
+      }),
+    ).rejects.toThrow("identity gate exploded");
+
+    const state = await getSchedulerState(handle.db);
+    expect(state).not.toBeNull();
+    expect(state?.lastError?.message).toContain(reason);
   }, 180_000);
 });

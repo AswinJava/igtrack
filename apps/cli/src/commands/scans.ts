@@ -30,6 +30,20 @@ rather than queued to fail.
 executes. That separation is what makes a scan resumable, retryable, and safe to
 interrupt.`;
 
+export const WORK_HELP = `igtrack work [--max N] [--no-scheduler] [--json]
+
+Run the worker in the foreground: one scheduler tick, then claim and execute
+queued jobs until the queue is empty or --max is reached. This is the
+zero-infrastructure way to get real observations: queue with \`igtrack scans
+run\`, execute here.
+
+  --max <n>         jobs executed before exiting (default 25)
+  --no-scheduler    drain what is already queued without a scheduling tick
+  --json            standard JSON envelope around the result
+
+Work acquires and stores observations; it does not compose reports. Jobs are
+claimed with a lease, so a second worker can run alongside this one.`;
+
 export async function runScans(args: ParsedArgs): Promise<number> {
   const first = args.positionals[0];
   // `igtrack scans <username>` is the read people actually type. Only the two

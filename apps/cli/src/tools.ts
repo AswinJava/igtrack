@@ -2313,8 +2313,25 @@ export async function opRecent(
     );
   }
   if (state === "EMPTY") {
+    // "No delta recorded" has two very different causes, and only one of them is
+    // an observed no-change: a COMPLETE roster re-read inside the window proves
+    // nothing moved, while a window with no complete read at all proves nothing
+    // except that nothing was looked at. Say which one happened.
+    const latestReads = [
+      wantsFollowing ? snapshots.following.takenAt : null,
+      wantsFollowers ? snapshots.followers.takenAt : null,
+    ].filter((value): value is string => value !== null);
+    const newestRead =
+      latestReads.length === 0
+        ? null
+        : new Date(Math.max(...latestReads.map((value) => Date.parse(value)))).toISOString();
+    const readInsideWindow = newestRead !== null && Date.parse(newestRead) >= since.getTime();
     notes.push(
-      "A baseline exists and no add or removal was recorded in this window — a computed empty answer, not missing data.",
+      readInsideWindow
+        ? "A COMPLETE roster was re-read inside this window and no add or removal was recorded — a computed empty answer, not missing data."
+        : `No add or removal is recorded in this window, and no COMPLETE roster was re-read inside it` +
+          (newestRead === null ? "" : ` (newest COMPLETE read: ${newestRead})`) +
+          ` — this is "nothing observed between the reads", not an observed no-change.`,
     );
   }
   if (state === "UNAVAILABLE") {
@@ -5942,14 +5959,20 @@ export async function opResearchRun(
     });
   }
 
+  // A refused search and an empty page-set are different facts, and only one of
+  // them is a completed run: with nothing planned because the search was refused
+  // or failed, the run did not look, and `investigate` must not render that as a
+  // finished web stage.
   const status: ResearchRunResult["status"] =
-    failed === 0 && documentsTruncated === 0
-      ? "COMPLETED"
-      : fetched > 0 || reused > 0
-        ? "COMPLETED_PARTIAL"
-        : planned.length === 0
-          ? "COMPLETED"
-          : "FAILED";
+    planned.length === 0 && searchUnavailableReason !== null
+      ? "FAILED"
+      : failed === 0 && documentsTruncated === 0
+        ? "COMPLETED"
+        : fetched > 0 || reused > 0
+          ? "COMPLETED_PARTIAL"
+          : planned.length === 0
+            ? "COMPLETED"
+            : "FAILED";
 
   await finishResearchRun(ctx.db, {
     runId: run.id,
@@ -5994,6 +6017,14 @@ export async function opResearchRun(
     notes.push(
       "No sources were available to this run. Configure a search provider or pass --url to name public pages " +
         "directly; the engine will not invent sources.",
+    );
+  } else if (planned.length === 0) {
+    // Search answered and named nothing usable. That is a completed run with no
+    // coverage, and "no coverage" has to be said out loud — otherwise an empty
+    // document list reads like a clean public footprint.
+    notes.push(
+      "This run fetched 0 document(s): the search answered but offered no usable candidate URL. " +
+        "Nothing here is evidence that the account has no public presence — only that this run read no page.",
     );
   }
   notes.push(
@@ -8853,8 +8884,8 @@ function fullAuditSurfaces(
     undefined,
     report.cadence.state === "UNAVAILABLE"
       ? (report.cadence.reason ?? report.cadence.note)
-      : `${report.cadence.timestampRows} timestamp(s); median gap ${report.cadence.medianGapDays ?? "null"} day(s); ` +
-        `${report.cadence.firstPublishedAt ?? "null"} … ${report.cadence.lastPublishedAt ?? "null"} (published times, not observation times)`,
+      : `${report.cadence.timestampRows} timestamp(s); median gap ${report.cadence.medianGapDays ?? "not observed"} day(s); ` +
+        `${report.cadence.firstPublishedAt ?? "not observed"} … ${report.cadence.lastPublishedAt ?? "not observed"} (published times, not observation times)`,
     report.cadence.state === "UNAVAILABLE" ? null : EVIDENCE_CLASS.DERIVED,
     report.cadence.state === "UNAVAILABLE" ? "UNAVAILABLE" : undefined,
   );
@@ -8951,11 +8982,14 @@ function fullAuditSurfaces(
         recent === null
           ? "no owned target was resolved for this audit"
           : recent.state === "OBSERVED"
-            ? `${recent.counts.newFollowing ?? "null"} new following, ${recent.counts.lostFollowing ?? "null"} lost following, ` +
-              `${recent.counts.newFollowers ?? "null"} new followers, ${recent.counts.lostFollowers ?? "null"} lost followers; ` +
+            ? `${recent.counts.newFollowing ?? "side not observed"} new following, ${recent.counts.lostFollowing ?? "side not observed"} lost following, ` +
+              `${recent.counts.newFollowers ?? "side not observed"} new followers, ${recent.counts.lostFollowers ?? "side not observed"} lost followers; ` +
               "each row's time is when this ledger first recorded the edge, never the Instagram follow time"
             : recent.state === "EMPTY"
-              ? "a COMPLETE roster baseline exists and no add or removal was recorded in this window"
+              ? // The window's meaning is decided once, in opRecent's notes; a
+                // restatement here is how two surfaces start disagreeing.
+                (recent.notes.find((note) => /add or removal/i.test(note)) ??
+                  "no add or removal was recorded in this window")
               : (recent.notes.find((note) => note.startsWith("Recent identity activity")) ??
                 "no COMPLETE roster baseline is stored for the requested side"),
       evidence: recent !== null && recent.state === "OBSERVED" ? EVIDENCE_CLASS.DERIVED : null,

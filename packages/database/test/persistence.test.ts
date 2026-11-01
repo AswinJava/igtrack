@@ -5,7 +5,9 @@ import {
   getEvidenceForObservation,
   listProfileChanges,
   listProfileSnapshots,
+  loadCheckpoint,
   recordProfileSnapshot,
+  saveCheckpoint,
   users,
   type DatabaseHandle,
 } from "../src/index.js";
@@ -141,6 +143,72 @@ describe.runIf(available)("observations & evidence", () => {
     const bioChange = changes.find((c) => c.field === "bio");
     expect(bioChange?.oldValue).toBe("bio v1");
     expect(bioChange?.newValue).toBe("bio v2");
+  });
+
+  it("never diffs a snapshot against a different source's snapshot", async () => {
+    const first = await recordProfileSnapshot(handle.db, profileInput(0, 420, "bio v1"));
+    const otherRoute = profileInput(1, 60, "the aggregator says nothing about bio");
+    const second = await recordProfileSnapshot(handle.db, {
+      ...otherRoute,
+      evidence: {
+        ...otherRoute.evidence,
+        source: {
+          id: "anonstories:v1",
+          kind: SourceKind.PUBLIC_AGGREGATOR,
+          name: "anonstories v1",
+          providerVersion: "v1",
+        },
+      },
+    });
+    // A route switch is not an account change. Diffing across sources would
+    // write "bio removed" and "followers 420 -> 60" out of two populations that
+    // never claimed the same fields.
+    expect(second.deduplicated).toBe(false);
+    expect(second.changes).toEqual([]);
+    const crossSource = await listProfileChanges(handle.db, first.snapshot.igAccountId);
+    expect(crossSource.filter((c) => c.toSnapshotId === second.snapshot.id)).toEqual([]);
+
+    // The same source still diffs against itself.
+    const third = await recordProfileSnapshot(handle.db, profileInput(2, 700, "bio v1"));
+    expect(third.changes.some((c) => c.field === "followerCount")).toBe(true);
+  });
+
+  it("clears a stored page cursor only when the scan says to", async () => {
+    const { target } = await createTarget(handle.db, {
+      userId,
+      username: "checkpoint_target_a",
+    });
+    await saveCheckpoint(handle.db, {
+      targetId: target.id,
+      kind: "POSTS_SCAN",
+      cursor: "c2",
+      page: 3,
+      progress: { page: 3 },
+    });
+    // A save that omits the cursor must keep it: that is what lets a job
+    // reclaimed mid-listing resume where it stopped.
+    await saveCheckpoint(handle.db, {
+      targetId: target.id,
+      kind: "POSTS_SCAN",
+      page: 3,
+      progress: { page: 3 },
+    });
+    const kept = await loadCheckpoint(handle.db, target.id, "POSTS_SCAN");
+    expect(kept?.cursor).toBe("c2");
+
+    // A completed listing has no continuation. Leaving the tail cursor stored
+    // would make a later run of the same job resume from the last page and
+    // report COMPLETED after reading only the tail.
+    await saveCheckpoint(handle.db, {
+      targetId: target.id,
+      kind: "POSTS_SCAN",
+      cursor: null,
+      page: 0,
+      progress: { page: 0 },
+    });
+    const cleared = await loadCheckpoint(handle.db, target.id, "POSTS_SCAN");
+    expect(cleared?.page).toBe(0);
+    expect(cleared?.cursor ?? null).toBe(null);
   });
 
   it("never diffs a PARTIAL profile snapshot in either direction", async () => {

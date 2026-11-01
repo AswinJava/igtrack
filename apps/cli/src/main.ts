@@ -1,30 +1,26 @@
 import { loadProjectEnv } from "./env.js";
 import { VERSION as CLI_VERSION } from "./version.js";
-import { CliError, errorEnvelope, errorHint, isJson, parseArgs, type ParsedArgs } from "./output.js";
 import {
-  CONFIG_HELP,
-  DOCTOR_HELP,
-  runConfig,
-  runDoctor,
-  runSetup,
-  runStatus,
-  SETUP_HELP,
-  STATUS_HELP,
-} from "./commands/setup.js";
-import { AUDIT_HELP, runAudit } from "./commands/audit.js";
-import { INVESTIGATE_HELP, runInvestigate } from "./commands/investigate.js";
-import { PUBLIC_HELP, runPublic } from "./commands/public.js";
-import { POST_HELP, runPost } from "./commands/post.js";
-import { ANONSTORIES_HELP, runAnonstories } from "./commands/anonstories.js";
-import { VIEWER_HELP, runViewer } from "./commands/viewer.js";
-import { runTargets, TARGETS_HELP } from "./commands/targets.js";
-import { runScans, runWork, SCANS_HELP } from "./commands/scans.js";
+  CliError,
+  envelope,
+  errorEnvelope,
+  errorHint,
+  isJson,
+  parseArgs,
+  type OutputMeta,
+  type ParsedArgs,
+} from "./output.js";
+import { COMMAND_HELP, HELP } from "./help-registry.js";
+import { runConfig, runDoctor, runSetup, runStatus } from "./commands/setup.js";
+import { runAudit } from "./commands/audit.js";
+import { runInvestigate } from "./commands/investigate.js";
+import { runPublic } from "./commands/public.js";
+import { runPost } from "./commands/post.js";
+import { runAnonstories } from "./commands/anonstories.js";
+import { runViewer } from "./commands/viewer.js";
+import { runTargets } from "./commands/targets.js";
+import { runScans, runWork } from "./commands/scans.js";
 import {
-  CAPABILITIES_HELP,
-  DOSSIER_HELP,
-  INSIGHTS_HELP,
-  LOOKUP_HELP,
-  MENTION_HELP,
   runActivity,
   runCapabilities,
   runDossier,
@@ -34,18 +30,10 @@ import {
   runMention,
   runRelationships,
   runTags,
-  TAGS_HELP,
 } from "./commands/read.js";
-import { MCP_HELP, runMcp } from "./mcp/server.js";
-import { ASK_HELP, runAsk, runAskPrompt, runBare, runGuide } from "./commands/ask.js";
+import { runMcp } from "./mcp/server.js";
+import { runAsk, runAskPrompt, runBare, runGuide } from "./commands/ask.js";
 import {
-  ALERTS_HELP,
-  AUDIENCE_HELP,
-  DIGEST_HELP,
-  EXPORT_HELP,
-  RECENT_HELP,
-  REPORT_HELP,
-  REPORTS_HELP,
   runAlerts,
   runAudience,
   runDigest,
@@ -54,16 +42,9 @@ import {
   runReport,
   runReports,
 } from "./commands/report.js";
-import { ACTIVITY_REPORT_HELP, runActivityReport } from "./commands/activity-report.js";
-import { TRACKER_HELP, runTracker } from "./commands/tracker.js";
-import {
-  CLAIMS_HELP,
-  PLAN_HELP,
-  RESEARCH_HELP,
-  runClaims,
-  runPlan,
-  runResearch,
-} from "./commands/intel.js";
+import { runActivityReport } from "./commands/activity-report.js";
+import { runTracker } from "./commands/tracker.js";
+import { runClaims, runPlan, runResearch } from "./commands/intel.js";
 
 // ---------------------------------------------------------------------------
 // igtrack — the command line for a self-hosted, agent-driven observation engine.
@@ -76,317 +57,190 @@ import {
 
 const VERSION = CLI_VERSION;
 
-const HELP = `igtrack ${VERSION} — evidence-first Instagram observation engine (self-hosted)
+/** Verbs whose subcommand contract is also reachable as `<command> help`. */
+const SUBCOMMANDED = new Set(["targets", "scans", "claims"]);
 
-Usage: igtrack <command> [options]
-
-Getting started
-  setup                 Prepare this checkout: .env, Postgres, migrations, demo data
-  status                Owner, provider, targets, queue, source health
-  doctor                Diagnostic: provider usability, DB, scheduler, findings
-  config                Effective configuration with credentials redacted
-
-Ask anything (plain English)
-  ask "..."             One sentence in, one honest answer out
-  guide                 A plain-language tour with examples and limits
-  <anything else>       Treated as a prompt: igtrack "who is @aurora.wilde?"
-
-Track
-  targets <sub>         list | add | pause | resume | rm        (targets --help)
-  scans <sub>           run | list                              (scans --help)
-
-Observe
-  investigate <username>  One username in, one dossier out: every supported
-                           stage, what was retrieved, and what is still unknown
-  public <username>     Full logged-out public-page dossier: profile, links,
-                           highlights, every exposed post, and the gaps
-  post <post URL>       One post from its own permalink: caption, owner,
-                           counts, media, and what the page does not expose
-  anonstories <username>  Login-free stories, highlight contents and story
-                           mentions via a third-party aggregator; rows are
-                           PUBLIC_AGGREGATOR, never a platform observation
-  viewer <input>        Six-tab viewer report: stories, posts, reels,
-                           highlights, reposts, tagged — with every refusal
-  audit <username>      One evidence-honest report: config, probe, stored record
-                           --full collects first (archive history + every stage)
-  work                  Run the worker now: one scheduler tick + drain the queue
-  activity              What changed, newest first, with evidence ids
-  relationships <t>     Accounts ranked by observed signal, with provenance
-  dossier <target>      Everything recorded about one account, with its gaps
-  evidence              Evidence rows (audit trail) and --id chains
-  lookup <username>     Ask the source what it can observe, persisting nothing
-  insights <target>     Account metrics this deployment recorded, with absences
-  tags <target>         Media by other accounts this account is tagged in
-  mention <commentId>   Read one mentioned comment by id, persisting nothing
-
-Reports and exports
-  tracker [target]      Watchlist with each account's latest closed-period card
-  activity-report <target>  Four-tab Activity Report over stored rows
-  report <target>       One period composed from stored rows (Markdown; --out)
-  reports <target>      Recent periods and whether stored rows exist
-  audience <target>     Mutuals and one-way follows over COMPLETE rosters
-  recent <target>       New/lost follows since the stored baseline (first-seen)
-  export <target>       Stored rows as CSV/JSON (--kind; --out)
-  digest [target]       Short local change digest (--since; --out)
-  alerts [target]       Digest events as an idempotent local outbox (--out <dir>)
-
-Know the limits
-  capabilities          What can and cannot be observed, and exactly why
-
-Research (claims ledger; IGTrack stores, never generates)
-  claims <sub>          list | add | retract                       (claims --help)
-  research <target>     The full report: observations, claims, contradictions
-  plan <target>         The stateless next step for a goal, from stored state
-
-Agent surface
-  mcp                   stdio MCP server exposing every operation above as a tool
-
-Every command accepts --json and prints { ok, data, _meta }. \`_meta\` names the
-active provider and whether the data is synthetic — fixture data is never
-mistakable for a real observation.
-
-Run \`igtrack <command> --help\` for command-specific detail.`;
+/**
+ * `_meta` for a read of static CLI metadata. `provider: "none"` is deliberate:
+ * answering `help`/`version` must not construct a provider, so claiming one
+ * would be a lie about work that never happened.
+ */
+function staticMeta(note: string): OutputMeta {
+  return {
+    provider: "none",
+    sourceId: null,
+    synthetic: false,
+    production: process.env["NODE_ENV"] === "production",
+    studio: "cli",
+    generatedAt: new Date().toISOString(),
+    note,
+  };
+}
 
 function wantsHelp(args: ParsedArgs): boolean {
-  return args.flags["help"] === true || args.flags["h"] === true;
+  // Presence, not `=== true`: `igtrack targets --help list` parses the token
+  // after `--help` as its value, and a help request is never a value.
+  return args.flags["help"] !== undefined || args.flags["h"] !== undefined;
+}
+
+/**
+ * The registered command whose contract this call wants to read, if any.
+ * Resolution goes through the registry so `igtrack help <command>` and
+ * `igtrack <command> --help` cannot print two different contracts.
+ */
+function helpTopicRequested(args: ParsedArgs): string | undefined {
+  const subcommandHelp = args.positionals[0] === "help" && SUBCOMMANDED.has(args.command);
+  if (!(wantsHelp(args) || subcommandHelp)) return undefined;
+  return COMMAND_HELP[args.command] === undefined ? undefined : args.command;
+}
+
+function printHelp(topic: string, flags: Record<string, string | boolean>): number {
+  const text = COMMAND_HELP[topic];
+  const json = isJson(flags);
+  const meta = staticMeta("static CLI metadata: no provider was constructed, no source was contacted");
+  if (text === undefined) {
+    const message = `There is no igtrack command "${topic}". Run \`igtrack help\` for the list.`;
+    if (json) {
+      process.stderr.write(`${JSON.stringify(errorEnvelope("UNKNOWN_COMMAND", message), null, 2)}\n`);
+    } else {
+      process.stderr.write(`igtrack: ${message}\n`);
+    }
+    return 2;
+  }
+  if (json) {
+    process.stdout.write(`${JSON.stringify(envelope({ command: topic, help: text }, meta), null, 2)}\n`);
+    return 0;
+  }
+  process.stdout.write(`${text}\n`);
+  return 0;
+}
+
+function runHelpTopic(args: ParsedArgs): number {
+  const topic = args.positionals[0];
+  if (topic === undefined) {
+    if (isJson(args.flags)) {
+      process.stdout.write(
+        `${JSON.stringify(
+          envelope(
+            { commands: Object.keys(COMMAND_HELP), help: HELP },
+            staticMeta("static CLI metadata: no provider was constructed, no source was contacted"),
+          ),
+          null,
+          2,
+        )}\n`,
+      );
+      return 0;
+    }
+    process.stdout.write(`${HELP}\n`);
+    return 0;
+  }
+  // `igtrack help activity-report` and `igtrack help igtrack activity-report`
+  // are the same question; hyphens, underscores and casing are how people type
+  // a command name, not a different command.
+  const tokens = args.positionals.map((token) => token.trim().toLowerCase()).filter((t) => t !== "");
+  if (tokens[0] === "igtrack") tokens.shift();
+  const key = (tokens[0] ?? "").replace(/^igtrack\s+/, "").replace(/_/g, "-");
+  return printHelp(key, args.flags);
 }
 
 async function dispatch(args: ParsedArgs): Promise<number> {
+  const helpTopic = helpTopicRequested(args);
+  if (helpTopic !== undefined) return printHelp(helpTopic, args.flags);
+
   switch (args.command) {
     case "ask":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${ASK_HELP}\n`);
-        return 0;
-      }
       return runAsk(args);
     case "guide":
       return runGuide(args);
     case "setup":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${SETUP_HELP}\n`);
-        return 0;
-      }
       return runSetup(args);
     case "config":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${CONFIG_HELP}\n`);
-        return 0;
-      }
       return runConfig(args);
     case "audit":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${AUDIT_HELP}\n`);
-        return 0;
-      }
       return runAudit(args);
     case "investigate":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${INVESTIGATE_HELP}\n`);
-        return 0;
-      }
       return runInvestigate(args);
     case "public":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${PUBLIC_HELP}\n`);
-        return 0;
-      }
       return runPublic(args);
     case "post":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${POST_HELP}\n`);
-        return 0;
-      }
       return runPost(args);
     case "anonstories":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${ANONSTORIES_HELP}\n`);
-        return 0;
-      }
       return runAnonstories(args);
     case "viewer":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${VIEWER_HELP}\n`);
-        return 0;
-      }
       return runViewer(args);
     case "status":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${STATUS_HELP}\n`);
-        return 0;
-      }
       return runStatus(args);
     case "doctor":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${DOCTOR_HELP}\n`);
-        return 0;
-      }
       return runDoctor(args);
     case "targets":
-      if (wantsHelp(args) || args.positionals[0] === "help") {
-        process.stdout.write(`${TARGETS_HELP}\n`);
-        return 0;
-      }
       return runTargets(args);
     case "scans":
-      if (wantsHelp(args) || args.positionals[0] === "help") {
-        process.stdout.write(`${SCANS_HELP}\n`);
-        return 0;
-      }
       return runScans(args);
     case "work":
-      if (wantsHelp(args)) {
-        process.stdout.write(
-          "igtrack work [--max N] [--no-scheduler] [--json]\n\nRun the worker in the foreground: one scheduler tick, then claim and execute\nqueued jobs until the queue is empty or --max is reached. This acquires and\nstores observations; it does not compose reports.\n",
-        );
-        return 0;
-      }
       return runWork(args);
     case "activity":
-      if (wantsHelp(args)) {
-        process.stdout.write(
-          "igtrack activity [target] [--since 7d] [--limit N] [--json]\n\nWhat changed, newest first, with evidence ids. Covers every tracked target\nwhen none is named. Read-only: nothing is fetched, this is a report over\nstored observations.\n",
-        );
-        return 0;
-      }
       return runActivity(args);
     case "relationships":
-      if (wantsHelp(args)) {
-        process.stdout.write(
-          "igtrack relationships <target id|username> [--limit N]\n\nRank accounts by observed signal strength (story mentions, comment authorship\non owned media, follow deltas) against one tracked target, with\nmutual/observed state, first/last seen, the newest signal, and the stored rows\nbehind each count (--json includes them).\n",
-        );
-        return 0;
-      }
       return runRelationships(args);
     case "dossier":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${DOSSIER_HELP}\n`);
-        return 0;
-      }
       return runDossier(args);
     case "evidence":
-      if (wantsHelp(args)) {
-        process.stdout.write(
-          "igtrack evidence [--limit N] [--json]\nigtrack evidence --id <evidenceId>\n\nThe evidence ledger: hashes, source, observed vs captured time, and — for one\nrow — its full provenance chain.\n",
-        );
-        return 0;
-      }
       return runEvidence(args);
     case "lookup":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${LOOKUP_HELP}\n`);
-        return 0;
-      }
       return runLookup(args);
     case "tags":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${TAGS_HELP}\n`);
-        return 0;
-      }
       return runTags(args);
     case "mention":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${MENTION_HELP}\n`);
-        return 0;
-      }
       return runMention(args);
     case "insights":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${INSIGHTS_HELP}\n`);
-        return 0;
-      }
       return runInsights(args);
     case "tracker":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${TRACKER_HELP}\n`);
-        return 0;
-      }
       return runTracker(args);
     case "activity-report":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${ACTIVITY_REPORT_HELP}\n`);
-        return 0;
-      }
       return runActivityReport(args);
     case "report":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${REPORT_HELP}\n`);
-        return 0;
-      }
       return runReport(args);
     case "reports":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${REPORTS_HELP}\n`);
-        return 0;
-      }
       return runReports(args);
     case "audience":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${AUDIENCE_HELP}\n`);
-        return 0;
-      }
       return runAudience(args);
     case "recent":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${RECENT_HELP}\n`);
-        return 0;
-      }
       return runRecent(args);
     case "export":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${EXPORT_HELP}\n`);
-        return 0;
-      }
       return runExport(args);
     case "digest":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${DIGEST_HELP}\n`);
-        return 0;
-      }
       return runDigest(args);
     case "alerts":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${ALERTS_HELP}\n`);
-        return 0;
-      }
       return runAlerts(args);
     case "claims":
-      if (wantsHelp(args) || args.positionals[0] === "help") {
-        process.stdout.write(`${CLAIMS_HELP}\n`);
-        return 0;
-      }
       return runClaims(args);
     case "research":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${RESEARCH_HELP}\n`);
-        return 0;
-      }
       return runResearch(args);
     case "plan":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${PLAN_HELP}\n`);
-        return 0;
-      }
       return runPlan(args);
     case "capabilities":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${CAPABILITIES_HELP}\n`);
-        return 0;
-      }
       return runCapabilities(args);
     case "mcp":
-      if (wantsHelp(args)) {
-        process.stdout.write(`${MCP_HELP}\n`);
-        return 0;
-      }
       // No context is built here: the server resolves it lazily on first call
       // so a client can connect even while the database is down.
       await runMcp();
       return 0;
     case "help":
-    case "--help":
-      process.stdout.write(`${HELP}\n`);
-      return 0;
+      return runHelpTopic(args);
     case "version":
+      if (isJson(args.flags)) {
+        process.stdout.write(
+          `${JSON.stringify(
+            envelope(
+              { version: VERSION },
+              staticMeta("static CLI metadata: no provider was constructed, no source was contacted"),
+            ),
+            null,
+            2,
+          )}\n`,
+        );
+        return 0;
+      }
       process.stdout.write(`${VERSION}\n`);
       return 0;
     default: {
@@ -420,9 +274,9 @@ async function main(): Promise<void> {
     process.stdout.write(`${VERSION}\n`);
     return;
   }
-  // The web app is started by Next.js, which loads .env itself; the CLI and the
-  // worker are plain Node processes, so the CLI loads it explicitly. Existing
-  // environment variables always win.
+  // The CLI and the worker are plain Node processes, so the CLI loads .env
+  // explicitly; an MCP client that spawns this process gets the same behavior.
+  // Existing environment variables always win.
   const code = await dispatch(args);
   process.exitCode = code;
 }

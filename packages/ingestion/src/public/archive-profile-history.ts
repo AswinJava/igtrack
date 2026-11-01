@@ -113,9 +113,12 @@ function parseTimestamp(value: string): Date | null {
 }
 
 /** The archive may serve the stored bytes gzip-compressed without the header. */
-function decodeBody(body: Uint8Array): Uint8Array {
+function decodeBody(body: Uint8Array, maxOutputBytes: number): Uint8Array {
   if (body.length >= 2 && body[0] === 0x1f && body[1] === 0x8b) {
-    return new Uint8Array(gunzipSync(body));
+    // The compressed size is capped before this point, but a few kilobytes of
+    // gzip can still expand far past the cap, so the limit is applied to the
+    // decompressed output as well.
+    return new Uint8Array(gunzipSync(body, { maxOutputLength: maxOutputBytes }));
   }
   return body;
 }
@@ -185,14 +188,20 @@ async function readBounded(
   if (declared !== null) {
     const size = Number.parseInt(declared, 10);
     if (Number.isSafeInteger(size) && size > maxBytes) {
-      return { failure: `capture declares ${size} bytes, above the ${maxBytes}-byte cap` };
+      return { failure: `response declares ${size} bytes, above the ${maxBytes}-byte cap` };
     }
   }
   const buffer = await response.arrayBuffer();
   if (buffer.byteLength > maxBytes) {
-    return { failure: `capture is ${buffer.byteLength} bytes, above the ${maxBytes}-byte cap` };
+    return { failure: `response is ${buffer.byteLength} bytes, above the ${maxBytes}-byte cap` };
   }
-  return { bytes: decodeBody(new Uint8Array(buffer)) };
+  try {
+    return { bytes: decodeBody(new Uint8Array(buffer), maxBytes) };
+  } catch {
+    return {
+      failure: `response unpacked past the ${maxBytes}-byte cap, so its bytes were not read`,
+    };
+  }
 }
 
 /**
@@ -264,8 +273,17 @@ export async function fetchArchivedProfileHistory(
         reason: `The public archive index answered HTTP ${response.status}; this is a failure to look, not proof that no capture exists.`,
       };
     }
-    const body = await response.arrayBuffer();
-    const text = Buffer.from(body).toString("utf8").trim();
+    const index = await readBounded(response, maxBytes);
+    if ("failure" in index) {
+      return {
+        ...base,
+        state: "UNAVAILABLE",
+        reason:
+          `The public archive index was not read: ${index.failure}. ` +
+          "This is a failure to look, not proof that no capture exists.",
+      };
+    }
+    const text = Buffer.from(index.bytes).toString("utf8").trim();
     cdxPayload = text === "" ? [] : JSON.parse(text);
   } catch (err) {
     return {

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +38,14 @@ export class ChromeUnavailableError extends Error {
   }
 }
 
+/** The value handed to the browser was not a renderable page URL. */
+export class ChromeTargetRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChromeTargetRejectedError";
+  }
+}
+
 function candidateChromePaths(): string[] {
   const fromEnv = [process.env.IGTRACK_CHROME_PATH, process.env.CHROME_PATH].filter(
     (value): value is string => value !== undefined && value.trim() !== "",
@@ -69,10 +77,29 @@ function candidateChromePaths(): string[] {
   ];
 }
 
+/**
+ * An operator-supplied path is used as a process executable, so "a file that
+ * happens to exist" is not enough to call it a browser — the name has to claim
+ * one too. This is a shape check on a setting the operator already controls,
+ * not a sandbox: it keeps a mistyped or mis-wired value from launching an
+ * unrelated binary with our profile directory.
+ */
+const BROWSER_NAME_RE = /(chrome|chromium|msedge|edge|brave|vivaldi)/i;
+
+function looksLikeBrowserExecutable(value: string): boolean {
+  const name = value.replace(/\\/g, "/").split("/").pop() ?? "";
+  if (!BROWSER_NAME_RE.test(name)) return false;
+  try {
+    return statSync(value).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /** The first installed Chrome/Chromium/Edge binary, or undefined. */
 export function findChrome(executablePath?: string): string | undefined {
   if (executablePath !== undefined && executablePath.trim() !== "") {
-    return existsSync(executablePath) ? executablePath : undefined;
+    return looksLikeBrowserExecutable(executablePath) ? executablePath : undefined;
   }
   for (const candidate of candidateChromePaths()) {
     if (candidate !== "" && existsSync(candidate)) return candidate;
@@ -92,6 +119,40 @@ interface ChromeResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+}
+
+/**
+ * The target is appended to Chrome's argument list, so this is the last place
+ * that can refuse before a browser process exists: a value starting with a dash
+ * would be read as a Chrome flag, and a non-http scheme would point the browser
+ * at the local filesystem. Callers build these URLs from a fixed host, which is
+ * why the check is cheap rather than clever.
+ */
+function assertRenderableTarget(url: string): void {
+  if (url.trim() === "") {
+    throw new ChromeTargetRejectedError("Chrome was asked to render an empty URL, so no page was loaded.");
+  }
+  if (url.startsWith("-")) {
+    throw new ChromeTargetRejectedError(
+      `"${url.slice(0, 80)}" starts with a dash and would be read as a Chrome flag, so it was refused.`,
+    );
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new ChromeTargetRejectedError(
+      `"${url.slice(0, 80)}" is not an absolute URL, so no page was loaded.`,
+    );
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new ChromeTargetRejectedError(
+      `Only http(s) pages are rendered; "${parsed.protocol}" was refused and no page was loaded.`,
+    );
+  }
+  if (parsed.hostname === "") {
+    throw new ChromeTargetRejectedError(`"${url.slice(0, 80)}" names no host, so it was refused.`);
+  }
 }
 
 function runChrome(
@@ -147,8 +208,14 @@ function runChrome(
 export async function dumpDom(url: string, options: ChromeRunOptions = {}): Promise<string> {
   const executablePath = findChrome(options.executablePath);
   if (executablePath === undefined) {
-    throw new ChromeUnavailableError(chromeUnavailableMessage());
+    throw new ChromeUnavailableError(
+      options.executablePath !== undefined && options.executablePath.trim() !== ""
+        ? `"${options.executablePath.trim()}" is not a Chrome/Chromium/Edge executable, so no page was loaded. ` +
+          "Point --chrome (or IGTRACK_CHROME_PATH) at the browser binary itself."
+        : chromeUnavailableMessage(),
+    );
   }
+  assertRenderableTarget(url);
   const timeoutMs = options.timeoutMs ?? 60_000;
   const budget = options.virtualTimeBudgetMs ?? 4_000;
   const profileDir = mkdtempSync(join(tmpdir(), "igtrack-chrome-"));

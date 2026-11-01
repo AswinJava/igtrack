@@ -177,12 +177,19 @@ export async function recordProfileSnapshot(
       return { snapshot: racedRow, changes: [], deduplicated: true };
     }
 
+    // The baseline is source-scoped for the same reason the roster diff is
+    // (see latestFollowSnapshot): a diff answers "what changed between two
+    // readings of the SAME source". Synthetic, live and aggregator profiles
+    // carry different field sets, so comparing them would manufacture changes
+    // — "bio removed", "followers 12300 -> 12000" — that only record that the
+    // route changed.
     const previousRows = await tx
       .select()
       .from(profileSnapshots)
       .where(
         and(
           eq(profileSnapshots.igAccountId, account.id),
+          eq(profileSnapshots.sourceId, input.evidence.source.id),
           lt(profileSnapshots.observedAt, observedAt),
         ),
       )

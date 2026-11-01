@@ -391,11 +391,11 @@ export async function recordSchedulerTickFailure(
     await db.execute(sql`
       INSERT INTO scheduler_state (id, last_tick_at, last_error, updated_at)
       VALUES (${SCHEDULER_STATE_ID}, ${at.toISOString()},
-              jsonb_build_object('message', ${error.message}, 'failedAt', ${error.failedAt}),
+              jsonb_build_object('message', ${error.message}::text, 'failedAt', ${error.failedAt}::text),
               now())
       ON CONFLICT (id) DO UPDATE
       SET last_tick_at = ${at.toISOString()},
-          last_error = jsonb_build_object('message', ${error.message}, 'failedAt', ${error.failedAt}),
+          last_error = jsonb_build_object('message', ${error.message}::text, 'failedAt', ${error.failedAt}::text),
           updated_at = now()
     `);
   } catch {

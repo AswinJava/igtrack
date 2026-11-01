@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createDb,
   createTarget,
+  recordFollowSnapshot,
   recordProfileSnapshot,
   runMigrations,
   seed,
@@ -682,12 +683,55 @@ describe.skipIf(!databaseUp)("periodic report surfaces", () => {
     expect(recent.evidence).toEqual({ sourceIds: ["fixture:v1"], evidenceClass: "SYNTHETIC" });
     expect(recent.notes.join(" ")).toContain("not the Instagram follow time");
 
-    // A window after the deltas is a computed empty answer, not a missing one.
+    // The seed's newest COMPLETE roster predates this window, so an empty
+    // result here means "nothing was looked at", never "nothing changed".
     const empty = await opRecent(ctx, { target: SEEDED_USERNAME, since: "2026-08-23" });
     expect(empty.state).toBe("EMPTY");
     expect(empty.rows).toEqual([]);
     expect(empty.counts.total).toBe(0);
-    expect(empty.notes.join(" ")).toContain("computed empty answer");
+    expect(empty.notes.join(" ")).toContain("nothing observed between the reads");
+    expect(empty.notes.join(" ")).not.toContain("computed empty answer");
+
+    // The same silence is only a computed no-change when a COMPLETE roster was
+    // actually re-read inside the window.
+    const probe = await opTargetAdd(ctx, { username: "probe.roster.quiet" });
+    const seen = [
+      new Date("2026-08-21T18:00:00.000Z"),
+      new Date("2026-08-25T18:00:00.000Z"),
+    ];
+    for (const takenAt of seen) {
+      await recordFollowSnapshot(handle.db, {
+        targetId: probe.id,
+        direction: "FOLLOWING",
+        source: { id: "fixture:v1", kind: SourceKind.FIXTURE, name: "Fixture v1" },
+        takenAt,
+        page: {
+          entries: [{ username: "probe_roster_alpha" }, { username: "probe_roster_beta" }],
+          complete: true,
+          meta: {
+            category: ObservationCategory.OBSERVED,
+            confidence: Confidence.HIGH,
+            observedAt: takenAt.toISOString(),
+          },
+        },
+      });
+    }
+
+    const reread = await opRecent(ctx, {
+      target: "probe.roster.quiet",
+      direction: "following",
+      since: "2026-08-25",
+    });
+    expect(reread.state).toBe("EMPTY");
+    expect(reread.notes.join(" ")).toContain("computed empty answer");
+
+    const staleWindow = await opRecent(ctx, {
+      target: "probe.roster.quiet",
+      direction: "following",
+      since: "2026-08-26",
+    });
+    expect(staleWindow.state).toBe("EMPTY");
+    expect(staleWindow.notes.join(" ")).toContain("nothing observed between the reads");
 
     // The follower side has no COMPLETE roster in the seed: unavailable, with
     // null counts instead of zeros.

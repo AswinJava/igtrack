@@ -287,3 +287,49 @@ describe("planAsk: exports and digests", () => {
     expect(plan.assumptions).toContain("No window was given, so the digest covers the last 7 days.");
   });
 });
+
+// A plan is executed step by step, so a sentence that scores as two intents
+// runs both. These pin the two ways that went wrong: an untrack request that
+// also carried the add (creating the target the operator had just asked to
+// remove), and a question about the list that was routed into the write intent.
+// Both survived every database-free test, because with no connection the write
+// step is skipped — they only show up against a real database.
+describe("planAsk: a plan never contains the opposite of the request", () => {
+  it("asking to stop tracking plans only the removal", () => {
+    for (const prompt of [
+      "stop tracking @aurora.wilde",
+      "remove @aurora.wilde from tracking",
+      "untrack @aurora.wilde",
+      "delete @aurora.wilde",
+    ]) {
+      const plan = planAsk(prompt);
+      expect(plan.intents, prompt).toEqual(["untrack"]);
+      expect(plan.primary, prompt).toBe("untrack");
+      expect(plan.executable, prompt).toBe(false);
+    }
+  });
+
+  it("a question about the tracked list is the list, not the add", () => {
+    for (const prompt of [
+      "which accounts are tracked?",
+      "what am I tracking",
+      "how many accounts do you track?",
+      "who am I tracking",
+      "list the tracked accounts",
+    ]) {
+      const plan = planAsk(prompt);
+      expect(plan.primary, prompt).toBe("targets");
+      expect(plan.intents, prompt).not.toContain("track");
+      expect(plan.needsUsername, prompt).toBe(false);
+    }
+  });
+
+  it("a real add is still an add, and a write named beside a read still runs", () => {
+    expect(planAsk("track @aurora.wilde").intents).toContain("track");
+    expect(planAsk("add @new.one to tracking").primary).toBe("track");
+    expect(planAsk("start tracking @aurora.wilde").intents).toContain("track");
+    expect(planAsk("track @aurora.wilde and scan it").intents).toEqual(
+      expect.arrayContaining(["track", "scan"]),
+    );
+  });
+});

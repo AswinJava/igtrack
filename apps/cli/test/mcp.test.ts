@@ -100,18 +100,72 @@ describe("igtrack mcp", () => {
     }
   });
 
-  it("answers a database-free tool without touching the database", async () => {
+  it("answers a database-free tool in the same envelope as every other tool", async () => {
     const { client, close } = await connect();
     try {
       const result = await client.callTool({ name: "igtrack_capabilities", arguments: {} });
       expect(result.isError).toBeFalsy();
       const text = (result.content as Array<{ text: string }>)[0]?.text ?? "";
       const payload = JSON.parse(text) as {
-        capabilities: unknown[];
-        summary: { available: number; total: number };
+        ok: boolean;
+        data: { capabilities: unknown[]; summary: { available: number; total: number } };
+        _meta: { provider: string; sourceId: string | null; synthetic: boolean; studio: string; note: string };
       };
-      expect(payload.capabilities.length).toBe(payload.summary.total);
-      expect(payload.summary.available).toBeGreaterThan(0);
+      // One contract for every tool: a client that parses { ok, data, _meta }
+      // must not need a special case for the registry.
+      expect(payload.ok).toBe(true);
+      expect(payload.data.capabilities.length).toBe(payload.data.summary.total);
+      expect(payload.data.summary.available).toBeGreaterThan(0);
+      // The registry is a static product statement: it is not synthetic data,
+      // it comes from no provider, and it was answered over MCP.
+      expect(payload._meta.synthetic).toBe(false);
+      expect(payload._meta.sourceId).toBeNull();
+      expect(payload._meta.studio).toBe("mcp");
+      expect(payload._meta.note).toMatch(/independent of the active data source/i);
+    } finally {
+      await close();
+    }
+  });
+
+  it("refuses an argument the tool never declared instead of ignoring it", async () => {
+    const { client, close } = await connect();
+    try {
+      // A client that invents a filter must be told it did not apply. Silently
+      // dropping the key returns the unfiltered report as if the filter worked.
+      const result = await client.callTool({
+        name: "igtrack_activity_report",
+        arguments: { target: "aurora.wilde", tab: "podcast" },
+      });
+      expect(result.isError).toBe(true);
+      expect(errCode(result)).toBeNull(); // refused at the schema, handler never ran
+
+      const tools = await client.listTools();
+      const report = tools.tools.find((t) => t.name === "igtrack_activity_report");
+      expect((report?.inputSchema as { additionalProperties?: unknown }).additionalProperties).toBe(
+        false,
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("states the MCP surface as the studio on every tool result", async () => {
+    const { client, close } = await connect();
+    try {
+      const result = await client.callTool({ name: "igtrack_status", arguments: {} });
+      expect(result.isError).toBe(true); // database is unreachable in this suite
+      // A refusal still says which surface answered it.
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? "";
+      expect(text).toContain("DB_UNAVAILABLE");
+
+      const answer = await client.callTool({
+        name: "igtrack_ask",
+        arguments: { prompt: "what can you do?" },
+      });
+      const payload = JSON.parse((answer.content as Array<{ text: string }>)[0]?.text ?? "") as {
+        _meta: { studio: string };
+      };
+      expect(payload._meta.studio).toBe("mcp");
     } finally {
       await close();
     }

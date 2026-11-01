@@ -75,18 +75,19 @@ function resolveRosterDir(importDir: string): string {
   );
 }
 
-// followers_1.json, followers_2.json … in natural numeric order; a bare
-// followers.json (single-file export) sorts as the first page.
+// Instagram splits BOTH sides of the roster when a list is long: followers_1.json,
+// followers_2.json … and following_1.json, following_2.json … A bare
+// followers.json / following.json is the single-file export of a smaller
+// account. Reading only the bare name for one direction made an owner with more
+// than one following shard hear "your export has no following file" while the
+// files sat in front of the reader.
 function rosterFiles(dir: string, direction: "followers" | "following"): string[] {
-  if (direction === "following") {
-    return readdirSync(dir).filter((f) => f === "following.json").sort();
-  }
   const numbered: Array<{ file: string; n: number }> = [];
   let bare: string | undefined;
   for (const f of readdirSync(dir)) {
-    if (f === "followers.json") bare = f;
+    if (f === `${direction}.json`) bare = f;
     else {
-      const m = /^followers_(\d+)\.json$/.exec(f);
+      const m = new RegExp(`^${direction}_(\\d+)\\.json$`).exec(f);
       if (m !== null) numbered.push({ file: f, n: Number(m[1]) });
     }
   }
@@ -265,7 +266,7 @@ export class ImportProvider implements InstagramProvider {
         return unavailable(
           meta,
           `No ${direction} file in ${this.rosterDir} (expected ` +
-            `${direction === "followers" ? "followers_1.json" : "following.json"} under ` +
+            `${direction}_1.json or a single ${direction}.json under ` +
             "connections/followers_and_following). Re-download the Instagram export " +
             `with the ${direction} section selected.`,
         );

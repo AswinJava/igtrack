@@ -367,7 +367,10 @@ describe.skipIf(!databaseUp)("research acquisition engine (opResearchRun)", () =
     expect(out.search.unavailableReason).toMatch(/IGTRACK_RESEARCH_SEARCH_API_KEY/);
     expect(out.totals.planned).toBe(0);
     expect(calls).toHaveLength(0);
-    expect(out.status).toBe("COMPLETED");
+    // A run that could not look is not a run that found nothing. This used to
+    // report COMPLETED with an empty document list, which let `investigate`
+    // render the web stage as finished on the strength of a refusal.
+    expect(out.status).toBe("FAILED");
     expect(out.notes.some((n) => n.includes("No sources were available to this run"))).toBe(true);
     expect(out.notes.some((n) => n.includes("will not invent sources"))).toBe(true);
   });

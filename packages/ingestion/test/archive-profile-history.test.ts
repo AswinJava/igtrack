@@ -244,6 +244,69 @@ describe("archived profile count history", () => {
     expect(result.reason).toContain("not a valid Instagram username");
   });
 
+  it("refuses to buffer an oversized archive index", async () => {
+    // The index is read under the same cap as a capture. A lying Content-Length
+    // must not turn "bounded read" into "buffer the whole response and check
+    // afterwards" — the body is refused, and the refusal says so.
+    const big = cdx(
+      Array.from({ length: 200 }, (_, i): [string, string] => [
+        `202601010000${String(i).padStart(2, "0")}`,
+        "https://www.instagram.com/small.account/",
+      ]),
+    );
+    let servedBytes = 0;
+    const result = await fetchArchivedProfileHistory(USERNAME, {
+      now: NOW,
+      maxBytes: 64,
+      fetchImpl: async () => ({
+        status: 200,
+        headers: { get: (name: string) => (name.toLowerCase() === "content-length" ? "8" : null) },
+        arrayBuffer: async () => {
+          const bytes = new TextEncoder().encode(big);
+          servedBytes = bytes.byteLength;
+          const copy = new Uint8Array(bytes);
+          return copy.buffer as ArrayBuffer;
+        },
+      }),
+    });
+
+    expect(servedBytes).toBeGreaterThan(64);
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(result.reason).toContain("index was not read");
+    expect(result.reason).toContain("above the 64-byte cap");
+    expect(result.reason).toContain("failure to look");
+    expect(result.consultedUrls).toHaveLength(1);
+  });
+
+  it("refuses a capture that unpacks past the cap rather than decompressing it whole", async () => {
+    // A few hundred stored bytes can expand far past the cap. The size check on
+    // the compressed body cannot see that, so the cap is applied to the
+    // decompressed output too — and the capture is skipped, never guessed at.
+    const capture =
+      "https://web.archive.org/web/20261010120000id_/https://www.instagram.com/small.account/";
+    const packed = new Uint8Array(
+      gzipSync(Buffer.from(page(USERNAME, { followers: 270, following: 305, posts: 40 }).repeat(4000))),
+    );
+    const plan = transport({
+      cdx: cdx([["20261010120000", "https://www.instagram.com/small.account/"]]),
+      captures: { [capture]: response(packed, { contentLength: String(packed.byteLength) }) },
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, {
+      now: NOW,
+      maxBytes: 4096,
+      fetchImpl: plan.fetchImpl,
+    });
+
+    // Under the cap stored, far past it unpacked: only the output limit sees this.
+    expect(packed.byteLength).toBeLessThan(4096);
+    expect(result.capturesFound).toBe(1);
+    expect(result.capturesRead).toBe(1);
+    expect(result.capturesFailed).toBe(1);
+    expect(result.points).toEqual([]);
+    expect(result.notes.join(" ")).toContain("unpacked past the 4096-byte cap");
+  });
+
   it("names its source id so evidence rows stay distinguishable", () => {
     expect(ARCHIVE_PROFILE_SOURCE_ID).toBe("archive:wayback:v1");
   });

@@ -47,3 +47,7 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Hallmark design scratch: before records, draw logs and render screenshots
+.hallmark/
+docs/.hallmark/

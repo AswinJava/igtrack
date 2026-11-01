@@ -2,7 +2,7 @@ import type { CapabilityName } from "./provider.js";
 
 // ---------------------------------------------------------------------------
 // Capability registry (§21-feed): the single machine-readable map from
-// product capability → provider contract → persistence → UI, plus the
+// product capability → provider contract → persistence → CLI/MCP surface, plus the
 // educational notes (§32-feed) that explain HOW each capability works, WHY an
 // unavailable one is unavailable, and WHAT would unlock it. Diagnostics
 // renders this registry with live status; a consistency test pins that every
@@ -95,7 +95,12 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["resolveAccount", "getProfile"],
     permissions: "Public account; graph observes the owned account only.",
     persistence: ["igAccounts", "profileSnapshots", "profileChanges", "evidence"],
-    ui: ["/targets/[id] (overview)", "/lookup", "POST /api/targets/lookup"],
+    ui: [
+      "igtrack lookup <username> (CLI: probe, persists nothing)",
+      "igtrack dossier <target> (CLI: profile block and snapshot history)",
+      "igtrack public <username> (CLI: logged-out public profile read)",
+      "igtrack_lookup / igtrack_dossier / igtrack_public (MCP tools)",
+    ],
     howItWorks:
       "resolveAccount maps a username to a stable account reference; getProfile returns a normalized profile that is appended to profile_snapshots (never overwritten). The adapter requests only documented IG User fields, including website, which maps to externalUrl. Field-level diffs against the previous snapshot become DERIVED profile_changes rows, each backed by an evidence row.",
     whyUnavailable: null,
@@ -110,7 +115,11 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getProfile"],
     permissions: "Same as PROFILE.",
     persistence: ["profileSnapshots"],
-    ui: ["/targets/[id] (overview)", "/targets (cards)", "/lookup"],
+    ui: [
+      "igtrack dossier <target> (CLI: counts with first-observed time and source)",
+      "igtrack tracker [target] (CLI: latest closed-period card)",
+      "igtrack_lookup / igtrack_dossier / igtrack_tracker (MCP tools)",
+    ],
     howItWorks:
       "Counts ride inside profile snapshots, so every count has a timestamp, a source, and a history. A missing count renders as unavailable, never zero — zero is a real observation of absence, only valid when the provider returns it.",
     whyUnavailable: null,
@@ -126,7 +135,11 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     permissions:
       "Owned professional account only. The documented IG User insights edge; Standard Access covers an app used solely by the account's owner (Meta, 2026-06-30). No App Review for own-account observation.",
     persistence: ["insightPoints", "evidence"],
-    ui: ["igtrack insights (CLI)", "insights (MCP tool)"],
+    ui: [
+      "igtrack insights <target> (CLI)",
+      "igtrack export <target> --kind insights (CLI)",
+      "igtrack_insights / igtrack_export (MCP tools)",
+    ],
     howItWorks:
       "Each INSIGHTS_SCAN calls the documented IG User insights edge once for a fixed, docs-pinned metric set: daily time series for follower_count, reach, views, accounts_engaged and total_interactions, plus follower_demographics (country breakdown) as a lifetime total_value point-in-time snapshot. Points are appended to insight_points (append-only), so repeated scans build the history the native 90-day window deletes and the demographic time line the API itself cannot produce (demographics are a current-state snapshot, never a series). A metric the platform does not return becomes an ABSENCE row with the documented reason (below 100 followers, 48 h demographic delay) — never a zero.",
     whyUnavailable: null,
@@ -146,7 +159,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
       "igtrack lookup (CLI)",
       "igtrack dossier (CLI)",
       "igtrack targets add --observed (CLI)",
-      "lookup / dossier / igtrack_target_add (MCP tools)",
+      "igtrack_lookup / igtrack_dossier / igtrack_target_add (MCP tools)",
     ],
     howItWorks:
       "Two intents, one edge. `lookup` is a probe, not a record: it renders the public profile fields plus the bounded recent-media preview and persists nothing — a probe is not a claim of record. Recording is operator-directed: `targets add <username> --observed` probes the route once, refuses on UNAVAILABLE with the platform's reason (a target that can never be scanned is not created), and creates a DISCOVERY target; DISCOVERY_SCAN then stores the documented profile fields as a COMPLETE, diffable snapshot and the media preview as posts rows. The preview is capped by the edge and cannot page (cap 12, DISCOVERY_MEDIA_PREVIEW_LIMIT): the cap is written into every media row's evidence, the scan completes as COMPLETED_PARTIAL, and no surface may call those rows the account's post history. Media rows carry the platform's published time and our first-observation time as separate fields. No documented route returns another account's media comments — that stays UNAVAILABLE with a reason.",
@@ -162,7 +175,13 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getStories"],
     permissions: "Public account stories; graph returns the owned account's tray.",
     persistence: ["stories", "storySightings", "evidence"],
-    ui: ["/targets/[id] (stories tab)"],
+    ui: [
+      "igtrack viewer <target> --tab story (CLI)",
+      "igtrack activity --type STORY_POSTED (CLI)",
+      "igtrack export <target> --kind stories (CLI)",
+      "igtrack_viewer / igtrack_activity / igtrack_export (MCP tools)",
+      "igtrack anonstories <username> (CLI: PUBLIC_AGGREGATOR rows, never a platform story)",
+    ],
     howItWorks:
       "Each scan appends new stories and records a sighting row for every story still present, so first-seen, last-seen, and observable duration are derived from evidence, not guessed. Stories expire after ~24h: a story missing from later scans is EXPIRED, never deleted-history.",
     whyUnavailable: null,
@@ -177,9 +196,13 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getStories"],
     permissions: "Same as STORIES. Graph exposes id, timestamp, media type, and one caption only.",
     persistence: ["stories"],
-    ui: ["/targets/[id] (stories tab)", "evidence chain"],
+    ui: [
+      "igtrack viewer <target> --tab story (CLI: persisted fields only)",
+      "igtrack evidence <target> (CLI: source, observed time, confidence)",
+      "igtrack_evidence_chain (MCP tool)",
+    ],
     howItWorks:
-      "Caption (at most one per story, per provider docs), expiry, duration, link, stickers, poll, question, location, and music persist when the provider supplies them (fixture) and stay null when it does not (graph). The UI renders persisted fields only — absence is shown as absence.",
+      "Caption (at most one per story, per provider docs), expiry, duration, link, stickers, poll, question, location, and music persist when the provider supplies them (fixture) and stay null when it does not (graph). Every surface renders persisted fields only — absence is shown as absence.",
     whyUnavailable: null,
     unlock: "Graph story objects would need richer read fields; until then the degraded path is explicit.",
     liveState: "NOT_VERIFIED",
@@ -192,9 +215,14 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getStories"],
     permissions: "Same as STORIES. Only provider-exposed mentions are stored.",
     persistence: ["storyMentions", "evidence"],
-    ui: ["/targets/[id] (stories tab)", "/relationships"],
+    ui: [
+      "igtrack viewer <target> --tab story (CLI: mention badges per story)",
+      "igtrack activity --type MENTION_OBSERVED (CLI)",
+      "igtrack export <target> --kind mentions (CLI)",
+      "igtrack_viewer / igtrack_activity / igtrack_export (MCP tools)",
+    ],
     howItWorks:
-      "Mentions normalize to username, optional platform id, geometry, and a visibility class (VISIBLE, POSSIBLY_HIDDEN, OFF_CANVAS, METADATA_ONLY, UNKNOWN). Geometry describes where the provider placed the sticker; it is never proof of intent to hide, and the UI says so.",
+      "Mentions normalize to username, optional platform id, geometry, and a visibility class (VISIBLE, POSSIBLY_HIDDEN, OFF_CANVAS, METADATA_ONLY, UNKNOWN). Geometry describes where the provider placed the sticker; it is never proof of intent to hide, and every surface says so.",
     whyUnavailable: null,
     unlock: null,
     liveState: "NOT_VERIFIED",
@@ -207,7 +235,10 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getStories"],
     permissions: "Same as STORIES. Reads only mentions the provider already exposed.",
     persistence: ["storyMentions", "evidence"],
-    ui: ["/targets/[id] (stories tab, hidden-mention roll-up with /lookup?username= pivot)"],
+    ui: [
+      "igtrack viewer <target> --mention <username> (CLI: hidden-class roll-up)",
+      "igtrack_viewer (MCP tool: mention argument)",
+    ],
     howItWorks:
       "A pure read-side aggregation over stored story_mentions rows: per mentioned account, how many distinct stories named it, how many of those named it through a class that did not establish on-canvas rendering (POSSIBLY_HIDDEN, OFF_CANVAS, METADATA_ONLY), and which story ids those were. It fetches nothing, adds no provider method, and writes no new table. Merging is case-insensitive and per story, so one story naming an account twice counts once but stays hidden if any of its rows was hidden-class. UNKNOWN is deliberately excluded from the hidden classes: a missing visibility signal is absence of evidence, never a finding, and a classification is never proof of intent to hide.",
     whyUnavailable: null,
@@ -226,9 +257,11 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     ui: [
       "igtrack tags (CLI)",
       "igtrack_tags (MCP tool)",
-      "igtrack tracker <target> (tagged count and evidence)",
-      "dossier counts (taggedMedia)",
-      "activity timeline (TAG_OBSERVED)",
+      "igtrack tracker <target> (CLI: tagged count and evidence)",
+      "igtrack dossier <target> (CLI: tagged-media count)",
+      "igtrack activity --type TAG_OBSERVED (CLI)",
+      "igtrack export <target> --kind tagged (CLI)",
+      "igtrack_tracker / igtrack_dossier / igtrack_activity / igtrack_export (MCP tools)",
     ],
     howItWorks:
       "TAGS_SCAN pages the documented tags edge (cursor paging, hard page cap, lease renewal between pages) and stores one append-only row per (account, media, source) with first-observation-wins semantics: a re-scan never rewrites a stored observation, no removal is ever claimed (another account's edit history is not an observation stream), and the rows are never rendered as the account's own media nor diffed against the posts table. Each scan records one scan-keyed evidence row carrying the completeness of that listing; a capped or truncated listing completes PARTIAL and says so — never 'these are all the tags'. The tags edge is a reference listing: it answers 'this account appears tagged in that media', which is a fact about the media owner as much as about this account.",
@@ -266,11 +299,12 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     permissions: "Would require an official highlights edge.",
     persistence: [],
     ui: [
-      "/targets/[id] (highlights tab shows UNAVAILABLE with reason)",
-      "igtrack tracker <target> (highlights KPI refused with reason)",
+      "igtrack viewer <target> --tab highlights (CLI: refuses with reason)",
+      "igtrack tracker <target> (CLI: highlights KPI refused with reason)",
+      "igtrack_viewer / igtrack_tracker (MCP tools)",
     ],
     howItWorks:
-      "There is no provider method, table, pipeline, or UI beyond the honest unavailable state — by decision, not oversight.",
+      "There is no provider method, table, pipeline, or surfaced data beyond the honest UNAVAILABLE state — by decision, not oversight.",
     whyUnavailable:
       "The Instagram Graph API exposes no highlights edge (the exhaustive IG User edge list has none; the stories edge returns last-24h stories only). The only known alternative is the undocumented private reels_media endpoint, which this project forbids: no private endpoints, no session use, no access-control circumvention.",
     unlock:
@@ -285,7 +319,13 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getPublicPosts"],
     permissions: "Public account media; graph returns the owned account's media.",
     persistence: ["posts", "postPresence", "postChanges", "evidence"],
-    ui: ["/targets/[id] (content tab)"],
+    ui: [
+      "igtrack viewer <target> --tab post (CLI)",
+      "igtrack report <target> (CLI)",
+      "igtrack activity --type POST_PUBLISHED|POST_EDITED|POST_REMOVED (CLI)",
+      "igtrack export <target> --kind posts (CLI)",
+      "igtrack_viewer / igtrack_report / igtrack_activity / igtrack_export (MCP tools)",
+    ],
     howItWorks:
       "Listings paginate with opaque cursors; the executor persists a checkpoint per page, resumes after crashes, stops on duplicate cursors (PARTIAL, never a loop), and records idempotently. The provider shortcode is preferred with permalink parsing as fallback. A page without a cursor is a complete listing. For OWNED targets each scan also records media change state: the caption as last read per post, a CAPTION_EDITED event when a caption read differs from the caption last read, and — only when the media listing completed — a NO_LONGER_OBSERVED event for posts absent from that complete listing ('no longer observed', never 'deleted'). DISCOVERY previews are never diffed.",
     whyUnavailable: null,
@@ -300,7 +340,11 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getPublicPosts"],
     permissions: "Same as POSTS. media_product_type is Facebook-Login-only.",
     persistence: ["posts"],
-    ui: ["/targets/[id] (content tab, Reel label)"],
+    ui: [
+      "igtrack viewer <target> --tab reels (CLI)",
+      "igtrack export <target> --kind posts (CLI: rows carry the provider-declared product type)",
+      "igtrack_viewer / igtrack_export (MCP tools)",
+    ],
     howItWorks:
       "A post is labeled Reel only when the provider declares media_product_type REELS. Untyped items render as posts — classification is never inferred from appearance, duration, or dimensions.",
     whyUnavailable: null,
@@ -315,12 +359,16 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getPublicPosts", "getPostChildren"],
     permissions: "Same as POSTS. Per-child detail comes from the dedicated children edge.",
     persistence: ["posts", "postChildren"],
-    ui: ["/targets/[id] (content tab, Carousel label plus per-child rows)"],
+    ui: [
+      "igtrack viewer <target> --tab post (CLI: Carousel label)",
+      "igtrack dossier <target> (CLI: carousel-post and child counts)",
+      "igtrack_viewer / igtrack_dossier (MCP tools)",
+    ],
     howItWorks:
-      "A post is labeled Carousel only when the provider declares media_type CAROUSEL_ALBUM. The POSTS_SCAN executor then expands provider-declared carousels through the dedicated children edge (isolated per album, so a children failure degrades the scan to partial without endangering the parent post) and persists items in provider order to post_children, rendered as child rows. Fixture v1 ships no child source, so fixture carousels stay childless by fixture design.",
+      "A post is labeled Carousel only when the provider declares media_type CAROUSEL_ALBUM. The POSTS_SCAN executor then expands provider-declared carousels through the dedicated children edge (isolated per album, so a children failure degrades the scan to partial without endangering the parent post) and persists items in provider order to post_children, read back as child counts and per-post children in the dossier. Fixture v1 ships no child source, so fixture carousels stay childless by fixture design.",
     whyUnavailable: null,
     unlock:
-      "Live verification of the children edge under this integration's credentials; the pipeline, tables, and UI are already in place.",
+      "Live verification of the children edge under this integration's credentials; the pipeline, tables, and CLI/MCP surfaces are already in place.",
     liveState: "NOT_VERIFIED",
     liveEvidence:
       "Implemented end-to-end and covered by mocked-edge tests, but the live children edge has never been observed (no credentials). The edge itself is a documented public IG Media edge.",
@@ -331,7 +379,11 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getPublicComments"],
     permissions: "Comments on observable media.",
     persistence: ["postComments", "evidence"],
-    ui: ["/targets/[id] (content tab, per-post threads)"],
+    ui: [
+      "igtrack export <target> --kind comments (CLI)",
+      "igtrack activity --type COMMENT_POSTED (CLI)",
+      "igtrack_export / igtrack_activity (MCP tools)",
+    ],
     howItWorks:
       "Each post carries a comment state: OBSERVED (source read, even when empty), UNAVAILABLE (no exposed comment source), NOT_SCANNED (capability off). Comment pages paginate like post pages. Comment like counts and author platform ids persist when the provider supplies them; a missing like count renders as absent, never zero. Empty is never faked and never conflated with unavailable.",
     whyUnavailable: null,
@@ -346,11 +398,14 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getPublicComments"],
     permissions: "Same as COMMENTS.",
     persistence: ["postComments"],
-    ui: ["/targets/[id] (content tab, reply badges)"],
+    ui: [
+      "igtrack export <target> --kind comments (CLI: threaded rows)",
+      "igtrack_export (MCP tool)",
+    ],
     howItWorks:
       "Threading arrives through the documented replies field expansion (the listing edge returns top-level comments only) plus explicit parent_id values, flattened into rows carrying in_reply_to_comment_id. Replies render with the parent author resolved in one self-join. When the provider returns no threading, threads stay flat — flatness is data, not a bug.",
     whyUnavailable: null,
-    unlock: "Live verification under this integration's credentials; the pipeline, column, join, and UI are already in place.",
+    unlock: "Live verification under this integration's credentials; the pipeline, column, join, and CLI/MCP surfaces are already in place.",
     liveState: "NOT_VERIFIED",
     liveEvidence:
       "Implemented end-to-end and covered by mocked-expansion tests, but live reply payloads have never been observed (no credentials).",
@@ -362,7 +417,14 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     permissions:
       "Fixture exposes synthetic rosters; import:v1 reads the operator's own Instagram export for the real one. Graph exposes counts only, never lists.",
     persistence: ["followSnapshots", "followSnapshotMembers", "followDeltas", "evidence"],
-    ui: ["/targets/[id] (followers tab)", "/relationships", "activity timeline"],
+    ui: [
+      "igtrack audience <target> (CLI: mutuals and one-way follows)",
+      "igtrack recent <target> --direction followers (CLI)",
+      "igtrack relationships <target> (CLI)",
+      "igtrack activity --type NEW_FOLLOWER|LOST_FOLLOWER (CLI)",
+      "igtrack export <target> --kind followers (CLI)",
+      "igtrack_audience / igtrack_recent / igtrack_relationships / igtrack_activity / igtrack_export (MCP tools)",
+    ],
     howItWorks:
       "Each scan appends a snapshot (COMPLETE or PARTIAL) with stable member rows. Diffs derive only between two COMPLETE snapshots: a newcomer is 'newly observed', a disappearance 'no longer observed' — never 'followed at 14:03' unless the provider supplies the event. PARTIAL scans are recorded but never diffed, so truncation cannot fabricate losses. import:v1 pages the export's followers_*.json files — one raw file per page with a genuine payload hash — so real rosters run the identical snapshot/diff machinery.",
     whyUnavailable: null,
@@ -377,7 +439,14 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: ["getFollowing"],
     permissions: "Same as FOLLOWERS.",
     persistence: ["followSnapshots", "followSnapshotMembers", "followDeltas", "evidence"],
-    ui: ["/targets/[id] (following tab)", "/relationships", "activity timeline"],
+    ui: [
+      "igtrack recent <target> --direction following (CLI)",
+      "igtrack audience <target> (CLI)",
+      "igtrack relationships <target> (CLI)",
+      "igtrack activity --type NEW_FOLLOWING|LOST_FOLLOWING (CLI)",
+      "igtrack export <target> --kind following (CLI)",
+      "igtrack_recent / igtrack_audience / igtrack_relationships / igtrack_activity / igtrack_export (MCP tools)",
+    ],
     howItWorks:
       "Identical mechanics to FOLLOWERS, tracked under the FOLLOWING direction with its own snapshots, pagination, checkpoints, and diffs.",
     whyUnavailable: null,
@@ -393,8 +462,9 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     permissions: "Would require a public likes feed, which does not exist.",
     persistence: [],
     ui: [
-      "Relationships page states UNAVAILABLE with reason; like counts on posts and comments are labeled provider metadata",
-      "igtrack tracker <target> (accounts-liked KPI refused with reason)",
+      "igtrack relationships <target> (CLI: states UNAVAILABLE with reason; like counts on posts and comments are labeled provider metadata)",
+      "igtrack tracker <target> (CLI: accounts-liked KPI refused with reason)",
+      "igtrack capabilities (CLI: UNAVAILABLE row with this reason)",
     ],
     howItWorks:
       "There is no writer and no reader for like actors: per-post and per-comment like_count is provider-supplied metadata shown as such, never observed like activity.",
@@ -411,13 +481,13 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: [],
     permissions: "Would require a lawful interaction feed.",
     persistence: ["interactions"],
-    ui: [],
+    ui: ["igtrack capabilities (CLI: UNAVAILABLE row with this reason)"],
     howItWorks:
-      "The interactions table exists as a typed landing zone with a documented rationale in schema comments, but has no writer: no supported source provides interaction actors, counts with history, or timestamps. The relationships page derives association signals from mentions and deltas instead, labeled as observed association — never 'favorite people'.",
+      "The interactions table exists as a typed landing zone with a documented rationale in schema comments, but has no writer: no supported source provides interaction actors, counts with history, or timestamps. igtrack relationships derives association signals from mentions and deltas instead, labeled as observed association — never 'favorite people'.",
     whyUnavailable:
       "No supported provider exposes interaction history. LIKE_SIGNAL in the model describes a shape, not a source. The insights edge was considered and rejected: it yields aggregates without actors or per-event timestamps, which cannot satisfy actor+kind+timestamp evidence.",
     unlock:
-      "A lawful interaction source. Activation criteria: a provider method returning actor, kind, timestamp, and evidence; then add the writer, ledger branch, and UI.",
+      "A lawful interaction source. Activation criteria: a provider method returning actor, kind, timestamp, and evidence; then add the writer, ledger branch, and CLI/MCP surface.",
     liveState: "DOCUMENTED_ABSENT",
     liveEvidence:
       "No interaction feed exists in the IG Platform reference (nodes: IG Comment, IG Container, IG Hashtag, IG Media, IG User, Page).",
@@ -429,7 +499,11 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     permissions:
       "reposts_count is a documented IG Media scalar, top-level media only; the owner can hide counts.",
     persistence: ["posts"],
-    ui: ["/targets/[id] (content tab, repost count where the provider returned one)"],
+    ui: [
+      "igtrack viewer <target> --tab repost (CLI)",
+      "igtrack export <target> --kind posts (CLI: reposts_count where the provider returned one)",
+      "igtrack_viewer / igtrack_export (MCP tools)",
+    ],
     howItWorks:
       "Parse-when-present: a reposts_count returned by any provider is stored on the post row under the same first-observation semantics as like and comment counts — absent stays absent, never zero-filled. No reshare relationship is ever inferred, and a post is never classified a repost without evidence; naming repost actors is a separate, structurally unavailable capability (RESHARES). The graph media request deliberately does not ask for the field yet: an unknown field name fails the whole listing call, and this scalar has never been observed live.",
     whyUnavailable: null,
@@ -445,7 +519,10 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: [],
     permissions: "Would require a repost object or reshare edge.",
     persistence: [],
-    ui: [],
+    ui: [
+      "igtrack viewer <target> --tab repost (CLI: attribution refused with reason)",
+      "igtrack capabilities (CLI: UNAVAILABLE row with this reason)",
+    ],
     howItWorks:
       "There is no writer and no reader for reshare relations: no account is ever named as having reposted media in which this account is tagged, and no post is ever classified as a repost without provider evidence. The reposts_count scalar on IG Media is a count without actors — surfaced as provider metadata under the REPOSTS capability, never as a relation.",
     whyUnavailable:
@@ -462,7 +539,10 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     providerMethods: [],
     permissions: "Would require archivable provider URLs plus a storage policy.",
     persistence: ["mediaAssets"],
-    ui: ["Provider links render as user-initiated outbound links behind an http(s) guard; bytes are never auto-loaded"],
+    ui: [
+      "igtrack public / igtrack post / igtrack viewer (CLI: permalinks and link URLs print as text; bytes are never fetched)",
+      "igtrack_public / igtrack_post / igtrack_viewer (MCP tools)",
+    ],
     howItWorks:
       "Metadata (types, shortcodes, permalinks, link URLs) persists on posts and stories. The media_assets table stays writerless by decision: neither provider yields archivable asset URLs today, and storing bytes without settled expiry, permission, and retention answers would be the real integrity violation. Images are never auto-fetched (no third-party IP leak, no SSRF).",
     whyUnavailable:
@@ -471,7 +551,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
       "Provider-supplied stable URLs plus documented download permission and expiry semantics; then write metadata-first rows and cache bytes behind retention rules.",
     liveState: "DOCUMENTED_ABSENT",
     liveEvidence:
-      "The IG Media reference documents media_url omission rules that rule out archival use. Metadata links render as user-initiated outbound links only.",
+      "The IG Media reference documents media_url omission rules that rule out archival use. Metadata links print as text only; no bytes are fetched.",
   },
   {
     id: "ACCOUNT_RESEARCH",
@@ -483,9 +563,9 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     persistence: ["claims"],
     ui: [
       "igtrack claims add/list/retract (CLI)",
-      "igtrack research (CLI, --format md for a hand-off document)",
-      "claim_add / claims_list / claim_retract / research (MCP tools)",
-      "igtrack dossier (ACCOUNT_RESEARCH coverage row)",
+      "igtrack research <target> (CLI, --format md for a hand-off document)",
+      "igtrack_claim_add / igtrack_claims_list / igtrack_claim_retract / igtrack_research (MCP tools)",
+      "igtrack dossier <target> (CLI: ACCOUNT_RESEARCH coverage row)",
     ],
     howItWorks:
       "A claim is a finding the operator (or their agent) researched: a predicate from a closed 9-entry registry, a value, an optional absolute http(s) source URL, an excerpt (hashed on write), and stated/retrieved times. Writes are validated and deduplicated — re-submitting the same finding is refused, because it is not corroboration. `igtrack research <account>` composes a deterministic report: sections built only from stored observations (identity and route, observation summary, leads, closest connections, coverage) and one section built only from claims, with per-predicate relation labels derived from distinct web domains (CORROBORATED at two or more domains, SINGLE_SOURCE at one, OPERATOR_ASSERTED for operator-only, CONFLICTED when values disagree — both sides kept, nothing chosen). Sensitive person-level predicates (employment, health, religion, politics, sexuality, ethnicity, criminal or legal history, home address, education records, family and personal relationships) are refused at write time, from every source. Claims are never merged into platform observations, never upgraded to facts, and never expire silently: a claim whose retrieval basis is older than 180 days is flagged DUE_FOR_REVIEW and stays exactly as it was recorded.",
@@ -509,7 +589,7 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
     ui: [
       "igtrack research <target> --run --question \"...\" (CLI)",
       "igtrack_research_run (MCP tool)",
-      "Research runs section of igtrack research (CLI report)",
+      "Research runs section of igtrack research <target> (CLI report)",
     ],
     howItWorks:
       "A run is created first (question, focus, bounds), then at most RESEARCH_MAX_SOURCES=10 documents are planned: operator URLs first, then search-provider candidates (no provider configured means UNAVAILABLE with the exact reason — never invented sources), then the source URLs of prior claims; deduplicated, sliced to the cap. Every URL and every redirect hop passes the static gate: http(s) on port 80/443 only, no embedded credentials, Instagram/localhost/metadata hosts refused by policy, DNS results checked against private, loopback, link-local and metadata ranges; robots.txt is respected, content types are allowlisted, the body is streamed to a 512KB byte cap under a 10s wall-clock timeout. Extraction reads four fixed field families (JSON-LD, meta tags, mailto addresses, public profile links) — never page prose, so a page cannot prompt-inject its way into a claim. Each candidate passes the same closed predicate registry as operator claims before storage; duplicates are counted, never re-stored; a document fetched within 24h is REUSED unless --refresh. Every per-document outcome, including refusals and failures, is recorded on the run. Depth is fixed at 1: the engine never follows links it did not plan.",
@@ -527,9 +607,9 @@ export const CAPABILITY_REGISTRY: readonly CapabilityRegistryEntry[] = [
       "No permission can supply this because no provider returns it. Personality, MBTI, relationship, financial and location inferences are model output, not observations; deriving them from this ledger would present inference as evidence.",
     persistence: [],
     ui: [
-      "igtrack activity-report <target> (AI Insights tab, always UNAVAILABLE)",
+      "igtrack activity-report <target> (CLI: AI Insights tab, always UNAVAILABLE)",
       "igtrack_activity_report (MCP tool, ai_insights block)",
-      "igtrack tracker <target> (ai_insights block, always UNAVAILABLE)",
+      "igtrack tracker <target> (CLI: ai_insights block, always UNAVAILABLE)",
     ],
     howItWorks:
       "The fourth tab renders model-generated inferences — personality and MBTI profiles, relationship reads, risk and location guesses — over a monitored account. IGTrack keeps the tab's place in the report contract and its state, not its content: the tab is present, ordered fourth, and every field is UNAVAILABLE with this registry reason. Observed and derived analytics remain in tabs one and two, where each row carries its source, observation time and evidence hash.",
