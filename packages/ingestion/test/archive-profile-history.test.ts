@@ -78,16 +78,24 @@ function page(username: string, counts: { followers: number; following: number; 
 
 const CDX_URL_MARKER = "web.archive.org/cdx/search/cdx";
 
-function transport(plan: { cdx: string; captures: Record<string, ArchiveHttpResponse | Error> }): {
-  fetchImpl: (url: string, init: { signal: AbortSignal }) => Promise<ArchiveHttpResponse>;
+function transport(plan: {
+  cdx: string | ArchiveHttpResponse;
+  captures: Record<string, ArchiveHttpResponse | Error>;
+}): {
+  fetchImpl: (url: string, init: { signal: AbortSignal; redirect: "manual" }) => Promise<ArchiveHttpResponse>;
   seen: string[];
+  inits: Array<{ signal: AbortSignal; redirect: string }>;
 } {
   const seen: string[] = [];
+  const inits: Array<{ signal: AbortSignal; redirect: string }> = [];
   return {
     seen,
-    fetchImpl: async (url) => {
+    inits,
+    fetchImpl: async (url, init) => {
       seen.push(url);
-      if (url.includes(CDX_URL_MARKER)) return response(plan.cdx);
+      inits.push(init);
+      if (url.includes(CDX_URL_MARKER))
+        return typeof plan.cdx === "string" ? response(plan.cdx) : plan.cdx;
       const match = plan.captures[url];
       if (match === undefined) throw new Error(`unexpected URL: ${url}`);
       if (match instanceof Error) throw match;
@@ -193,6 +201,70 @@ describe("archived profile count history", () => {
     expect(result.notes.join(" ")).toContain("login wall");
   });
 
+  it("counts one unreadable capture as a failure to look, not an empty history", async () => {
+    // The all-failed case is easy to get right. The one that lies is a mix:
+    // most captures read fine but carried no count, while one hit a login
+    // wall. "Nothing was recorded" is true either way, but only the unreadable
+    // capture makes "there was nothing to record" unprovable.
+    const walled =
+      "https://web.archive.org/web/20261010120000id_/https://www.instagram.com/small.account/";
+    const rounded =
+      "https://web.archive.org/web/20261011120000id_/https://www.instagram.com/small.account/";
+    const plan = transport({
+      cdx: cdx([
+        ["20261010120000", "https://www.instagram.com/small.account/"],
+        ["20261011120000", "https://www.instagram.com/small.account/"],
+      ]),
+      captures: {
+        [walled]: response(`<html><body>Log in to Instagram to see this profile</body></html>`),
+        [rounded]: response(
+          `<html><head><link rel="canonical" href="https://www.instagram.com/small.account/"></head>` +
+            `<body>small.account — 12.3K followers, 1,204 following</body></html>`,
+        ),
+      },
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+
+    expect(result.capturesFailed).toBe(1);
+    expect(result.capturesWithoutCounts).toBe(1);
+    expect(result.points).toEqual([]);
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(result.reason).toContain("failure to look");
+    expect(result.reason).not.toContain("none carried an exact count");
+  });
+
+  it("refuses an index redirect instead of reading another host's listing", async () => {
+    // Following a redirect is how "the archive said this" quietly becomes
+    // "whatever server answered last said this". The refusal has to be visible
+    // in the reason and real in the request.
+    const plan = transport({ cdx: response("", { status: 302 }), captures: {} });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(result.reason).toContain("redirect off the archive host");
+    expect(result.reason).toContain("failure to look");
+    expect(result.points).toEqual([]);
+    for (const init of plan.inits) expect(init.redirect).toBe("manual");
+  });
+
+  it("skips a capture that redirects off the archive host", async () => {
+    const capture = "https://web.archive.org/web/20261010120000id_/https://www.instagram.com/small.account/";
+    const plan = transport({
+      cdx: cdx([["20261010120000", "https://www.instagram.com/small.account/"]]),
+      captures: { [capture]: response(`<html><body>not the archive</body></html>`, { status: 301 }) },
+    });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+
+    expect(result.capturesFailed).toBe(1);
+    expect(result.points).toEqual([]);
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(result.notes.join(" ")).toContain("redirect");
+    for (const init of plan.inits) expect(init.redirect).toBe("manual");
+  });
+
   it("skips a capture above the byte cap and says so", async () => {
     const capture = "https://web.archive.org/web/20261010120000id_/https://www.instagram.com/small.account/";
     const plan = transport({
@@ -224,6 +296,23 @@ describe("archived profile count history", () => {
 
     expect(result.state).toBe("UNAVAILABLE");
     expect(result.reason).toContain("failure to look");
+    expect(result.points).toEqual([]);
+  });
+
+  it("refuses an index body that is not JSON without quoting it", async () => {
+    // An archive error page is HTML, and the JSON SyntaxError text quotes a
+    // slice of whatever it choked on. Response bytes are not operator output:
+    // the reason names the shape of the answer, never its content.
+    const body = `<html>Unexpected {"token":"SECRET"} at position 0</html>`;
+    const plan = transport({ cdx: response(body), captures: {} });
+
+    const result = await fetchArchivedProfileHistory(USERNAME, { now: NOW, fetchImpl: plan.fetchImpl });
+
+    expect(result.state).toBe("UNAVAILABLE");
+    expect(result.reason).toContain("not the JSON list it documents");
+    expect(result.reason).toContain("failure to look");
+    expect(result.reason).not.toContain("SECRET");
+    expect(result.reason).not.toContain("<html>");
     expect(result.points).toEqual([]);
   });
 

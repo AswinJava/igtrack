@@ -378,6 +378,17 @@ export async function runProfileScan(
     throw new JobExecutionError("Provider returned no profile data", { retryable: false });
   }
 
+  // Invariant 4 decides completeness, not the status word alone. A provider can
+  // answer AVAILABLE and still withhold a count — every normalizer here adds the
+  // counts only when the response carried them — and diffing that snapshot turns
+  // "this capture stayed quiet" into a fabricated `followerCount 18420 -> null`
+  // change, which is the same defect the discovery scan below refuses.
+  const profileComplete =
+    result.status === CapabilityStatus.AVAILABLE &&
+    result.data.followerCount !== undefined &&
+    result.data.followingCount !== undefined &&
+    result.data.postCount !== undefined;
+
   const observedAt = result.observedAt;
   const observationId = `profile:${account.username}@${observedAt}`;
   const evidence = evidenceFrom(
@@ -396,7 +407,7 @@ export async function runProfileScan(
         : {}),
     },
     result.data,
-    { capabilityStatus: result.status, jobId: job.id },
+    { capabilityStatus: result.status, profileFieldComplete: profileComplete, jobId: job.id },
   );
 
   await recordProfileSnapshot(db, {
@@ -404,7 +415,7 @@ export async function runProfileScan(
     evidence,
     // Invariant 4: a PARTIAL profile is recorded but never diffed, in
     // either direction (see RecordProfileSnapshotInput.completeness).
-    completeness: result.status === CapabilityStatus.AVAILABLE ? "COMPLETE" : "PARTIAL",
+    completeness: profileComplete ? "COMPLETE" : "PARTIAL",
   });
 
   await recordCapabilitySuccess(db, {
@@ -415,7 +426,7 @@ export async function runProfileScan(
   // The snapshot row already records completeness; the job outcome must say the
   // same thing, or a PARTIAL profile reads back as a finished scan and the
   // surfaces that count COMPLETED_PARTIAL jobs understate what was incomplete.
-  return result.status === CapabilityStatus.PARTIAL ? "succeeded-partial" : "succeeded";
+  return profileComplete ? "succeeded" : "succeeded-partial";
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +989,10 @@ export async function runFollowScan(
   await saveCheckpoint(db, {
     targetId,
     kind: cfg.checkpointKind,
+    // Explicit null, as in the posts scan: omitting the cursor leaves the last
+    // page's value in the column, and a job retried after completing would
+    // resume from that stale tail and report COMPLETED having read only the tail.
+    cursor: null,
     page: 0,
     progress: { page: 0 },
   });

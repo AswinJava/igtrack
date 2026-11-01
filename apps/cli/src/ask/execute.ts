@@ -703,6 +703,7 @@ async function runIntent(
       const result = await opEvidence(ctx, {
         ...(plan.evidenceId === null ? {} : { id: plan.evidenceId }),
         ...(plan.limit === null ? {} : { limit: plan.limit }),
+        ...(plan.username === null ? {} : { target: plan.username }),
       });
       if (result.mode === "chain") {
         const chain = result.chain;
@@ -716,7 +717,10 @@ async function runIntent(
         }
         return stepResult(intent, summary, result);
       }
-      const summary = `${result.rows.length} recent evidence row(s).`;
+      const summary =
+        result.target === null
+          ? `${result.rows.length} recent evidence row(s).`
+          : `${result.rows.length} evidence row(s) recorded for @${result.target.username}.`;
       answer.push(summary);
       for (const row of result.rows.slice(0, 8)) {
         answer.push(

@@ -27,6 +27,7 @@ import {
   getSourceHealth,
   igAccounts,
   evidence as evidenceTable,
+  loadCheckpoint,
   saveCheckpoint,
   users,
   type DatabaseHandle,
@@ -466,6 +467,27 @@ describe.runIf(dbAvailable)("worker FOLLOWING_SCAN", () => {
       "echo",
     ]);
     expect(await followingSnapshotRows(targetId)).toHaveLength(1);
+  });
+
+  it("a completed follow scan leaves no cursor for a retry to resume from", async () => {
+    const targetId = await makeTarget();
+    const job = await makeJob(targetId);
+    const src = paginatedFollowingSource([
+      { usernames: ["alpha", "bravo"], complete: false, nextCursor: "page-2" },
+      { usernames: ["charlie"], complete: true },
+    ]);
+
+    await runFollowingScan(handle.db, job, src);
+
+    // The mid-scan checkpoint stored `page-2` so an interrupted scan could pick
+    // up where it stopped. Completion must clear it: a cursor that outlives its
+    // job makes a retry resume from the tail and report COMPLETED on a listing it
+    // only partly read — invariant 4 in the queue's own state.
+    const checkpoint = await loadCheckpoint(handle.db, targetId, "FOLLOWING_SCAN");
+    expect(checkpoint?.cursor ?? null).toBeNull();
+    expect(
+      (checkpoint?.progress as { cursor?: string } | null | undefined)?.cursor,
+    ).toBeUndefined();
   });
 
   it("derives FOLLOWING deltas against the previous following snapshot only (F10)", async () => {

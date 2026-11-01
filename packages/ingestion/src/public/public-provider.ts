@@ -549,7 +549,7 @@ export class PublicWebProvider implements InstagramProvider {
     this.enrichBudgetMs = config.enrichBudgetMs ?? 120_000;
     this.now = config.now ?? (() => new Date());
     if (this.fetchHtml === undefined && findChrome(this.chromePath) === undefined) {
-      throw new Error(`igtrack public provider: ${chromeUnavailableMessage()}`);
+      throw new Error(`igtrack public provider: ${chromeUnavailableMessage(this.chromePath)}`);
     }
   }
 

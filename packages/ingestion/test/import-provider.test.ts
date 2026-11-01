@@ -148,10 +148,102 @@ describe("ImportProvider (import:v1)", () => {
     expect(second.data?.complete).toBe(true);
     expect(second.data?.nextCursor).toBeUndefined();
 
-    // Numbered shards win over a bare file, for either direction.
+    // A bare file is still read when it is the only one for its direction.
     const bare = await p.getFollowers(ACCOUNT);
     expect(bare.data?.entries.map((e) => e.username)).toEqual(["fan.one"]);
     expect(bare.data?.complete).toBe(true);
+  });
+
+  it("refuses a bare file beside shards for the same direction instead of picking one", async () => {
+    // Two Instagram exports unpacked into one folder leave followers.json next
+    // to followers_1.json … A reader that silently preferred the shards would
+    // report the roster complete on the last shard while the bare file's
+    // usernames never entered the snapshot — so the next diff tells the owner
+    // they lost followers they still have. The refusal is the honest answer:
+    // we cannot know which set of bytes is the current one.
+    const dir = await exportWith({
+      "followers.json": JSON.stringify([{ string_list_data: [{ value: "old.fan" }] }]),
+      "followers_1.json": JSON.stringify([{ string_list_data: [{ value: "new.fan" }] }]),
+      "followers_2.json": JSON.stringify([]),
+      "following.json": JSON.stringify([{ string_list_data: [{ value: "edge.one" }] }]),
+    });
+    const p = providerAt(dir);
+
+    const r = await p.getFollowers(ACCOUNT);
+    expect(r.status).toBe(CapabilityStatus.ERROR);
+    expect(r.error?.kind).toBe(CapabilityErrorKind.SCHEMA_MISMATCH);
+    expect(r.error?.retryable).toBe(false);
+    expect(r.data).toBeUndefined();
+    expect(r.error?.message).toMatch(/cannot be ordered/);
+    expect(r.error?.message).toMatch(/followers\.json/);
+    expect(r.error?.message).toMatch(/followers_1\.json, followers_2\.json/);
+    expect(r.error?.message).toMatch(/Keep exactly one/);
+    // no payload bytes in the refusal — the usernames are not echoed
+    expect(r.error?.message).not.toContain("old.fan");
+
+    // the direction with one unambiguous file set still reads normally
+    const f = await p.getFollowing(ACCOUNT);
+    expect(f.status).toBe(CapabilityStatus.AVAILABLE);
+    expect(f.data?.complete).toBe(true);
+  });
+
+  it("refuses a shard run with a gap rather than calling the roster complete", async () => {
+    // An interrupted or hand-pruned download leaves followers_1 and _3 with no
+    // _2. Instagram numbers shards as a run from 1, so a gap means a whole page
+    // of usernames is missing; reading the two survivors and reporting
+    // `complete: true` turns the missing page into fabricated absence.
+    const dir = await exportWith({
+      "followers_1.json": JSON.stringify([{ string_list_data: [{ value: "a.one" }] }]),
+      "followers_3.json": JSON.stringify([{ string_list_data: [{ value: "a.three" }] }]),
+    });
+    const r = await providerAt(dir).getFollowers(ACCOUNT);
+    expect(r.status).toBe(CapabilityStatus.ERROR);
+    expect(r.error?.kind).toBe(CapabilityErrorKind.SCHEMA_MISMATCH);
+    expect(r.error?.message).toMatch(/followers_2\.json is absent/);
+    expect(r.data).toBeUndefined();
+
+    // a shard run missing only its first file is the same defect
+    const shifted = await exportWith({
+      "followers_2.json": JSON.stringify([{ string_list_data: [{ value: "a.two" }] }]),
+      "followers_3.json": JSON.stringify([{ string_list_data: [{ value: "a.three" }] }]),
+    });
+    const s = await providerAt(shifted).getFollowers(ACCOUNT);
+    expect(s.status).toBe(CapabilityStatus.ERROR);
+    expect(s.error?.message).toMatch(/followers_1\.json is absent/);
+  });
+
+  it("reads a ten-plus shard export in numeric, not lexical, order", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 1; i <= 11; i++) {
+      files[`followers_${i}.json`] = JSON.stringify([
+        { string_list_data: [{ value: `fan.${i}` }] },
+      ]);
+    }
+    const p = providerAt(await exportWith(files));
+
+    let cursor: { value: string } | undefined;
+    const pages: Array<{ readonly file: string; readonly username: string }> = [];
+    for (let guard = 0; guard < 20; guard++) {
+      const page = await p.getFollowers(ACCOUNT, cursor);
+      expect(page.status).toBe(CapabilityStatus.AVAILABLE);
+      pages.push({
+        file: page.rawReference ?? "",
+        username: page.data?.entries[0]?.username ?? "",
+      });
+      const next = page.data?.nextCursor;
+      if (next === undefined) {
+        expect(page.data?.complete).toBe(true);
+        break;
+      }
+      expect(page.data?.complete).toBe(false);
+      cursor = { value: next };
+    }
+    expect(pages.map((x) => x.file)).toEqual(
+      Array.from({ length: 11 }, (_, i) => `import:v1/followers_${i + 1}.json`),
+    );
+    expect(pages.map((x) => x.username)).toEqual(
+      Array.from({ length: 11 }, (_, i) => `fan.${i + 1}`),
+    );
   });
 
   it("answers out-of-roster capabilities UNAVAILABLE with the reason — never zero", async () => {

@@ -5,7 +5,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ChromeTargetRejectedError,
   ChromeUnavailableError,
+  chromeUnavailableMessage,
   dumpDom,
+  emptyDomReason,
   findChrome,
 } from "../src/public/chrome.js";
 
@@ -16,7 +18,8 @@ import {
 // operator-supplied executable path must be a browser and not merely a file,
 // and a target URL must be a page rather than something Chrome reads as one of
 // its own flags. No test in this file launches a browser: every refusal happens
-// before a process exists.
+// before a process exists. The empty-DOM block reads the stderr of a run that
+// already happened; it does not launch a browser either.
 // ---------------------------------------------------------------------------
 
 let dir = "";
@@ -72,5 +75,56 @@ describe("chrome executable and target guards", () => {
       );
       expect(err, `target ${JSON.stringify(target)}`).toBeInstanceOf(ChromeTargetRejectedError);
     }
+  });
+
+  it("answers the two missing-browser causes with two different fixes", () => {
+    // One sentence for two causes sends someone to a fix they do not need: the
+    // operator who set --chrome to a wrong path does not have to install Chrome,
+    // and the machine with no browser at all has nothing to point at.
+    const wrongPath = chromeUnavailableMessage("C:\\Program Files\\Notepad\\notepad.exe");
+    expect(wrongPath).toContain("C:\\Program Files\\Notepad\\notepad.exe");
+    expect(wrongPath).toContain("Point --chrome");
+    expect(wrongPath).not.toContain("Install Google Chrome");
+    expect(wrongPath).toContain("No request was made.");
+
+    const noneInstalled = chromeUnavailableMessage();
+    expect(noneInstalled).toContain("Install Google Chrome");
+    expect(noneInstalled).toContain("IGTRACK_CHROME_PATH");
+    expect(noneInstalled).toContain("No request was made.");
+
+    // Both sentences are the same refusal when the caller passes blanks.
+    expect(chromeUnavailableMessage("   ")).toBe(noneInstalled);
+  });
+});
+
+describe("the reason behind an empty DOM", () => {
+  it("keeps Chrome's own page-load failure, because the operator has to know which fix applies", () => {
+    // Recorded on a machine whose DNS had stopped answering. "Chrome returned
+    // no HTML document" alone reads like an empty profile; the code says the
+    // page was never resolved, which is a network fix.
+    const stderr =
+      "[12624:5144:1101/152358.428:ERROR:chrome\\browser\\extensions\\external_registry_loader_win.cc:147] Missing value path for key Software\\Google\\Chrome\\Extensions\\dngcpimnedloihjnnfngkgjoidhnaolf.\n" +
+      "[12624:5144:1101/152358.900:ERROR:components\\headless\\command_handler\\headless_command_handler.cc:403] Page load failed: net::ERR_NAME_NOT_RESOLVED\n";
+    const reason = emptyDomReason(stderr);
+    expect(reason).toContain("net::ERR_NAME_NOT_RESOLVED");
+    expect(reason).toContain("transport failure");
+    expect(reason).not.toContain("external_registry_loader");
+    expect(reason).not.toContain("Missing value path");
+  });
+
+  it("falls back to the last real line when Chrome says nothing about a page load", () => {
+    const reason = emptyDomReason("[1234:1:ERROR:some/file.cc:12] GPU process exited unexpectedly\n");
+    expect(reason).toContain("GPU process exited unexpectedly");
+  });
+
+  it("still refuses when Chrome prints nothing at all", () => {
+    const reason = emptyDomReason("   \n  ");
+    expect(reason).toContain("no HTML document");
+    expect(reason).toContain("transport failure");
+  });
+
+  it("cuts a pathological line instead of printing a wall of text", () => {
+    const reason = emptyDomReason(`Page load failed: ${"x".repeat(5000)}`);
+    expect(reason.length).toBeLessThan(400);
   });
 });

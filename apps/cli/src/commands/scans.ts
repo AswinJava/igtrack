@@ -12,12 +12,12 @@ export const SCANS_HELP = `igtrack scans <subcommand> | igtrack work
   scans list [--target id|username] [--limit N]
                                 Recent jobs and their outcomes.
   scans <target>                Shorthand for \`scans list --target <target>\`.
-  work [--max N] [--no-scheduler] [--json]
-                                Run the worker in the foreground: one scheduler
-                                tick, then claim and execute jobs until the queue
-                                is empty or --max is reached. This is the
-                                zero-infrastructure way to get real observations:
-                                queue with "scans run", execute with "work".
+  work [flags]                    Run the worker in the foreground: one scheduler
+                                  tick, then claim and execute jobs until the queue
+                                  is empty or its job cap is reached. This is the
+                                  zero-infrastructure way to get real observations:
+                                  queue with "scans run", execute with "work".
+                                  Run \`igtrack work\` alone for its flags.
 
 Kinds: ${SCAN_KINDS.join(", ")}.
 

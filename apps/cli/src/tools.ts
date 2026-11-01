@@ -202,7 +202,14 @@ import {
 } from "@igtrack/core";
 import type { TargetStatus } from "@igtrack/core";
 import type { CliContext } from "./context.js";
-import { capabilityLines, CliError, resolveUserPath, UsageError, type OutputMeta } from "./output.js";
+import {
+  capabilityLines,
+  CliError,
+  resolveUserPath,
+  scrubCredentials,
+  UsageError,
+  type OutputMeta,
+} from "./output.js";
 
 // ---------------------------------------------------------------------------
 // The operations layer.
@@ -803,7 +810,7 @@ export async function opWork(
     } catch (err) {
       // A scheduler failure must not stop already-queued work from draining.
       schedulerTick = "error";
-      schedulerError = err instanceof Error ? err.message : String(err);
+      schedulerError = scrubCredentials(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -3812,13 +3819,15 @@ export async function opInsights(
 export interface EvidenceQuery {
   id?: string | undefined;
   limit?: number | undefined;
+  /** A tracked target reference; when present the ledger is that target's rows only. */
+  target?: string | undefined;
 }
 
 export async function opEvidence(
   ctx: CliContext,
   input: EvidenceQuery,
 ): Promise<
-  | { mode: "list"; rows: ScopedEvidenceRow[] }
+  | { mode: "list"; rows: ScopedEvidenceRow[]; target: ResolvedTarget | null }
   | { mode: "chain"; chain: Awaited<ReturnType<typeof getEvidenceChain>> }
 > {
   if (input.id !== undefined) {
@@ -3828,7 +3837,12 @@ export async function opEvidence(
     }
     return { mode: "chain", chain };
   }
-  return { mode: "list", rows: await listScopedEvidence(ctx.db, ctx.userId, input.limit ?? 20) };
+  const target =
+    input.target !== undefined && input.target !== ""
+      ? await resolveTarget(ctx.db, ctx.userId, input.target)
+      : null;
+  const rows = await listScopedEvidence(ctx.db, ctx.userId, input.limit ?? 20, target?.id);
+  return { mode: "list", rows, target };
 }
 
 // ---------------------------------------------------------------------------
@@ -3892,7 +3906,18 @@ export interface DoctorReport {
     production: boolean;
     fixtureInProduction: boolean;
   };
-  scheduler: { enabled: boolean; intervalsMs: Record<string, number> };
+  scheduler: {
+    enabled: boolean;
+    intervalsMs: Record<string, number>;
+    /**
+     * What the scheduler row actually records. `null` here is not "no errors":
+     * it means no tick has written anything to this database, which an operator
+     * must not read as a healthy scheduler.
+     */
+    lastTickAt: Date | null;
+    lastSuccessAt: Date | null;
+    lastError: string | null;
+  };
   database: {
     reachable: boolean;
     migrationsApplied: boolean;
@@ -3925,26 +3950,42 @@ export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
     migrationsApplied: false,
     error: null,
   };
+  let schedulerTick: Pick<
+    DoctorReport["scheduler"],
+    "lastTickAt" | "lastSuccessAt" | "lastError"
+  > = { lastTickAt: null, lastSuccessAt: null, lastError: null };
   try {
     const operations = await getOperationsSnapshot(ctx.db);
     database = {
       reachable: operations.database.connected,
       migrationsApplied: operations.database.migrationsApplied,
-      error: operations.error ?? null,
+      error: operations.error === null || operations.error === undefined ? null : scrubCredentials(operations.error),
     };
+    schedulerTick = operations.scheduler;
     sourceHealth = operations.sources.map((h) => ({
       sourceId: h.sourceId,
       capability: h.capability,
       status: h.status,
       consecutiveFailures: h.consecutiveFailures,
-      lastFailureReason: h.lastFailureReason,
+      lastFailureReason:
+        h.lastFailureReason === null ? null : scrubCredentials(h.lastFailureReason),
       coverageNote: h.coverageNote,
       updatedAt: h.updatedAt,
     }));
     metrics = await listProviderMetrics(ctx.db).catch(() => []);
   } catch (err) {
-    database.error = err instanceof Error ? err.message : String(err);
+    database.error = scrubCredentials(err instanceof Error ? err.message : String(err));
   }
+
+  // The reasons on this screen are text this command did not write. The ones
+  // read out of the database — a driver error, a stored source failure, a
+  // recorded tick diagnostic — can quote the connection string they were built
+  // from, so they are scrubbed here, before either rendering path (findings or
+  // payload) sees them. The provider failure is not scrubbed again: it arrives
+  // already scrubbed at the descriptor, which is the one source every surface
+  // that echoes it reads from (invariant 8).
+  const schedulerLastError =
+    schedulerTick.lastError === null ? null : scrubCredentials(schedulerTick.lastError);
 
   const findings: string[] = [];
   if (ctx.provider.error !== null) {
@@ -3969,6 +4010,21 @@ export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
     findings.push("Database is unreachable. Start Postgres and re-run `igtrack setup`.");
   } else if (!database.migrationsApplied) {
     findings.push("Migrations have not been applied. Run `igtrack setup`.");
+  }
+  // The worker writes why a tick failed; a screen that never shows that line lets
+  // a scheduler broken for days print as "enabled", because enabled is only what
+  // the environment says. These lines are what the database says.
+  if (database.reachable && database.migrationsApplied) {
+    if (schedulerEnabled() && schedulerTick.lastTickAt === null) {
+      findings.push(
+        "Scheduler is enabled but no tick has ever run against this database. `igtrack work` runs a tick and drains the queue; nothing queues itself.",
+      );
+    }
+    if (schedulerLastError !== null) {
+      findings.push(
+        `Scheduler: the last recorded tick failed — ${schedulerLastError} A later successful tick clears this line.`,
+      );
+    }
   }
   if (production && ctx.provider.synthetic) {
     findings.push(
@@ -4013,6 +4069,9 @@ export async function opDoctor(ctx: CliContext): Promise<DoctorReport> {
     scheduler: {
       enabled: schedulerEnabled(),
       intervalsMs: resolveScanIntervals(process.env) as unknown as Record<string, number>,
+      lastTickAt: schedulerTick.lastTickAt,
+      lastSuccessAt: schedulerTick.lastSuccessAt,
+      lastError: schedulerLastError,
     },
     database,
     sourceHealth,
@@ -9621,16 +9680,23 @@ const LIVE_READ_LABELS: Record<
  * `_meta` for a live read. `synthetic: false` is a statement about the bytes:
  * these paths observe a real page, and a file written by `--out` keeps the same
  * label as the answer printed next to it.
+ *
+ * `observedSourceId` is the id the payload itself carries. The label table is the
+ * fallback, not the authority: a provider that moves to a new source id would
+ * otherwise print an envelope claiming provenance its own data contradicts, and
+ * evidence rows are keyed by the id the provider recorded.
  */
 export function liveReadMeta(
   source: LiveReadSource,
   studio: "cli" | "mcp",
   note?: string | undefined,
+  observedSourceId?: string | undefined,
 ): OutputMeta {
   const label = LIVE_READ_LABELS[source];
+  const observed = observedSourceId?.trim() ?? "";
   return {
     provider: label.provider,
-    sourceId: label.sourceId,
+    sourceId: observed === "" ? label.sourceId : observed,
     synthetic: false,
     production: process.env.NODE_ENV === "production",
     studio,
@@ -9642,9 +9708,9 @@ export function liveReadMeta(
 function providerUnusable(name: string, err: unknown): CliError {
   return new CliError(
     "PROVIDER_UNAVAILABLE",
-    `The ${name} provider is not usable: ${
-      err instanceof Error ? err.message : String(err)
-    } Nothing was requested.`,
+    `The ${name} provider is not usable: ${scrubCredentials(
+      err instanceof Error ? err.message : String(err),
+    )} Nothing was requested.`,
     3,
   );
 }
@@ -9801,7 +9867,7 @@ export interface ViewerOperationDeps {
 function viewerSourceFailure(kind: string, err: unknown, retryable = false): ViewerSourceFailure {
   return {
     kind,
-    message: err instanceof Error ? err.message : String(err),
+    message: scrubCredentials(err instanceof Error ? err.message : String(err)),
     retryable,
   };
 }
@@ -9864,9 +9930,9 @@ export async function opViewer(
       if (err instanceof CliError) throw err;
       throw new CliError(
         "VIEWER_RESOLVE_FAILED",
-        `The post URL could not be resolved to an account: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `The post URL could not be resolved to an account: ${scrubCredentials(
+          err instanceof Error ? err.message : String(err),
+        )}`,
         1,
       );
     }

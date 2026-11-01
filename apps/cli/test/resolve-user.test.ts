@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, runMigrations, type DatabaseHandle } from "@igtrack/database";
-import { resolveUser } from "../src/context.js";
+import { resolveUser, setRequestedOwner } from "../src/context.js";
 import { CliError } from "../src/output.js";
 
 // ---------------------------------------------------------------------------
@@ -120,6 +120,61 @@ describe.skipIf(!databaseUp)("resolveUser precedence", () => {
     } catch (err) {
       expect((err as CliError).code).toBe("NO_USER");
       expect((err as Error).message).toMatch(/No user matches "nobody@owner.test"/);
+    }
+  });
+
+  // The router records `--user` once for the process, because no command reads
+  // the parsed flags. These pin the half the operator sees: the flag is a
+  // selection, not advice in an error message.
+  it("the --user selection resolves an owner among many, case-insensitively", async () => {
+    setRequestedOwner("SECOND@OWNER.TEST");
+    try {
+      const user = await resolveUser(handle.db, undefined);
+      expect(user.email).toBe("second@owner.test");
+    } finally {
+      setRequestedOwner(undefined);
+    }
+  });
+
+  it("--user outranks the environment, and its absence leaves the environment alone", async () => {
+    process.env.IGTRACK_USER_EMAIL = "first@owner.test";
+    try {
+      setRequestedOwner("second@owner.test");
+      expect((await resolveUser(handle.db, undefined)).email).toBe("second@owner.test");
+      setRequestedOwner(undefined);
+      expect((await resolveUser(handle.db, undefined)).email).toBe("first@owner.test");
+    } finally {
+      setRequestedOwner(undefined);
+      delete process.env.IGTRACK_USER_EMAIL;
+    }
+  });
+
+  it("a --user that matches nobody is NO_USER, not the environment's owner", async () => {
+    process.env.IGTRACK_USER_EMAIL = "first@owner.test";
+    setRequestedOwner("nobody@owner.test");
+    try {
+      await resolveUser(handle.db, undefined);
+      expect.unreachable("an unmatched --user must not fall back to another owner");
+    } catch (err) {
+      expect((err as CliError).code).toBe("NO_USER");
+      expect((err as Error).message).toMatch(/No user matches "nobody@owner.test"/);
+    } finally {
+      setRequestedOwner(undefined);
+      delete process.env.IGTRACK_USER_EMAIL;
+    }
+  });
+
+  it("a blank --user value is no selection at all", async () => {
+    setRequestedOwner("   ");
+    try {
+      await resolveUser(handle.db, undefined);
+      expect.unreachable("a blank must not choose an owner");
+    } catch (err) {
+      // Behaves exactly as if the flag had not been sent: the multi-owner
+      // database still refuses to pick.
+      expect((err as CliError).code).toBe("AMBIGUOUS_USER");
+    } finally {
+      setRequestedOwner(undefined);
     }
   });
 });

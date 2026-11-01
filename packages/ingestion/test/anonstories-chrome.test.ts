@@ -179,6 +179,18 @@ describe("the in-page API read", () => {
     expect(error.message).not.toContain("aaaa");
     expect(error.message).toContain(`${CHUNK * 3}-byte cap`);
   });
+
+  it("refuses to build a page request whose cap can never fire", () => {
+    // The bound is interpolated into plain JavaScript, so `NaN` compiles to
+    // `total > NaN`: a cap that is present, silent, and never bites. That is
+    // worse than no cap, because the reader believes there is one.
+    for (const cap of [0, -1, Number.NaN, 1.5, Number.POSITIVE_INFINITY]) {
+      const error = refused(() => buildInPageRequestExpression("https://x/y", "auth", cap));
+      expect(error.message).toMatch(/positive byte count/);
+      expect(error.kind).toBe(CapabilityErrorKind.PROVIDER_ERROR);
+    }
+    expect(buildInPageRequestExpression("https://x/y", "auth", 1024)).toContain("total > 1024");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -56,6 +56,28 @@ describe("bounded response reads", () => {
     ).rejects.toThrow(/example endpoint response passed the 1024-byte cap/);
   });
 
+  it("refuses a declared-length oversize answer without pulling a byte of it", async () => {
+    // The whole point of the early refusal is that the bytes are never consumed.
+    // A test that only checks the error type also passes on a reader that
+    // streamed 8 megabytes first — which is exactly the allocation the cap
+    // exists to prevent.
+    let pulls = 0;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls += 1;
+          controller.enqueue(new TextEncoder().encode("a".repeat(CHUNK)));
+        },
+      }),
+      { status: 200, headers: { "Content-Length": "9000000" } },
+    );
+
+    await expect(readBoundedText(response, 1_024, "quiet endpoint")).rejects.toBeInstanceOf(
+      ResponseTooLargeError,
+    );
+    expect(pulls).toBe(0);
+  });
+
   it("stops a chunked body that lies about its size", async () => {
     // No content-length at all, and the bytes keep coming: the cap must hold on
     // the actual count, which is the only number a streaming server controls.

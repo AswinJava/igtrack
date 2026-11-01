@@ -401,10 +401,22 @@ describe.runIf(dbAvailable)("worker POSTS_SCAN pagination & comment states", () 
   it("clears the posts checkpoint when the scan completes", async () => {
     const targetId = await makeTarget();
     const job = await makeJob(targetId);
-    const src = postsStub({ postPages: { "": { posts: [post("p-1")] } } });
-    await runPostScan(handle.db, job, src);
+    // A single-page scan never stores a cursor, so it cannot show whether the
+    // completion write clears one. Page twice instead: the mid-listing save puts
+    // "p2" in the column, and only an explicit null on completion takes it out.
+    // Omitting it leaves the last cursor behind, and a job retried after this
+    // one COMPLETED resumes from the tail and reports success for a tail read.
+    const src = postsStub({
+      postPages: {
+        "": { posts: [post("p-1")], nextCursor: "p2" },
+        p2: { posts: [post("p-2")] },
+      },
+    });
+    expect(await runPostScan(handle.db, job, src)).toBe("succeeded");
     const checkpoint = await loadCheckpoint(handle.db, targetId, "POSTS_SCAN");
     expect(checkpoint?.page).toBe(0);
+    expect(checkpoint?.cursor ?? null).toBeNull();
+    expect((checkpoint?.progress as { cursor?: string } | null)?.cursor).toBeUndefined();
   });
 
   it("counts provider calls with latency in capability metrics", async () => {

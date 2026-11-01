@@ -193,16 +193,22 @@ export async function runRelationships(args: ParsedArgs): Promise<number> {
   }
 }
 
-export const EVIDENCE_HELP = `igtrack evidence [--limit N] [--json]
+export const EVIDENCE_HELP = `igtrack evidence [username] [--limit N] [--json]
+igtrack evidence --target <username> [--limit N]
 igtrack evidence --id <evidenceId>
 igtrack evidence chain <evidenceId>
 
 The evidence ledger: hashes, source, observed vs captured time, and — for one
 row — its full provenance chain.
 
+  username                one tracked account (id, @handle or profile URL)
+  --target <username>     the same scope, as a flag
   --id <evidenceId>       one row plus its chain
   chain <evidenceId>      the same read in subcommand form
   --limit <n>             ledger rows printed (default 20)
+
+With no username the ledger answers a different question — everything this
+deployment's owner recorded — and the output says which of the two it is.
 
 Append-only: nothing here can be edited or deleted. A row whose source
 transports no raw representation says so instead of passing the normalized
@@ -210,16 +216,24 @@ hash off as the payload hash.`;
 
 export async function runEvidence(args: ParsedArgs): Promise<number> {
   const json = isJson(args.flags);
-  if (args.positionals[0] === "chain" && args.positionals[1] === undefined) {
+  const isChain = args.positionals[0] === "chain";
+  if (isChain && args.positionals[1] === undefined) {
     throw new UsageError("Usage: igtrack evidence chain <evidenceId>");
+  }
+  // A second positional has no meaning in any form of this command; refusing
+  // beats printing a ledger that quietly ignored half the request.
+  if (!isChain && args.positionals.length > 1) {
+    throw new UsageError("Usage: igtrack evidence [username] [--limit N] | igtrack evidence --id <evidenceId>");
   }
   const ctx = await createContext();
   try {
     const result = await opEvidence(ctx, {
       id:
-        flagString(args.flags, "id") ??
-        (args.positionals[0] === "chain" ? args.positionals[1] : undefined),
+        flagString(args.flags, "id") ?? (isChain ? args.positionals[1] : undefined),
       limit: flagNumber(args.flags, "limit", 20),
+      target: isChain
+        ? undefined
+        : flagString(args.flags, "target") ?? args.positionals[0] ?? undefined,
     });
 
     let human: string;
@@ -245,17 +259,30 @@ export async function runEvidence(args: ParsedArgs): Promise<number> {
         ),
       ].join("\n");
     } else {
-      human = table(
-        ["observed", "kind", "source", "observation id", "confidence", "id"],
-        result.rows.map((r) => [
-          relativeTime(r.observed_at),
-          r.observation_kind,
-          r.source_id,
-          r.observation_id,
-          r.confidence,
-          r.id,
-        ]),
-      );
+      const shown = result.rows.length;
+      const header =
+        result.target === null
+          ? `Evidence ledger — every row this owner recorded (${shown} shown)`
+          : `Evidence ledger — @${result.target.username} (${shown} of its rows shown)`;
+      const empty =
+        shown === 0
+          ? "The read succeeded and this scope holds no evidence rows — an empty ledger, not a refusal."
+          : "";
+      human = [
+        header,
+        empty,
+        table(
+          ["observed", "kind", "source", "observation id", "confidence", "id"],
+          result.rows.map((r) => [
+            relativeTime(r.observed_at),
+            r.observation_kind,
+            r.source_id,
+            r.observation_id,
+            r.confidence,
+            r.id,
+          ]),
+        ),
+      ].join("\n");
     }
 
     emit({ json, meta: ctx.meta, data: result, human });
@@ -464,8 +491,8 @@ A capability with no rows is reported as NOT_OBSERVED with the reason a scan
 cannot fill it, or as UNAVAILABLE with the platform's own reason — never as
 empty data. Capabilities this project refuses by decision carry that refusal.
 
-For a DISCOVERY target (another public account, tracked via
-\`targets add <username> --observed\`) the stored media rows are a BOUNDED,
+For a DISCOVERY target (another public account, tracked through the documented
+Business Discovery edge — \`igtrack targets --help\` says how) the stored media rows are a BOUNDED,
 non-pageable preview: the row's \`publishedAt\` (the platform's publish time) and
 \`firstObservedAt\` (when this deployment first saw it) are different facts and
 are printed as such — newly discovered is not newly created.

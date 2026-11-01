@@ -242,6 +242,7 @@ Rules that never change:
 | "Cannot reach Postgres" | `docker compose up -d`, then `igtrack doctor` |
 | "provider is not usable" | `igtrack doctor` shows the exact gap |
 | "No tracked target matches …" | `igtrack targets list`, or `igtrack investigate <username>` |
+| "… does not accept --…" | `igtrack <command> --help` — the flag was never read, so nothing ran with a silent default |
 | Anything confusing | `igtrack ask "what can you do?"` |
 
 IGTrack appends a "What to do next" line to every human-mode error when it

@@ -257,8 +257,8 @@ describe.runIf(dbAvailable)("scheduler fleet coverage", () => {
     // The S8 test above fails a tick with an unreachable database, where the
     // diagnostic write cannot land either — so it can never notice that the
     // recorded reason is broken. Here the database is live and the failure is
-    // the identity gate, the one provider call inside a tick: this is exactly
-    // the path `doctor` reads as scheduler.lastError.
+    // the identity gate, the one provider call inside a tick; the stored row is
+    // what an operator reads when a tick died in the daemon with nobody watching.
     const reason = "identity gate exploded: simulated provider outage at 127.0.0.1:5432";
     await expect(
       runSchedulerTick(handle.db, {
@@ -274,5 +274,45 @@ describe.runIf(dbAvailable)("scheduler fleet coverage", () => {
     const state = await getSchedulerState(handle.db);
     expect(state).not.toBeNull();
     expect(state?.lastError?.message).toContain(reason);
+  }, 180_000);
+
+  it("says out loud when a recorded tick reason had to be cut", async () => {
+    const withWords = `identity gate exploded: ${"provider detail ".repeat(600)}`;
+    await expect(
+      runSchedulerTick(handle.db, {
+        now: new Date(T0 + 172_800_000),
+        provider: {
+          observesAccount: async () => {
+            throw new Error(withWords);
+          },
+        },
+      }),
+    ).rejects.toThrow("identity gate exploded");
+
+    const stored = (await getSchedulerState(handle.db))?.lastError?.message ?? "";
+    // Cut, and said to be cut: a half message that ends mid-sentence is read as
+    // the whole reason for a failure nobody watched happen.
+    expect(stored.endsWith("…[truncated]")).toBe(true);
+    // Bound by the write it was widened to, not by the older, tighter one.
+    expect(stored.length).toBeLessThanOrEqual(4000);
+    expect(stored.length).toBeGreaterThan(300);
+    expect(stored).toContain("identity gate exploded");
+
+    // A message with no space near the bound has no word boundary to respect.
+    const oneToken = `E${"x".repeat(5000)}`;
+    await expect(
+      runSchedulerTick(handle.db, {
+        now: new Date(T0 + 259_200_000),
+        provider: {
+          observesAccount: async () => {
+            throw new Error(oneToken);
+          },
+        },
+      }),
+    ).rejects.toThrow(/^Exxx/);
+
+    const hard = (await getSchedulerState(handle.db))?.lastError?.message ?? "";
+    expect(hard.length).toBeLessThanOrEqual(4000);
+    expect(hard.endsWith("…[truncated]")).toBe(true);
   }, 180_000);
 });
