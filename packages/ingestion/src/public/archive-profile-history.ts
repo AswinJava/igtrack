@@ -21,9 +21,9 @@ import { ResponseTooLargeError, readBoundedBytes } from "../http/bounded-respons
 //
 // Bounds: one index query, a bounded number of capture reads, per-request
 // timeout and byte cap, sequential-with-small-concurrency reads, and reads
-// only from the archive host. Every capture that could not be read, or that
-// carried no exact counts, is counted and reported — never silently dropped
-// into "no history".
+// only from the archive host — a redirect away from it is refused, not
+// followed. Every capture that could not be read, or that carried no exact
+// counts, is counted and reported — never silently dropped into "no history".
 // ---------------------------------------------------------------------------
 
 export const ARCHIVE_PROFILE_SOURCE_ID = "archive:wayback:v1";
@@ -51,8 +51,18 @@ export interface ArchiveHistoryOptions {
   maxBytes?: number | undefined;
   now?: Date | undefined;
   /** Test seam: replaces the network transport entirely. */
-  fetchImpl?: ((url: string, init: { signal: AbortSignal }) => Promise<ArchiveHttpResponse>) | undefined;
+  fetchImpl?: ArchiveFetch | undefined;
 }
+
+/**
+ * How this reader asks for bytes. `redirect: "manual"` is part of the shape:
+ * following a redirect would move the read off the archive host, and the
+ * result of that read would still be labelled an archived capture.
+ */
+export type ArchiveFetch = (
+  url: string,
+  init: { signal: AbortSignal; redirect: "manual" },
+) => Promise<ArchiveHttpResponse>;
 
 /**
  * The part of an HTTP answer this reader uses: the status, one header, and a
@@ -80,7 +90,7 @@ export interface ArchiveHistoryResult {
   capturesWithCounts: number;
   /** Captures read but skipped: no exact integer counts in the payload. */
   capturesWithoutCounts: number;
-  /** Captures that could not be read at all (network, HTTP, oversized, wrong host). */
+  /** Captures that could not be read at all (network, HTTP status, oversized, redirected off the archive host). */
   capturesFailed: number;
   points: ArchivedProfileCounts[];
   /** Why the state is EMPTY / UNAVAILABLE; null when OBSERVED. */
@@ -90,9 +100,9 @@ export interface ArchiveHistoryResult {
   consultedUrls: string[];
 }
 
-const CDX_ENDPOINT = "https://web.archive.org/cdx/search/cdx";
-const RAW_CAPTURE_PREFIX = "https://web.archive.org/web/";
-const ALLOWED_HOST = "web.archive.org";
+const ARCHIVE_HOST = "web.archive.org";
+const CDX_ENDPOINT = `https://${ARCHIVE_HOST}/cdx/search/cdx`;
+const RAW_CAPTURE_PREFIX = `https://${ARCHIVE_HOST}/web/`;
 const DEFAULT_WINDOW_DAYS = 30;
 const DEFAULT_MAX_CAPTURES = 12;
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -187,6 +197,31 @@ function parseCdxRows(payload: unknown): CdxRow[] {
   return rows;
 }
 
+/**
+ * Every URL this reader builds starts with the archive host, so a 3xx means the
+ * bytes would come from somewhere else. The redirect is refused rather than
+ * followed: reading another server's page and labelling it an archived capture
+ * is the failure this prevents. The `Location` value is not quoted — it is
+ * remote data, and nothing an operator could act on changes with its content.
+ */
+function wasRedirected(status: number): boolean {
+  return status >= 300 && status <= 399;
+}
+
+function indexFailure(status: number): string {
+  if (wasRedirected(status)) {
+    return (
+      `The public archive index answered HTTP ${status} with a redirect off the archive host. ` +
+      "The redirect was not followed, so no listing was read; this is a failure to look, " +
+      "not proof that no capture exists."
+    );
+  }
+  return (
+    `The public archive index answered HTTP ${status}; ` +
+    "this is a failure to look, not proof that no capture exists."
+  );
+}
+
 async function readBounded(
   response: ArchiveHttpResponse,
   maxBytes: number,
@@ -231,7 +266,8 @@ export async function fetchArchivedProfileHistory(
   const from = new Date(now.getTime() - windowDays * 86_400_000);
   const fetchImpl =
     options.fetchImpl ??
-    ((url: string, init: { signal: AbortSignal }) => fetch(url, init) as Promise<ArchiveHttpResponse>);
+    ((url: string, init: { signal: AbortSignal; redirect: "manual" }) =>
+      fetch(url, init) as Promise<ArchiveHttpResponse>);
 
   const base: ArchiveHistoryResult = {
     state: "EMPTY",
@@ -275,13 +311,12 @@ export async function fetchArchivedProfileHistory(
 
   let cdxPayload: unknown;
   try {
-    const response = await fetchImpl(cdxUrl, { signal: AbortSignal.timeout(timeoutMs) });
+    const response = await fetchImpl(cdxUrl, {
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: "manual",
+    });
     if (response.status !== 200) {
-      return {
-        ...base,
-        state: "UNAVAILABLE",
-        reason: `The public archive index answered HTTP ${response.status}; this is a failure to look, not proof that no capture exists.`,
-      };
+      return { ...base, state: "UNAVAILABLE", reason: indexFailure(response.status) };
     }
     const index = await readBounded(response, maxBytes);
     if ("failure" in index) {
@@ -294,7 +329,24 @@ export async function fetchArchivedProfileHistory(
       };
     }
     const text = Buffer.from(index.bytes).toString("utf8").trim();
-    cdxPayload = text === "" ? [] : JSON.parse(text);
+    // Its own refusal, not the reachability catch below: a JSON syntax error
+    // quotes a slice of the body it choked on, and response bytes do not go into
+    // operator-visible output.
+    if (text === "") {
+      cdxPayload = [];
+    } else {
+      try {
+        cdxPayload = JSON.parse(text) as unknown;
+      } catch {
+        return {
+          ...base,
+          state: "UNAVAILABLE",
+          reason:
+            "The public archive index answered with a body that is not the JSON list it documents. " +
+            "This is a failure to look, not proof that no capture exists.",
+        };
+      }
+    }
   } catch (err) {
     return {
       ...base,
@@ -336,10 +388,17 @@ export async function fetchArchivedProfileHistory(
     base.consultedUrls.push(captureUrl);
     base.capturesRead += 1;
     try {
-      const response = await fetchImpl(captureUrl, { signal: AbortSignal.timeout(timeoutMs) });
+      const response = await fetchImpl(captureUrl, {
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: "manual",
+      });
       if (response.status !== 200) {
         base.capturesFailed += 1;
-        notes.push(`${row.timestamp}: archive returned HTTP ${response.status}; the capture was skipped.`);
+        notes.push(
+          wasRedirected(response.status)
+            ? `${row.timestamp}: archive answered HTTP ${response.status} with a redirect off the archive host; the redirect was not followed and the capture was skipped.`
+            : `${row.timestamp}: archive returned HTTP ${response.status}; the capture was skipped.`,
+        );
         continue;
       }
       const bounded = await readBounded(response, maxBytes);
@@ -386,13 +445,27 @@ export async function fetchArchivedProfileHistory(
   }
 
   if (points.length === 0) {
+    const failed = base.capturesFailed;
+    // Any unreadable capture makes this a failure to look: "nothing was
+    // recorded" is true, but "there was nothing to record" is unproven while
+    // one capture was never read.
+    if (failed === 0) {
+      return {
+        ...base,
+        state: "EMPTY",
+        reason: `The public archive lists ${rows.length} capture(s) of @${normalized} in the last ${windowDays} day(s), but none carried an exact count. No count history was recorded.`,
+        notes,
+      };
+    }
     return {
       ...base,
-      state: base.capturesFailed === rows.length ? "UNAVAILABLE" : "EMPTY",
+      state: "UNAVAILABLE",
       reason:
-        base.capturesFailed === rows.length
-          ? `The public archive lists ${rows.length} capture(s) of @${normalized} in the last ${windowDays} day(s), but none could be read. This is a failure to look, not an absence of history.`
-          : `The public archive lists ${rows.length} capture(s) of @${normalized} in the last ${windowDays} day(s), but none carried an exact count. No count history was recorded.`,
+        `The public archive lists ${rows.length} capture(s) of @${normalized} in the last ${windowDays} day(s), but ` +
+        (failed === rows.length
+          ? "none could be read"
+          : `${failed} of the ${base.capturesRead} capture(s) attempted could not be read`) +
+        `. This is a failure to look, not an absence of history.`,
       notes,
     };
   }

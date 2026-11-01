@@ -45,7 +45,7 @@ Phases (in order, all read-only — no target is registered, no row is written):
      auto = Brave when IGTRACK_RESEARCH_SEARCH_API_KEY is set, otherwise the keyless
      FreeSerp index; brave = the official Brave API with that key; freeserp;
      none = never search), fetched through the same SSRF gate, robots check and
-     byte/timeout caps as \`research --run\`, capped at
+     byte/timeout caps as an autonomous research run (\`igtrack research\`), capped at
      ${AUDIT_WEB_MAX_SOURCES} documents by default, depth 1, and NEVER stored.
      The search asks a fixed budget of 4 distinct queries for the handle
      (quoted form, profile-URL form, @-mention form, bare form), deduplicates

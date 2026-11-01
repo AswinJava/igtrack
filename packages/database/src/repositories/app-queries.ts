@@ -1647,7 +1647,15 @@ async function scopedEvidenceByKind(
   userId: string,
   kind: string,
   limit: number,
+  targetId?: string,
 ): Promise<ScopedEvidenceRow[]> {
+  // Every branch below already joins the owning target, so narrowing to one
+  // target is the same predicate in each branch. Without it the ledger answers
+  // "everything this owner recorded", which is a different question from the
+  // one `igtrack evidence <username>` asks. The unscoped case gets a true
+  // predicate rather than an empty fragment: drizzle binds an empty SQL
+  // fragment as a parameter, which makes the whole query fail.
+  const scope = targetId === undefined ? sql`AND TRUE` : sql`AND t.id = ${targetId}`;
   const rows = await query<ScopedEvidenceRow>(
     db,
     sql`
@@ -1660,28 +1668,34 @@ async function scopedEvidenceByKind(
         (e.observation_kind = 'profile_snapshot' AND EXISTS (
           SELECT 1 FROM profile_snapshots ps
           JOIN targets t ON t.ig_account_id = ps.ig_account_id AND t.user_id = ${userId}
+          ${scope}
           WHERE ps.id = e.observation_id))
         OR (e.observation_kind = 'follow_snapshot' AND EXISTS (
           SELECT 1 FROM follow_snapshots fs
           JOIN targets t ON t.id = fs.target_id AND t.user_id = ${userId}
+          ${scope}
           WHERE fs.id = e.observation_id))
         OR (e.observation_kind = 'interaction' AND EXISTS (
           SELECT 1 FROM interactions i
           JOIN targets t ON t.id = i.target_id AND t.user_id = ${userId}
+          ${scope}
           WHERE i.id = e.observation_id))
         OR (e.observation_kind = 'post' AND EXISTS (
           SELECT 1 FROM posts p
           JOIN targets t ON t.id = p.target_id AND t.user_id = ${userId}
+          ${scope}
           WHERE p.id = e.observation_id))
         OR (e.observation_kind = 'post_comment' AND EXISTS (
           SELECT 1 FROM post_comments pc
           JOIN posts p ON p.id = pc.post_db_id
           JOIN targets t ON t.id = p.target_id AND t.user_id = ${userId}
+          ${scope}
           WHERE pc.id = e.observation_id))
         OR (e.observation_kind IN ('story', 'story_mention') AND EXISTS (
           SELECT 1 FROM stories st
           JOIN ig_accounts ia ON ia.id = st.ig_account_id
           JOIN targets t ON t.ig_account_id = st.ig_account_id AND t.user_id = ${userId}
+          ${scope}
           WHERE st.id = e.observation_id
              OR st.id IN (SELECT sm.story_db_id FROM story_mentions sm
                           WHERE sm.id = e.observation_id)))
@@ -1697,10 +1711,13 @@ export async function listScopedEvidence(
   db: Database,
   userId: string,
   limit = 30,
+  targetId?: string,
 ): Promise<ScopedEvidenceRow[]> {
   const kinds = ["profile_snapshot", "story", "story_mention", "follow_snapshot", "interaction", "post", "post_comment"];
+  // A failing branch is a real read failure, not an empty ledger: the error
+  // propagates so the caller reports the reason instead of showing nothing.
   const buckets = await Promise.all(
-    kinds.map((k) => scopedEvidenceByKind(db, userId, k, limit).catch(() => [])),
+    kinds.map((k) => scopedEvidenceByKind(db, userId, k, limit, targetId)),
   );
   return buckets
     .flat()
@@ -2070,14 +2087,30 @@ interface JobSummaryRaw {
  */
 const JOB_ERROR_SUMMARY_LIMIT = 1000;
 
+/** The kept head of a cut reason — never mid-word, so no half instruction reads as advice. */
+function cutReason(text: string, limit: number): string {
+  const cut = text.slice(0, limit);
+  const boundary = cut.lastIndexOf(" ");
+  return boundary > 200 ? cut.slice(0, boundary) : cut;
+}
+
 function summarizeJobError(value: string | null): string | null {
   if (value === null) return null;
   const text = String(value).replace(/\s+/g, " ").trim();
   if (text.length <= JOB_ERROR_SUMMARY_LIMIT) return text;
-  const cut = text.slice(0, JOB_ERROR_SUMMARY_LIMIT);
-  const boundary = cut.lastIndexOf(" ");
-  const head = boundary > 200 ? cut.slice(0, boundary) : cut;
-  return `${head} … (reason truncated in the queue summary; the job stores the full text)`;
+  return `${cutReason(text, JOB_ERROR_SUMMARY_LIMIT)} … (reason truncated in the queue summary; the job stores the full text)`;
+}
+
+/**
+ * A scheduler tick has no job row behind it: the scheduler_state row IS the
+ * record. Reusing the job's note here sent the reader to a job that does not
+ * exist, so the scheduler's own cut names where the whole reason lives.
+ */
+function summarizeSchedulerError(value: string | null): string | null {
+  if (value === null) return null;
+  const text = String(value).replace(/\s+/g, " ").trim();
+  if (text.length <= JOB_ERROR_SUMMARY_LIMIT) return text;
+  return `${cutReason(text, JOB_ERROR_SUMMARY_LIMIT)} … (cut for this summary; the scheduler row holds the recorded reason)`;
 }
 
 function mapJobSummary(r: JobSummaryRaw): JobQueueSummary {
@@ -2231,7 +2264,7 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
           db,
           sql`SELECT last_tick_at, last_success_at,
                      (CASE WHEN last_error IS NULL THEN NULL
-                           ELSE left(coalesce(last_error->>'message', 'unknown error'), 4000) END) AS last_error
+                           ELSE coalesce(last_error->>'message', 'unknown error') END) AS last_error
                 FROM scheduler_state WHERE id = 'default'`,
         ).catch(() => [] as Array<{ last_tick_at: Date | string | null; last_success_at: Date | string | null; last_error: string | null }>),
         query<{ outcome: string; n: number }>(
@@ -2280,7 +2313,7 @@ export async function getOperationsSnapshot(db: Database): Promise<OperationsSna
           schedulerRow[0]?.last_success_at === null || schedulerRow[0] === undefined
             ? null
             : asDate(schedulerRow[0].last_success_at),
-        lastError: summarizeJobError(schedulerRow[0]?.last_error ?? null),
+        lastError: summarizeSchedulerError(schedulerRow[0]?.last_error ?? null),
         outcomes: Object.fromEntries(
           outcomeRows.map((r) => [r.outcome, int(r.n)]),
         ),

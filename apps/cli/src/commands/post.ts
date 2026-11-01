@@ -125,13 +125,14 @@ export async function runPost(args: ParsedArgs): Promise<number> {
     out !== undefined
       ? `Post written to ${out}. Live logged-out public-page observation; not an official Graph API response.`
       : undefined,
+    single.source.sourceId,
   );
 
   if (out !== undefined) {
     try {
       writeFileSync(
         out,
-        `${JSON.stringify(envelope(single, liveReadMeta("public-post", "cli")), null, 2)}\n`,
+        `${JSON.stringify(envelope(single, meta), null, 2)}\n`,
         "utf8",
       );
     } catch (err) {

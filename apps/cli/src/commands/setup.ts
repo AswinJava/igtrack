@@ -381,7 +381,18 @@ export function renderDoctorHuman(report: DoctorReport): string {
               : `${usableGraph.length}/${requiredGraph.length} required variables usable`,
         ],
         ["api connectivity", "NOT_VERIFIED — doctor makes no network request"],
-        ["scheduler", report.scheduler.enabled ? "enabled" : "disabled"],
+        [
+          "scheduler",
+          `${report.scheduler.enabled ? "enabled" : "disabled"} · ` +
+            (report.scheduler.lastTickAt === null
+              ? "no tick recorded against this database"
+              : `last tick ${report.scheduler.lastTickAt.toISOString()}, ` +
+                `last success ${
+                  report.scheduler.lastSuccessAt === null
+                    ? "never"
+                    : report.scheduler.lastSuccessAt.toISOString()
+                }${report.scheduler.lastError === null ? "" : " · LAST TICK FAILED (see findings)"}`),
+        ],
         ["source health rows", String(report.sourceHealth.length)],
       ],
     ),

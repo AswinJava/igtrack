@@ -134,8 +134,8 @@ export const DIGEST_HELP = `igtrack digest [target] [--since 7d] [--limit N] [--
 
 A short local change digest across tracked targets (or one target when named):
 counts by event type, the accounts added and removed on each follow side, and
-the newest events with their evidence ids. Named without a target it covers
-every tracked target (the same scope as \`--all\`).
+the newest events with their evidence ids. Without a target it covers every
+tracked target; naming one narrows the digest to that account.
 
 --out writes the digest text to a file so cron or an agent can deliver it; no
 daemon, email or outbox is involved.

@@ -107,7 +107,19 @@ export function findChrome(executablePath?: string): string | undefined {
   return undefined;
 }
 
-export function chromeUnavailableMessage(): string {
+export function chromeUnavailableMessage(executablePath?: string): string {
+  const named = executablePath !== undefined && executablePath.trim() !== ""
+    ? executablePath.trim()
+    : "";
+  if (named !== "") {
+    // The operator pointed at a binary. Telling them to install Chrome would
+    // send them to a fix for a problem they do not have.
+    return (
+      `"${named}" is not a Chrome/Chromium/Edge executable that exists. ` +
+      "Point --chrome (or IGTRACK_CHROME_PATH) at the browser binary itself. " +
+      "No request was made."
+    );
+  }
   return (
     "The public-web provider needs a local Chrome/Chromium/Edge binary. " +
     "Install Google Chrome, or set IGTRACK_CHROME_PATH to the browser executable. " +
@@ -201,6 +213,30 @@ function runChrome(
 }
 
 /**
+ * A missing DOM is a transport fact, and Chrome nearly always says why on
+ * stderr — `net::ERR_NAME_NOT_RESOLVED` when DNS is down,
+ * `ERR_CONNECTION_TIMED_OUT` when the host is silent. Throwing those away made
+ * "the page never loaded" read exactly like "Instagram served an empty page",
+ * which is the distinction this product exists to make. Windows Chrome also
+ * prints unrelated registry warnings on every run, so the page-load line is
+ * taken when present and the last real line when not.
+ */
+export function emptyDomReason(stderr: string): string {
+  const lines = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const pageLoad = [...lines].reverse().find((line) => /page load failed/i.test(line));
+  const chosen = pageLoad ?? lines.at(-1);
+  if (chosen === undefined) {
+    return "Chrome returned no HTML document and reported nothing: the page was never loaded. This is a transport failure, not an empty profile.";
+  }
+  const cut = chosen.lastIndexOf("] ");
+  const detail = (cut === -1 ? chosen : chosen.slice(cut + 2)).slice(0, 200);
+  return `Chrome returned no HTML document (${detail}): the page was never loaded. This is a transport failure, not an empty profile.`;
+}
+
+/**
  * Render one URL in a fresh headless Chrome profile and return its DOM.
  * Throws ChromeUnavailableError when no browser exists; any other failure is
  * a normal transport error the provider maps to a typed capability failure.
@@ -208,12 +244,7 @@ function runChrome(
 export async function dumpDom(url: string, options: ChromeRunOptions = {}): Promise<string> {
   const executablePath = findChrome(options.executablePath);
   if (executablePath === undefined) {
-    throw new ChromeUnavailableError(
-      options.executablePath !== undefined && options.executablePath.trim() !== ""
-        ? `"${options.executablePath.trim()}" is not a Chrome/Chromium/Edge executable, so no page was loaded. ` +
-          "Point --chrome (or IGTRACK_CHROME_PATH) at the browser binary itself."
-        : chromeUnavailableMessage(),
-    );
+    throw new ChromeUnavailableError(chromeUnavailableMessage(options.executablePath));
   }
   assertRenderableTarget(url);
   const timeoutMs = options.timeoutMs ?? 60_000;
@@ -244,7 +275,7 @@ export async function dumpDom(url: string, options: ChromeRunOptions = {}): Prom
   try {
     const result = await runChrome(executablePath, args, timeoutMs);
     if (!/<html[\s>]/i.test(result.stdout)) {
-      throw new Error("Chrome returned no HTML document");
+      throw new Error(emptyDomReason(result.stderr));
     }
     return result.stdout;
   } finally {

@@ -86,7 +86,7 @@ Observe
   activity              What changed, newest first, with evidence ids
   relationships <t>     Accounts ranked by observed signal, with provenance
   dossier <target>      Everything recorded about one account, with its gaps
-  evidence              Evidence rows (audit trail) and --id chains
+  evidence [username]   Evidence ledger rows (audit trail) and --id chains
   lookup <username>     Ask the source what it can observe, persisting nothing
   insights <target>     Account metrics this deployment recorded, with absences
   tags <target>         Media by other accounts this account is tagged in
@@ -186,8 +186,8 @@ export const COMMAND_HELP: Record<string, string> = {
 
 /**
  * The flags every command reads, whatever its own contract documents: the
- * envelope switch, the two help switches, the version switch and the owner
- * selection.
+ * envelope switch (`--json`), the two help switches (`-h`, `--help`), the two
+ * version switches (`-v`, `--version`) and the owner selection (`--user`).
  */
 export const GLOBAL_FLAGS: ReadonlySet<string> = new Set([
   "h",
@@ -199,6 +199,14 @@ export const GLOBAL_FLAGS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The one command whose text is not its own contract: `igtrack help` prints the
+ * index, and the index names every other command's flags. Deriving from it would
+ * accept `igtrack help --since 7d` and print the index as though the window had
+ * been honoured — the same silent drop the gate refuses everywhere else.
+ */
+const PROSE_DERIVED_EXEMPT = new Set(["help"]);
+
+/**
  * The flag names a command accepts, read out of the one contract it has. A
  * refusal and a documentation list must never be two different lists, so the
  * accepted set is not maintained separately from the help text — it is derived
@@ -206,6 +214,7 @@ export const GLOBAL_FLAGS: ReadonlySet<string> = new Set([
  */
 export function documentedFlags(command: string): ReadonlySet<string> {
   const names = new Set<string>(GLOBAL_FLAGS);
+  if (PROSE_DERIVED_EXEMPT.has(command)) return names;
   for (const match of (COMMAND_HELP[command] ?? "").matchAll(/--([a-z][a-z0-9-]*)/g)) {
     const name = match[1];
     if (name !== undefined) names.add(name);

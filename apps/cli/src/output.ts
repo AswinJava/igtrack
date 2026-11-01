@@ -151,6 +151,26 @@ export function errorHint(code: string, message = ""): string | null {
   }
 }
 
+/**
+ * Invariant 8 on text this process did not write.
+ *
+ * Driver, provider and HTTP errors quote the URL they were handed, and a
+ * connection string or a Graph request URL carries the credential inside it.
+ * Those strings are diagnostics, not observed data: they reach `doctor`, the
+ * status payload, ask answers and refusal messages, so a screenshot of any one
+ * of them would otherwise be a leaked secret. The shape a diagnosis needs stays
+ * (scheme, user, host, path, parameter name); the value goes.
+ *
+ * Apply it where a foreign string enters a diagnostic, never to observed
+ * content — a caption that happens to contain `token=abc` is data, and rewriting
+ * data so it looks scrubbed would corrupt the record.
+ */
+export function scrubCredentials(text: string): string {
+  return text
+    .replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/@\s:]*:)[^/@\s]*(@)/g, "$1***$2")
+    .replace(/([?&](?:password|passwd|secret|token|api[_-]?key|access_token)=)[^&\s]*/gi, "$1***");
+}
+
 // ---------------------------------------------------------------------------
 // Argument parsing — small, explicit, no dependency.
 // ---------------------------------------------------------------------------

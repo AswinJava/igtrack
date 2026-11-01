@@ -67,13 +67,27 @@ export function schedulerTickIntervalMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 60_000;
 }
 
-/** The error text as stored for diagnostics, bounded but never cut mid-word. */
+/** Appended when a stored reason had to be cut, so a half message never reads as a whole one. */
+const TRUNCATION_MARKER = "…[truncated]";
+
+/**
+ * The error text as stored for diagnostics.
+ *
+ * The stored row is the only record of why a tick failed — `igtrack work`
+ * reports the live error, but a tick that died in the daemon leaves nothing but
+ * this — so the cut is said out loud: the marker is appended and the result
+ * stays within `max`. A cut prefers the last word boundary inside the bound and
+ * falls back to the raw bound when the head holds no usable space, because a
+ * message with no space in its first 200 characters is a token, not a sentence.
+ */
 function reasonText(err: unknown, max: number): string {
   const text = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim();
   if (text.length <= max) return text;
-  const head = text.slice(0, max);
+  const room = Math.max(1, max - TRUNCATION_MARKER.length);
+  const head = text.slice(0, room);
   const boundary = head.lastIndexOf(" ");
-  return boundary > 200 ? head.slice(0, boundary) : head;
+  const cut = boundary > 200 ? head.slice(0, boundary) : head;
+  return `${cut.trimEnd()}${TRUNCATION_MARKER}`;
 }
 
 export async function runSchedulerTick(
@@ -154,9 +168,9 @@ export async function runSchedulerTick(
     return result;
   } catch (err) {
     // Best-effort diagnostics recording; the original error still propagates.
-    // The reason is stored whole (up to the write bound) because a summary that
-    // cuts a sentence mid-word presents a half instruction as the recorded
-    // reason — the read surface adds an explicit truncation marker instead.
+    // The reason is bounded by the write, and `reasonText` marks the bound in
+    // the text itself: this row is often the only trace of a tick that failed
+    // with nobody watching, so a cut must not look like a complete sentence.
     await recordSchedulerTickFailure(db, now, {
       message: reasonText(err, 4000),
       failedAt: new Date().toISOString(),

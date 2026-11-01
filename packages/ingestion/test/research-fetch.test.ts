@@ -406,6 +406,47 @@ describe("fetchPage through the full gate", () => {
     expect(calls.some((c) => c.includes("instagram"))).toBe(false);
   });
 
+  it("describes a redirect target by shape: no query, no credentials, bounded", async () => {
+    // A Location is remote data. It can carry a session token in its query or
+    // credentials in its userinfo, and this package's rule is that values never
+    // reach operator output — the reason shows where the hop pointed, not what
+    // it was carrying.
+    const { impl } = routeTable({
+      "/start": () => redirect("https://[?session=SESSION-TOKEN-LEAK&trace=1"),
+    });
+    vi.stubGlobal("fetch", impl);
+
+    const result = await new ResearchFetcher({ pinLookup: pinPublic }).fetchPage(
+      "https://aurora.example/start",
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.kind).toBe("UNSAFE_URL");
+      expect(result.reason).toMatch(/is not a valid URL/);
+      expect(result.reason).not.toContain("SESSION-TOKEN-LEAK");
+      expect(result.reason).not.toContain("trace=1");
+      expect(result.reason.length).toBeLessThan(200);
+    }
+  });
+
+  it("echoes a robots redirect without its query", async () => {
+    const { impl } = routeTable({
+      "/doc": () => html("<html>ok</html>"),
+      "/robots.txt": () => redirect("https://aurora.example/robots-v2.txt?token=ROBOTS-TOKEN-LEAK"),
+    });
+    vi.stubGlobal("fetch", impl);
+
+    const result = await new ResearchFetcher({ pinLookup: pinPublic }).fetchPage(
+      "https://aurora.example/doc",
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.robotsChecked).toBe(false);
+      expect(result.robotsNote).toMatch(/redirected to https:\/\/aurora\.example\/robots-v2\.txt/);
+      expect(result.robotsNote).not.toContain("ROBOTS-TOKEN-LEAK");
+    }
+  });
+
   it("re-validates a redirect onto a link-local/metadata address (DNS pin included)", async () => {
     const { impl } = routeTable({
       "/start": () => redirect("http://169.254.169.254/latest/meta-data/"),

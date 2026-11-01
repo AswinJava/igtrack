@@ -46,15 +46,18 @@ const databaseUp = await probeDatabase(TEST_DATABASE_URL);
 
 const OBSERVED_AT = "2026-08-27T14:00:00.000Z";
 
-function profileSource(status: CapabilityStatus): ExecutionSource {
+function profileSource(
+  status: CapabilityStatus,
+  withheld?: "followerCount" | "followingCount" | "postCount",
+): ExecutionSource {
   const sourceId = "stub:profile-outcome";
   const sourceRef = { sourceId, kind: SourceKind.FIXTURE };
   const profile = (account: NormalizedAccountRef): NormalizedProfile => ({
     account,
     bio: "stub bio",
-    followerCount: 120,
-    followingCount: 80,
-    postCount: 7,
+    ...(withheld === "followerCount" ? {} : { followerCount: 120 }),
+    ...(withheld === "followingCount" ? {} : { followingCount: 80 }),
+    ...(withheld === "postCount" ? {} : { postCount: 7 }),
     meta: {
       category: ObservationCategory.OBSERVED,
       confidence: Confidence.HIGH,
@@ -178,6 +181,31 @@ describe.skipIf(!databaseUp)("job outcome states agree with stored completeness"
     const row = await storedJob(job.id);
     expect(row?.outcome).toBe("COMPLETED_PARTIAL");
     expect(row?.status).toBe("succeeded");
+    expect(outcome.state).toBe("succeeded");
+
+    const snaps = await handle.db
+      .select({ completeness: profileSnapshots.completeness })
+      .from(profileSnapshots)
+      .where(sql`${profileSnapshots.igAccountId} = ${igAccountId}`);
+    expect(snaps.map((s) => s.completeness)).toEqual(["PARTIAL"]);
+  });
+
+  it("marks an AVAILABLE read that withheld a count PARTIAL, not diffable", async () => {
+    const { igAccountId, workerId, job } = await makeJob();
+    const outcome = await executeOne(
+      handle.db,
+      workerId,
+      profileSource(CapabilityStatus.AVAILABLE, "followerCount"),
+      job,
+    );
+
+    // The status word said "the whole thing", the payload held back the number
+    // every follower-change claim is built from. Diffed against a complete
+    // baseline that absence reads as `followerCount 120 -> null` — a lost
+    // follower the platform never reported — so completeness is decided by the
+    // fields, not by the status.
+    const row = await storedJob(job.id);
+    expect(row?.outcome).toBe("COMPLETED_PARTIAL");
     expect(outcome.state).toBe("succeeded");
 
     const snaps = await handle.db

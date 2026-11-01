@@ -170,11 +170,18 @@ async function guarded(fn: () => Promise<unknown>): Promise<ToolResult> {
         ? "DB_UNAVAILABLE"
         : "INTERNAL";
     const message = err instanceof Error ? err.message : String(err);
+    // The terminal states a refusal's severity as its exit code; this transport
+    // has no exit code, so it carries the number the same failure would have
+    // produced. Dropped, every refusal arrives as the same `isError` and an agent
+    // cannot tell "fix your configuration" (3) from "the platform said no" (1)
+    // from "the call was malformed" (2) — which the tool descriptions promise.
+    // The fallback matches the router's own answer for a non-CliError.
+    const exitCode = err instanceof CliError ? err.exitCode : 1;
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify({ ok: false, error: { code, message } }, null, 2),
+          text: JSON.stringify({ ok: false, error: { code, message, exitCode } }, null, 2),
         },
       ],
       isError: true,
@@ -319,7 +326,7 @@ export function buildServer(): McpServer {
     {
       title: "Diagnostics",
       description:
-        "Secret-free deployment diagnostic: provider usability, database reachability and migrations, scheduler intervals, source health, provider metrics, and findings.",
+        "Secret-free deployment diagnostic: provider usability, database reachability and migrations, scheduler intervals plus the recorded tick state (last tick, last success, last failure reason with credentials scrubbed), source health, provider metrics, and findings.",
       annotations: { readOnlyHint: true },
     },
     async () => guarded(async () => withContext(async (ctx) => withMeta(ctx, await opDoctor(ctx)))),
@@ -860,15 +867,18 @@ export function buildServer(): McpServer {
     {
       title: "Evidence list",
       description:
-        "Recent evidence rows: hashes, source, observation id, observed vs captured time. This is the audit trail behind every claim.",
+        "Evidence rows: hashes, source, observation id, observed vs captured time. This is the audit trail behind every claim. Pass `target` (username, @handle, profile URL or target id) for one account's rows; without it the ledger is everything this owner recorded, which is a different question.",
       annotations: { readOnlyHint: true },
       inputSchema: {
         limit: z.number().int().min(1).max(200).optional(),
+        target: z.string().min(1).optional(),
       },
     },
     async (args) =>
       guarded(async () =>
-        withContext(async (ctx) => withMeta(ctx, await opEvidence(ctx, { limit: args.limit }))),
+        withContext(async (ctx) =>
+          withMeta(ctx, await opEvidence(ctx, { limit: args.limit, target: args.target })),
+        ),
       ),
   );
 
@@ -1008,7 +1018,10 @@ export function buildServer(): McpServer {
           ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
           ...(args.maxPosts !== undefined ? { maxPosts: args.maxPosts } : {}),
         });
-        return envelope(dossier, liveReadMeta("public-page", "mcp"));
+        return envelope(
+          dossier,
+          liveReadMeta("public-page", "mcp", undefined, dossier.source.sourceId),
+        );
       }),
   );
 
@@ -1035,7 +1048,7 @@ export function buildServer(): McpServer {
           url: args.url,
           ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
         });
-        return envelope(post, liveReadMeta("public-post", "mcp"));
+        return envelope(post, liveReadMeta("public-post", "mcp", undefined, post.source.sourceId));
       }),
   );
 
@@ -1068,7 +1081,7 @@ export function buildServer(): McpServer {
           ...(args.chromePath !== undefined ? { chromePath: args.chromePath } : {}),
           ...(args.maxHighlights !== undefined ? { maxHighlights: args.maxHighlights } : {}),
         });
-        return envelope(dossier, liveReadMeta("anonstories", "mcp"));
+        return envelope(dossier, liveReadMeta("anonstories", "mcp", undefined, dossier.source.sourceId));
       }),
   );
 

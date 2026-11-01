@@ -1,6 +1,14 @@
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createDb, listJobsForTarget, runMigrations, seed, type DatabaseHandle } from "@igtrack/database";
+import {
+  createDb,
+  listJobsForTarget,
+  recordSchedulerTickFailure,
+  recordSchedulerTickSuccess,
+  runMigrations,
+  seed,
+  type DatabaseHandle,
+} from "@igtrack/database";
 import { CapabilityName } from "@igtrack/core";
 import type { InstagramProvider } from "@igtrack/core";
 import { createContext, type CliContext } from "../src/context.js";
@@ -8,13 +16,14 @@ import { runResearch } from "../src/commands/intel.js";
 import { runDossier } from "../src/commands/read.js";
 import { runScans } from "../src/commands/scans.js";
 import { doctorExitCode, renderDoctorHuman, runDoctor } from "../src/commands/setup.js";
-import { CliError, UsageError } from "../src/output.js";
+import { CliError, scrubCredentials, UsageError } from "../src/output.js";
 import {
   opActivity,
   type DoctorReport,
   opClaimAdd,
   opClaimList,
   opClaimRetract,
+  opDoctor,
   opDossier,
   opEvidence,
   opInsights,
@@ -1125,6 +1134,45 @@ describe.skipIf(!databaseUp)("provider readiness", () => {
     });
     // Two full doctor passes, each opening its own context: generous under
     // load rather than a silent 5s default.
+  }, 30_000);
+
+  it("reports what the scheduler recorded, not only what the environment claims", async () => {
+    // `enabled: true` is a statement about one variable. The worker writes a
+    // reason into scheduler_state when a tick fails, and until now nothing read
+    // it back — a scheduler that had been failing for a day still looked fine on
+    // the screen built to answer "is this deployment working?".
+    const reason =
+      "identity gate exploded: connect postgres://igtrack:secret-value-here@db.internal:5432/igtrack refused";
+    await recordSchedulerTickFailure(ctx.db, new Date(), {
+      message: reason,
+      failedAt: new Date().toISOString(),
+    });
+
+    const report = await opDoctor(ctx);
+    expect(report.scheduler.lastTickAt).not.toBeNull();
+    const printed = report.scheduler.lastError ?? "";
+    expect(printed).toContain("identity gate exploded");
+    // Invariant 8: the reason is printed, the credential inside it is not — on
+    // the payload, in the findings, and therefore on the screen.
+    expect(printed).not.toContain("secret-value-here");
+    expect(printed).toContain("igtrack:***@db.internal");
+    expect(report.findings.join("\n")).toContain("the last recorded tick failed");
+    expect(report.findings.join("\n")).not.toContain("secret-value-here");
+    const human = renderDoctorHuman(report);
+    expect(human).toContain("LAST TICK FAILED");
+    expect(human).not.toContain("secret-value-here");
+
+    // A driver error also quotes the request URL it was built from, token in the
+    // query — the other shape the screen must not print whole.
+    expect(
+      scrubCredentials("GET https://graph.facebook.com/v23.0/me?access_token=EEE-token failed"),
+    ).toContain("access_token=***");
+
+    await recordSchedulerTickSuccess(ctx.db, new Date());
+    const cleared = await opDoctor(ctx);
+    expect(cleared.scheduler.lastError).toBeNull();
+    expect(cleared.scheduler.lastSuccessAt).not.toBeNull();
+    expect(cleared.findings.join("\n")).not.toContain("the last recorded tick failed");
   }, 30_000);
 
   it("13. labels the dossier's evidence and names the provider it came from", async () => {

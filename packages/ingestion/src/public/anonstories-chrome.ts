@@ -121,13 +121,24 @@ export async function connectCdp(port: number, timeoutMs: number): Promise<CdpCo
         signal: AbortSignal.timeout(Math.max(1, Math.min(2_000, deadline - Date.now()))),
       });
       if (response.ok) {
-        targets = await readBoundedJson<typeof targets>(
+        const listed = await readBoundedJson<unknown>(
           response,
           CDP_TARGET_LIST_MAX_BYTES,
           "DevTools target list",
         );
+        // The endpoint answers for other things too, and anything that is not
+        // the documented array of targets is an answer we cannot use — not a
+        // crash on the way to the refusal that explains it.
+        if (Array.isArray(listed)) {
+          targets = listed as Array<{ type: string; webSocketDebuggerUrl?: string }>;
+        } else {
+          answeredButUnusable = "answered something that is not a target list";
+        }
       } else {
         answeredButUnusable = `answered its target list with HTTP ${response.status}`;
+        // An unread body keeps its connection, and this loop polls every 200ms
+        // for up to the connect deadline.
+        await response.body?.cancel().catch(() => undefined);
       }
     } catch (err) {
       if (err instanceof ResponseTooLargeError) {
@@ -194,12 +205,33 @@ async function openSocket(url: string, deadline: number): Promise<CdpConnection>
     }
   };
 
-  const send = (method: string, params: Record<string, unknown> = {}): Promise<unknown> =>
-    new Promise((resolve, reject) => {
-      const id = ++nextId;
+  const send = (method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+    const id = ++nextId;
+    const call = new Promise<unknown>((resolve, reject) => {
       pending.set(id, { resolve, reject });
       ws.send(JSON.stringify({ id, method, params }));
     });
+    // A browser that opens the socket and then stops answering must not hang the
+    // caller: `Page.enable` waiting forever is the same dead session as one that
+    // never opened, and the operator should be told which.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const guard = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new AnonTransportError(
+              "TIMEOUT",
+              `Chrome opened its debug socket but never answered ${method}.`,
+            ),
+          ),
+        Math.max(1, deadline - Date.now()),
+      );
+    });
+    return Promise.race([call, guard]).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+      pending.delete(id);
+    });
+  };
 
   const evaluate = async (expression: string, timeoutMs: number): Promise<string> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -306,6 +338,14 @@ export function buildInPageRequestExpression(
   auth: string,
   maxBytes: number,
 ): string {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    // The bound is interpolated into the page script, so a NaN there compiles to
+    // `total > NaN` — a cap that is present, silent, and never fires.
+    throw new AnonTransportError(
+      "PROVIDER_ERROR",
+      `the in-page response cap must be a positive byte count, got ${String(maxBytes)}`,
+    );
+  }
   return `(async () => {
     try {
       const res = await fetch(${JSON.stringify(endpoint)}, {
@@ -331,7 +371,10 @@ export function buildInPageRequestExpression(
         if (part.value === undefined) continue;
         total += part.value.byteLength;
         if (total > ${maxBytes}) {
-          await reader.cancel();
+          // A failed cancel still means the answer was over the cap; letting it
+          // reject would land in the catch below and report a network failure
+          // for a read that was refused on size.
+          await reader.cancel().catch(() => undefined);
           return JSON.stringify({ status: res.status, oversize: true, bytes: total });
         }
         chunks.push(part.value);
@@ -360,7 +403,10 @@ export async function openAnonStoriesChrome(
 ): Promise<AnonStoriesTransport> {
   const executable = findChrome(options.executablePath);
   if (executable === undefined) {
-    throw new AnonTransportError("PROVIDER_ERROR", chromeUnavailableMessage());
+    throw new AnonTransportError(
+      "PROVIDER_ERROR",
+      chromeUnavailableMessage(options.executablePath),
+    );
   }
   const userAgent = options.userAgent ?? DEFAULT_CHROME_USER_AGENT;
   if (/HeadlessChrome/i.test(userAgent)) {
@@ -397,7 +443,10 @@ export async function openAnonStoriesChrome(
     }
     chrome = undefined;
     try {
-      rmSync(profileDir, { recursive: true, force: true });
+      // Chrome keeps the profile open for a moment after the kill, and on
+      // Windows that leaves the directory — with the aggregator's clearance
+      // cookie in it — behind. Retry so the session's files actually go.
+      rmSync(profileDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
     } catch {
       // Best effort: the OS reaps its own temp eventually.
     }

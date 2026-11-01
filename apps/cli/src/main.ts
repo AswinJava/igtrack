@@ -12,6 +12,7 @@ import {
   type ParsedArgs,
 } from "./output.js";
 import { COMMAND_HELP, HELP, unknownFlags } from "./help-registry.js";
+import { setRequestedOwner } from "./context.js";
 import { runConfig, runDoctor, runSetup, runStatus } from "./commands/setup.js";
 import { runAudit } from "./commands/audit.js";
 import { runInvestigate } from "./commands/investigate.js";
@@ -147,6 +148,25 @@ function runHelpTopic(args: ParsedArgs): number {
   return printHelp(key, args.flags);
 }
 
+/**
+ * Record the owner selection. `--user` is part of every command's contract, and
+ * no command reads the parsed flags — each builds its own context — so the
+ * router is the one place that can honour it. A bare `--user` is refused rather
+ * than read as "no selection": silently falling back to the environment, or to
+ * an ambiguity refusal, is the drop this gate exists to prevent.
+ */
+function selectOwner(flags: Record<string, string | boolean>): void {
+  const value = flags["user"];
+  if (value === undefined) return;
+  if (typeof value !== "string" || value.trim() === "") {
+    throw new UsageError(
+      "--user needs the owner's email, as in `igtrack status --user someone@example.com`. " +
+        "No owner was named, so nothing ran.",
+    );
+  }
+  setRequestedOwner(value);
+}
+
 async function dispatch(args: ParsedArgs): Promise<number> {
   const helpTopic = helpTopicRequested(args);
   if (helpTopic !== undefined) return printHelp(helpTopic, args.flags);
@@ -162,6 +182,8 @@ async function dispatch(args: ParsedArgs): Promise<number> {
         `Run \`igtrack ${args.command} --help\` for the flags it reads.`,
     );
   }
+
+  selectOwner(args.flags);
 
   switch (args.command) {
     case "ask":

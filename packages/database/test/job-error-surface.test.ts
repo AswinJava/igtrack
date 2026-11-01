@@ -87,4 +87,26 @@ describe.skipIf(!databaseUp)("recorded failure reasons reach the health surface"
     expect(kept.split(" ").length).toBeGreaterThan(10);
     expect(long.startsWith(kept)).toBe(true);
   });
+
+  it("says where a cut scheduler reason actually lives, not in a job", async () => {
+    // The queue summary's note points at the job row that stores the whole text.
+    // A scheduler tick has no job: the scheduler_state row IS the record, so the
+    // shared note told the operator to go look for a job that never existed.
+    const long = `scheduler tick failed. ${"raise the batch limit or shorten the scan interval ".repeat(40)}`;
+    await recordSchedulerTickFailure(handle.db, new Date(), {
+      message: long,
+      failedAt: new Date().toISOString(),
+    });
+
+    const snapshot = await getOperationsSnapshot(handle.db);
+    const reason = snapshot.scheduler.lastError ?? "";
+    expect(reason.length).toBeLessThan(long.length);
+    expect(reason).not.toContain("the job stores the full text");
+    expect(reason).toContain("the scheduler row holds the recorded reason");
+    const kept = reason.split(" … (cut for this summary")[0] ?? "";
+    expect(kept.endsWith(" ")).toBe(false);
+    expect(long.startsWith(kept)).toBe(true);
+
+    await recordSchedulerTickSuccess(handle.db, new Date());
+  });
 });

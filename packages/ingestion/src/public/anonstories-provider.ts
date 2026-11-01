@@ -244,7 +244,7 @@ export class AnonStoriesProvider implements InstagramProvider {
     this.queueBoundMs = config.queueBoundMs ?? ANON_QUEUE_BOUND_MS;
     this.now = config.now ?? (() => new Date());
     if (this.transportFactory === undefined && findChrome(this.chromePath) === undefined) {
-      throw new Error(`igtrack anonstories provider: ${chromeUnavailableMessage()}`);
+      throw new Error(`igtrack anonstories provider: ${chromeUnavailableMessage(this.chromePath)}`);
     }
   }
 

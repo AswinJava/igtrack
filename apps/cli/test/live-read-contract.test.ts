@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CapabilityStatus, Confidence, SourceKind, type PostReference } from "@igtrack/core";
-import type { AnonStoriesProvider, PublicWebProvider } from "@igtrack/ingestion";
+import { AnonStoriesProvider, PublicWebProvider } from "@igtrack/ingestion";
 import {
   liveReadMeta,
   opAnonstoriesDossier,
@@ -225,6 +225,33 @@ describe("live-read evidence labels", () => {
     expect(liveReadMeta("public-post", "cli").note).toContain("media page");
   });
 
+  it("labels a live read with the source id the bytes carry", () => {
+    // The payload is the observation and it names its own source; the envelope
+    // restates that. A remembered constant would be a second source of truth, so
+    // a provider that moved to a new id would print provenance its own data
+    // contradicts — and evidence rows are keyed by the id the provider recorded.
+    expect(liveReadMeta("public-page", "cli", undefined, "public:web:v2").sourceId).toBe(
+      "public:web:v2",
+    );
+    // A blank observation is not a new id: the label's own value still answers.
+    expect(liveReadMeta("public-page", "cli", undefined, "   ").sourceId).toBe("public:web:v1");
+  });
+
+  it("keeps the fallback equal to the id the shipped provider stamps", () => {
+    // Built through the provider's own test seam, so the id is read without a
+    // browser and the two packages cannot drift apart unnoticed.
+    expect(liveReadMeta("public-page", "cli").sourceId).toBe(
+      new PublicWebProvider({ fetchHtml: async () => "" }).sourceId,
+    );
+    expect(liveReadMeta("anonstories", "cli").sourceId).toBe(
+      new AnonStoriesProvider({
+        transportFactory: async () => {
+          throw new Error("never opened: this test reads a label, not a page");
+        },
+      }).sourceId,
+    );
+  });
+
   it("names the sources a viewer report actually read", async () => {
     const read = await opViewer(
       { input: "aurora.wilde" },
@@ -240,12 +267,13 @@ describe("live-read evidence labels", () => {
     expect(viewerMeta(read, "mcp").studio).toBe("mcp");
 
     const publicOnly = await opViewer(
-      { input: "aurora.wilde" },
-      { publicProvider: fakePublic(), anonProvider: undefined },
+      { input: "aurora.wilde", source: "public" },
+      { publicProvider: fakePublic(), anonProvider: fakeAnon() },
     );
+    expect(viewerMeta(publicOnly, "mcp").sourceId).toBe("viewer:public:web:v1");
 
     // Neither source could be constructed, so the report states what it read:
-    // nothing. A label of "public+anonstories" here would be a false claim.
+    // nothing. A label naming any source here would be a false claim.
     const unread = await opViewer({ input: "aurora.wilde", chromePath: NO_BROWSER });
     expect(viewerMeta(unread, "cli").sourceId).toBe("viewer:v1");
     expect(unread.tabs.map((tab) => tab.status)).toEqual([
@@ -291,7 +319,14 @@ describe("igtrack mcp answers the live reads through the operations layer", () =
         }),
       );
       expect(publicTool.ok).toBe(false);
-      expect(publicTool.error).toEqual({ code: "PROVIDER_UNAVAILABLE", message: (direct as CliError).message });
+      // Code and sentence are identical on both surfaces. The transport adds the
+      // number the terminal would have exited with, because a tool result has no
+      // exit status of its own and the severity is part of the refusal.
+      expect(publicTool.error).toEqual({
+        code: "PROVIDER_UNAVAILABLE",
+        message: (direct as CliError).message,
+        exitCode: (direct as CliError).exitCode,
+      });
 
       const stories = payload(
         await client.callTool({

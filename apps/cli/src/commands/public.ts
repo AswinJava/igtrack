@@ -183,13 +183,14 @@ export async function runPublic(args: ParsedArgs): Promise<number> {
     out !== undefined
       ? `Dossier written to ${out}. Live logged-out public-page observation; not an official Graph API response.`
       : undefined,
+    dossier.source.sourceId,
   );
 
   if (out !== undefined) {
     try {
       writeFileSync(
         out,
-        `${JSON.stringify(envelope(dossier, liveReadMeta("public-page", "cli")), null, 2)}\n`,
+        `${JSON.stringify(envelope(dossier, meta), null, 2)}\n`,
         "utf8",
       );
     } catch (err) {

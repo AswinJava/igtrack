@@ -3,7 +3,7 @@ import { createDb, users, type Database } from "@igtrack/database";
 import { providerFromEnv } from "@igtrack/monitoring";
 import type { InstagramProvider } from "@igtrack/core";
 import { loadProjectEnv, repoRoot, type EnvLoadResult } from "./env.js";
-import { CliError, type OutputMeta } from "./output.js";
+import { CliError, scrubCredentials, type OutputMeta } from "./output.js";
 
 // ---------------------------------------------------------------------------
 // Shared context for every command and every MCP tool.
@@ -55,7 +55,7 @@ function isSyntheticProviderName(name: string): boolean {
   return name === "fixture";
 }
 
-function describeProvider(): ProviderDescriptor {
+export function describeProvider(): ProviderDescriptor {
   const name = process.env.IGTRACK_PROVIDER ?? "fixture";
   try {
     const { provider } = providerFromEnv();
@@ -75,10 +75,16 @@ function describeProvider(): ProviderDescriptor {
     // deployment report "synthetic fixture data", which is the same class of
     // mislabel the product refuses elsewhere: the fixture provider is the only
     // synthetic source, and a graph failure is not one.
+    //
+    // The message is scrubbed at the source, not at each screen: this one
+    // string is echoed by doctor, status, the refusal reasons and the ask
+    // answers, and a provider failure built from a request URL carries the
+    // credential inside it (invariant 8). Scrubbing once here means no
+    // consumer has to remember to.
     return {
       name,
       sourceId: null,
-      error: err instanceof Error ? err.message : String(err),
+      error: scrubCredentials(err instanceof Error ? err.message : String(err)),
       synthetic: isSyntheticProviderName(name),
       provider: null,
     };
@@ -173,18 +179,35 @@ export interface UserRow {
 }
 
 /**
+ * The owner named by `--user` on the command line.
+ *
+ * Every command builds its own context and none of them sees the parsed flags,
+ * so the router records the selection once before anything runs. Without it,
+ * `--user` is a flag every help text advertises — and every "Pass --user <email>"
+ * hint points at — that no code reads, which is the silent drop the flag gate
+ * exists to refuse.
+ */
+let requestedOwnerEmail: string | undefined;
+
+/** Record the router's `--user` value; `undefined` means the flag was absent. */
+export function setRequestedOwner(email: string | undefined): void {
+  const trimmed = email?.trim() ?? "";
+  requestedOwnerEmail = trimmed === "" ? undefined : trimmed;
+}
+
+/**
  * Resolve the deployment owner.
  *
- * Precedence: explicit flag → IGTRACK_USER_EMAIL → the only user in the
- * database. Zero users means the database was never seeded (setup needed);
- * several users means the operator must say which one — the CLI refuses to pick
- * arbitrarily because every read is scoped to a user.
+ * Precedence: explicit flag → the `--user` the router recorded → IGTRACK_USER_EMAIL
+ * → the only user in the database. Zero users means the database was never
+ * seeded (setup needed); several users means the operator must say which one —
+ * the CLI refuses to pick arbitrarily because every read is scoped to a user.
  */
 export async function resolveUser(
   db: Database,
   explicit: string | undefined,
 ): Promise<UserRow> {
-  const requested = (explicit ?? process.env.IGTRACK_USER_EMAIL ?? "").trim();
+  const requested = (explicit ?? requestedOwnerEmail ?? process.env.IGTRACK_USER_EMAIL ?? "").trim();
   const selection = { id: users.id, email: users.email };
   const rows =
     requested === ""

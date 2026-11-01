@@ -327,6 +327,26 @@ function hostnameOf(rawUrl: string): string {
   return new URL(rawUrl).hostname;
 }
 
+/**
+ * A `Location` header is remote data: userinfo can carry credentials and a query
+ * can carry a token. Reasons quote where a redirect pointed in shape only — host
+ * and path, no query, never longer than a line — so an operator can see the hop
+ * without a value being echoed whole into output, logs or evidence.
+ */
+function describeTarget(location: string | null): string {
+  const raw = location?.trim() ?? "";
+  if (raw === "") return "an unnamed target";
+  let described: string;
+  try {
+    const parsed = new URL(raw);
+    described = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch {
+    described = raw.split(/[?#]/)[0] ?? "";
+  }
+  const bounded = described.slice(0, 120);
+  return bounded === "" ? "an unnamed target" : bounded;
+}
+
 // --- The fetcher ---------------------------------------------------------------
 
 export class ResearchFetcher {
@@ -425,7 +445,7 @@ export class ResearchFetcher {
         outcome = {
           state: "unverified",
           note:
-            `${url.origin}/robots.txt redirected to ${response.location ?? "an unnamed target"}, ` +
+            `${url.origin}/robots.txt redirected to ${describeTarget(response.location)}, ` +
             "which this read does not follow",
         };
       } else {
@@ -570,7 +590,9 @@ export class ResearchFetcher {
         try {
           next = new URL(response.location, url).toString();
         } catch {
-          return { ok: false, kind: "UNSAFE_URL", reason: `redirect target "${response.location}" is not a valid URL.`, httpStatus: response.status, finalUrl: current };
+          // The target is bounded and stripped: an unparseable Location is remote
+          // data, and its content is not operator output.
+          return { ok: false, kind: "UNSAFE_URL", reason: `redirect target ${describeTarget(response.location)} is not a valid URL.`, httpStatus: response.status, finalUrl: current };
         }
         current = next;
         continue;

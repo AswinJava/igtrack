@@ -291,6 +291,29 @@ describe("igtrack mcp", () => {
     }
   });
 
+  it("carries the exit code the terminal would have used for the same refusal", async () => {
+    const { client, close } = await connect();
+    try {
+      // This transport has no exit status, so dropping it would make every
+      // refusal identical: `isError` alone cannot separate "your configuration
+      // blocks this read" from "the platform said no" from "the call was
+      // malformed", and the tool descriptions point an agent at that difference.
+      // The numbers are the router's, sourced from the same CliError.
+      const malformed = await client.callTool({
+        name: "igtrack_post",
+        arguments: { url: "https://www.instagram.com/aurora.wilde/" },
+      });
+      expect(errCode(malformed)).toBe("USAGE");
+      expect(errorExit(malformed)).toBe(2); // `igtrack post <profile-url>` exits 2
+
+      const unreachable = await client.callTool({ name: "igtrack_status", arguments: {} });
+      expect(errCode(unreachable)).toBe("DB_UNAVAILABLE");
+      expect(errorExit(unreachable)).toBe(1); // not a usage error, not a configuration gap
+    } finally {
+      await close();
+    }
+  });
+
   it("rejects invalid input before touching any dependency", async () => {
     const { client, close } = await connect();
     try {
@@ -397,8 +420,8 @@ describe("igtrack mcp", () => {
   });
 });
 
-/** The typed error code in a tool result's envelope, or null when absent. */
-function errCode(result: unknown): string | null {
+/** The error envelope of a tool result, or null when it is not one of ours. */
+function errorOf(result: unknown): { code?: string; exitCode?: number } | null {
   const content = (result as { content?: unknown }).content;
   const first = Array.isArray(content) ? content[0] : undefined;
   const text =
@@ -407,9 +430,19 @@ function errCode(result: unknown): string | null {
       : "";
   if (text === "") return null;
   try {
-    const payload = JSON.parse(text) as { error?: { code?: string } };
-    return typeof payload.error?.code === "string" ? payload.error.code : null;
+    const payload = JSON.parse(text) as { error?: { code?: string; exitCode?: number } };
+    return typeof payload.error?.code === "string" ? payload.error : null;
   } catch {
     return null; // not our envelope (e.g. an SDK schema-rejection message)
   }
+}
+
+/** The typed error code in a tool result's envelope, or null when absent. */
+function errCode(result: unknown): string | null {
+  return errorOf(result)?.code ?? null;
+}
+
+/** The exit code the terminal would use for the same failure, or null when absent. */
+function errorExit(result: unknown): number | null {
+  return errorOf(result)?.exitCode ?? null;
 }

@@ -210,13 +210,14 @@ export async function runAnonstories(args: ParsedArgs): Promise<number> {
     out !== undefined
       ? `Dossier written to ${out}. Live third-party aggregator read; PUBLIC_AGGREGATOR, not a platform observation.`
       : undefined,
+    dossier.source.sourceId,
   );
 
   if (out !== undefined) {
     try {
       writeFileSync(
         out,
-        `${JSON.stringify(envelope(dossier, liveReadMeta("anonstories", "cli")), null, 2)}\n`,
+        `${JSON.stringify(envelope(dossier, meta), null, 2)}\n`,
         "utf8",
       );
     } catch (err) {

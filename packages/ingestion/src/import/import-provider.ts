@@ -81,7 +81,20 @@ function resolveRosterDir(importDir: string): string {
 // account. Reading only the bare name for one direction made an owner with more
 // than one following shard hear "your export has no following file" while the
 // files sat in front of the reader.
-function rosterFiles(dir: string, direction: "followers" | "following"): string[] {
+//
+// A file set the reader cannot order is refused rather than guessed at. Numbered
+// shards win over a bare file only when no bare file exists for that direction;
+// when both are present (two exports unpacked into one folder), choosing one and
+// reporting `complete: true` would let the loser's usernames vanish from the
+// snapshot — and a gap in the numbering (followers_1 + followers_3, an
+// interrupted download) would turn the missing shard's followers into fabricated
+// "lost followers" the moment the roster was diffed. Invariant 4: a read that
+// cannot be shown whole is never presented as whole.
+type RosterFileSet =
+  | { readonly ordered: true; readonly files: readonly string[] }
+  | { readonly ordered: false; readonly why: string };
+
+function rosterFiles(dir: string, direction: "followers" | "following"): RosterFileSet {
   const numbered: Array<{ file: string; n: number }> = [];
   let bare: string | undefined;
   for (const f of readdirSync(dir)) {
@@ -92,9 +105,29 @@ function rosterFiles(dir: string, direction: "followers" | "following"): string[
     }
   }
   numbered.sort((a, b) => a.n - b.n);
-  const files = numbered.map((x) => x.file);
-  if (files.length === 0 && bare !== undefined) return [bare];
-  return files;
+  if (numbered.length === 0)
+    return { ordered: true, files: bare === undefined ? [] : [bare] };
+
+  if (bare !== undefined) {
+    return {
+      ordered: false,
+      why:
+        `the directory holds both the single-file export (${bare}) and ` +
+        `${numbered.length} numbered shard${numbered.length === 1 ? "" : "s"} ` +
+        `(${numbered.map((x) => x.file).join(", ")})`,
+    };
+  }
+  const gap = numbered.findIndex((x, i) => x.n !== i + 1);
+  if (gap !== -1) {
+    return {
+      ordered: false,
+      why:
+        `the ${numbered.length} numbered shard${numbered.length === 1 ? "" : "s"} ` +
+        `(${numbered.map((x) => x.file).join(", ")}) are not a run from 1 — ` +
+        `${direction}_${gap + 1}.json is absent`,
+    };
+  }
+  return { ordered: true, files: numbered.map((x) => x.file) };
 }
 
 export interface ImportProviderOptions {
@@ -261,7 +294,19 @@ export class ImportProvider implements InstagramProvider {
   ): Promise<CapabilityResult<NormalizedFollowPage>> {
     const meta = this.meta(account);
     try {
-      const files = rosterFiles(this.rosterDir, direction);
+      const roster = rosterFiles(this.rosterDir, direction);
+      if (!roster.ordered) {
+        return errored(meta, {
+          kind: CapabilityErrorKind.SCHEMA_MISMATCH,
+          message:
+            `Instagram export ${direction} roster cannot be ordered: ${roster.why}. ` +
+            `Reading one set of files and ignoring the rest would report a roster the ` +
+            `bytes do not support. Keep exactly one Instagram export's ${direction} ` +
+            `files in ${this.rosterDir}.`,
+          retryable: false,
+        });
+      }
+      const files = roster.files;
       if (files.length === 0) {
         return unavailable(
           meta,

@@ -52,8 +52,7 @@
   <div class="container hero__in">
     <div class="hero__text">
       <h1>Know what changed. Prove it.</h1>
-      <p class="lead">Every number traces to an observation. Gaps stay gaps, never zero.</p>
-      <p class="hero__meta">Self-hosted, agent-native, AGPL-3.0.</p>
+      <p class="lead">Self-hosted, agent-native: every number traces to an observation, gaps are never zero.</p>
       <div class="hero__cta">
         <a class="key key--primary" href="#start">Run it in two minutes</a>
         <a class="link-quiet" href="https://github.com/AswinJava/igtrack">View on GitHub</a>
@@ -68,16 +67,16 @@
     <figure class="ledger" data-slot="ledger" data-kind="product" data-alt="IGTrack's own evidence table for the seeded demo account, transcribed from a local run of the CLI">
       <div class="ledger__bar">
         <span class="ledger__cmd">igtrack evidence aurora.wilde</span>
-        <span class="ledger__count">111 rows from the demo seed</span>
+        <span class="ledger__count">15 rows for this account</span>
       </div>
       <table>
         <thead>
           <tr><th scope="col">Observation</th><th scope="col">Source</th><th scope="col">Observed</th><th scope="col">State</th></tr>
         </thead>
         <tbody>
-          <tr><td>profile snapshot</td><td class="m"><span class="ledger__cell" data-label="source">public:web:v1</span></td><td class="m"><span class="ledger__cell" data-label="observed">13h ago</span></td><td class="state">Observed</td></tr>
-          <tr><td>55 posts</td><td class="m"><span class="ledger__cell" data-label="source">public:web:v1</span></td><td class="m"><span class="ledger__cell" data-label="observed">14h ago</span></td><td class="state">Observed</td></tr>
-          <tr><td>story mentions</td><td class="m"><span class="ledger__cell" data-label="source">fixture:v1</span></td><td class="m"><span class="ledger__cell" data-label="observed">1d ago</span></td><td class="state">Observed</td></tr>
+          <tr><td>profile snapshot</td><td class="m"><span class="ledger__cell" data-label="source">fixture:v1</span></td><td class="m"><span class="ledger__cell" data-label="observed">66d ago</span></td><td class="state">Observed</td></tr>
+          <tr><td>2 posts</td><td class="m"><span class="ledger__cell" data-label="source">fixture:v1</span></td><td class="m"><span class="ledger__cell" data-label="observed">66d ago</span></td><td class="state">Observed</td></tr>
+          <tr><td>4 story mentions</td><td class="m"><span class="ledger__cell" data-label="source">fixture:v1</span></td><td class="m"><span class="ledger__cell" data-label="observed">66d ago</span></td><td class="state">Observed</td></tr>
           <tr><td>topics from captions</td><td class="m"><span class="ledger__cell" data-label="source">derived</span></td><td class="m"><span class="ledger__cell" data-label="observed">2 captions</span></td><td class="state">Derived<span class="ledger__reason">a computation, never an observation</span></td></tr>
           <tr class="ledger__no"><td>story highlights</td><td class="m"><span class="ledger__cell" data-label="source">capability registry</span></td><td class="m"><span class="ledger__cell" data-label="observed">no row is written</span></td><td class="state state--no">Unavailable<span class="ledger__reason">the Graph API exposes no highlights edge</span></td></tr>
           <tr class="ledger__no"><td>who liked a post</td><td class="m"><span class="ledger__cell" data-label="source">capability registry</span></td><td class="m"><span class="ledger__cell" data-label="observed">no row is written</span></td><td class="state state--no">Unavailable<span class="ledger__reason">no liker edge exists on IG Media</span></td></tr>
@@ -120,14 +119,14 @@
       <figcaption class="term__bar"><span class="term__title">igtrack investigate</span><span class="term__hint">stdout, local demo seed</span></figcaption>
 <pre class="term__out"><code><span class="m">$</span> igtrack investigate aurora.wilde
 
-  <span class="b">Account</span>      @aurora.wilde, private false
-  <span class="b">Observed</span>     10 media, 3 comments, 2 tagged
-  <span class="b">Derived</span>      <span class="k">topics from 2 captions</span>
-  <span class="b">Claims</span>       1 active, 3 retracted
-  <span class="b">Gaps</span>         11 stated, each with its reason
-               highlights: <span class="w">UNAVAILABLE</span> (no edge)
-               likers: <span class="w">UNAVAILABLE</span> (no liker edge)
-  <span class="b">Evidence</span>     4 classes, never merged</code></pre>
+  <span class="b">Account</span>   @aurora.wilde, private false
+  <span class="b">Observed</span>  2 media, 3 comments
+  <span class="b">Derived</span>   <span class="k">topics from 2 captions</span>
+  <span class="b">Claims</span>    0 active, 0 retracted — nothing filed yet
+  <span class="b">Gaps</span>      11 stated, each with a reason
+            highlights: <span class="w">UNAVAILABLE</span>
+            likers: <span class="w">UNAVAILABLE</span>
+  <span class="b">Evidence</span>  3 classes, never merged</code></pre>
     </figure>
   </div>
 </section>
@@ -207,8 +206,7 @@ pnpm igtrack investigate aurora.wilde</code></pre>
     </div>
     <figure class="pane">
       <figcaption class="pane__bar"><span class="pane__title">one operations layer</span><span class="pane__hint">CLI · stdio</span></figcaption>
-<pre class="pane__out"><code>$ igtrack ask "what changed on aurora.wilde
-  in the last 7 days?"
+<pre class="pane__out"><code>$ igtrack ask "what changed in 7 days?"
 
 $ igtrack status
 <span class="m">provider, targets, queue, source health</span>
@@ -269,7 +267,7 @@ document.querySelectorAll("[data-copy]").forEach(function (b) {
   var ctx = off.getContext("2d");
   if (!ctx) return;
   var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  var glyphs = "igtrack evidence observed derived unavailable sha256 source captured hash ledger".split("");
+  var words = "evidence observed derived unavailable source captured ledger gap".split(" ");
   var lens = { x: -1, y: -1 };
   var css = getComputedStyle(document.documentElement);
   function token(name) { return css.getPropertyValue(name).trim(); }
@@ -285,10 +283,10 @@ document.querySelectorAll("[data-copy]").forEach(function (b) {
       return { x0: r.left - hr.left - 12, y0: r.top - hr.top - 12, x1: r.right - hr.left + 12, y1: r.bottom - hr.top + 12 };
     }).filter(Boolean);
   }
-  function quiet(px, py) {
+  function blocked(x0, x1, py) {
     for (var i = 0; i < zones.length; i++) {
       var z = zones[i];
-      if (px > z.x0 && px < z.x1 && py > z.y0 && py < z.y1) return true;
+      if (x1 > z.x0 && x0 < z.x1 && py > z.y0 && py < z.y1) return true;
     }
     return false;
   }
@@ -301,20 +299,26 @@ document.querySelectorAll("[data-copy]").forEach(function (b) {
     ctx.clearRect(0, 0, w, h);
     ctx.font = "10px " + token("--font-outlier");
     ctx.textBaseline = "middle";
-    for (var y = 0; y < Math.ceil(h / 16); y++) {
-      for (var x = 0; x < Math.ceil(w / 8); x++) {
-        var px = x * 8, py = y * 16 + 8;
-        if (quiet(px, py)) continue;
-        var n = Math.abs(Math.sin(x * 12.9898 + y * 78.233) * 43758.5453) % 1;
-        var ridge = Math.pow(Math.sin((x / (w / 8) + (py / h) * 0.6) * Math.PI), 2);
-        var v = n * (0.22 + ridge * 0.36);
+    var rows = Math.ceil(h / 18);
+    for (var y = 0; y < rows; y++) {
+      var py = y * 18 + 9;
+      var x = -(y % 5) * 23;
+      for (var k = y * 3; x + 40 < w; k++) {
+        var word = words[((k % words.length) + words.length) % words.length];
+        var ww = ctx.measureText(word).width;
+        x += 16;
+        if (x < 8 || x + ww > w - 8 || blocked(x - 6, x + ww + 6, py)) { x += ww; continue; }
+        var ridge = Math.pow(Math.sin((x / w * 1.6 + py / h * 0.9) * Math.PI), 2);
+        var a = 0.06 + ridge * 0.26;
         if (!reduce && lens.x >= 0) {
-          var d = Math.hypot(px - lens.x, py - lens.y);
-          if (d < 140) v = Math.min(1, v + (1 - d / 140) * 0.5);
+          var d = Math.hypot(x + ww / 2 - lens.x, py - lens.y);
+          if (d < 150) a = Math.min(0.8, a + (1 - d / 150) * 0.45);
         }
-        if (v < 0.42) continue;
-        ctx.fillStyle = tints[Math.min(tints.length - 1, Math.floor(v * tints.length))];
-        ctx.fillText(glyphs[Math.floor(n * glyphs.length) % glyphs.length], px, py);
+        ctx.globalAlpha = a;
+        ctx.fillStyle = a > 0.45 ? token("--color-accent-deep") : tints[2];
+        ctx.fillText(word, x, py);
+        ctx.globalAlpha = 1;
+        x += ww;
       }
     }
     hero.style.setProperty("--field", "url(" + off.toDataURL("image/png") + ")");
